@@ -1,0 +1,6 @@
+interface:
+  display_name: "Task Workflow"
+  short_description: "Coordinate approved development and experiment tasks"
+  default_prompt: "Use $task-workflow to enroll this development or experiment task, explore the design, and coordinate implementation and evidence-based review."
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,22 @@
+{
+  "name": "task-workflow",
+  "version": "0.1.0",
+  "description": "An opt-in workflow for approved development tasks, resources, and frozen experiments.",
+  "author": {
+    "name": "Task Workflow contributors"
+  },
+  "skills": "./skills",
+  "mcpServers": "./.mcp.json",
+  "hooks": "./hooks/hooks.json",
+  "interface": {
+    "displayName": "Task Workflow",
+    "shortDescription": "Review tasks and frozen runs",
+    "longDescription": "Coordinate explicitly enrolled development and experiment tasks, review evidence, and inspect persisted workflow status in this chat.",
+    "developerName": "Task Workflow contributors",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": "Use $task-workflow to enroll this development or experiment task."
+  }
+}

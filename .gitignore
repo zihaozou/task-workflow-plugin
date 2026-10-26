@@ -1,0 +1,28 @@
+# Generated task directories
+.task-workflow/
+.worktrees/
+.experiments/
+# User data and secrets
+.env
+.env.*
+!.env.example
+*.local.json
+results/
+outputs/
+logs/
+*.log
+# Environments, caches, and exports
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+dist/
+build/
+node_modules/
+.DS_Store
+*.zip
+*.tar.gz

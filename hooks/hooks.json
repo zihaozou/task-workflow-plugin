@@ -1,0 +1,30 @@
+{
+  "description": "Task Workflow recovery and fixed communication guidance. Review and trust hooks in the client.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/skills/task-workflow/scripts/session_hook.py\"",
+            "timeout": 5,
+            "additionalContextLimit": 1500
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${PLUGIN_ROOT}/skills/task-workflow/scripts/communication_prompt_hook.py\"",
+            "timeout": 5,
+            "additionalContextLimit": 500
+          }
+        ]
+      }
+    ]
+  }
+}
