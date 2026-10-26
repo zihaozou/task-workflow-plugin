@@ -225,7 +225,11 @@ Normal program results and the read-only context operation return a fresh
 `stage` identify the current state. `pending_questions` includes question text,
 rationale, choices, and digest; `missing_records` names synchronization gaps.
 Follow ordered `reply_fields`, `required_recording_steps`, `wait_for`, `turn_exit`,
-`approval_target`, and `allowed_next_operations`. Check `applicability` against
+`approval_target`, and `allowed_next_operations` within its `operation_scope`.
+The list guides dialogue and context steps; other task, review, run, resource,
+integration, and lifecycle operations follow the current schema, actual guards,
+and existing user authorization. Closed tasks still require authorized reopening
+before their work can change. Check `applicability` against
 the current request: direct status and ordinary replies preserve a pending wait
 without forced discussion or phase progression. `templates` links the required
 response and record structures. Refresh context after a version conflict or

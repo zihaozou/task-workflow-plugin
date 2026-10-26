@@ -49,6 +49,23 @@ class DialogueContractTests(Fixture):
         self.assertIn('exploration', result['dialogue_contract']['missing_records'])
         self.error('exploration_required', lambda: self.op('process-question', question=self.question()))
 
+    def test_operation_scope_keeps_approved_work_available_and_closed_work_guarded(self):
+        self.tree(); self.approved()
+        contract = self.contract()
+        self.assertEqual(contract['stage'], 'implementation')
+        self.assertNotIn('item-start', contract['allowed_next_operations'])
+        self.assertIn('not an exhaustive list', contract['operation_scope'])
+        self.assertIn('existing user authorization', contract['operation_scope'])
+        result = self.op('item-start', item_id='code', actor='implementer')
+        self.assertEqual(result['state']['items']['code']['status'], 'implementing')
+        self.op('task-complete', outcome='stopped', notes='The fixture user stopped work.', evidence=['Actual fixture stop request'])
+        self.assertIn('authorized reopening', self.contract()['operation_scope'])
+        self.error('task_closed', lambda: self.op('item-start', item_id='lock', actor='implementer'))
+        self.error('coordinator_required', lambda: self.op('task-reopen', actor='other', reason='Unauthorized fixture actor'))
+        self.op('task-reopen', reason='The fixture user explicitly requested resumption within the approved plan.')
+        result = self.op('item-start', item_id='lock', actor='implementer')
+        self.assertEqual(result['state']['items']['lock']['status'], 'implementing')
+
     def test_sourced_multi_round_choices_must_reach_the_generated_record(self):
         self.discussion()
         self.op('process-question', question=self.choices())

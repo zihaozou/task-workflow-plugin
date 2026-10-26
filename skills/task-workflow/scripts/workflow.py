@@ -2373,6 +2373,7 @@ def dialogue_contract(state):
         "required_recording_steps": [], "reply_fields": [], "wait_for": None,
         "turn_exit": "Continue only the current authorized action.", "approval_target": None,
         "allowed_next_operations": ["context", "status"],
+        "operation_scope": "allowed_next_operations guides dialogue and context steps for the current phase. It is not an exhaustive list of task, review, run, resource, integration or lifecycle operations. Those operations follow the current schema, actual program guards and existing user authorization. A closed task still requires authorized reopening before its work can change.",
         "templates": ["templates/conversation.md", "templates/record.md"],
         "applicability": "Apply this stage contract to related workflow work. The current user request determines scope. For a progress or status question, inspect and answer only; do not advance the stage or force a design question.",
         "recording_rule": "Record actual findings, questions, answers and decisions with their original source references before dependent work. A successful write and its returned state version are required. Never invent an answer, confirmation or approval. Preserve raw source data.",

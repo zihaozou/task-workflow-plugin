@@ -62,7 +62,12 @@ current request. A status question or ordinary message gets a direct answer;
 it does not authorize phase progression or require another design question.
 Keep any existing wait target intact. For authorized workflow progression,
 follow `reply_fields` in order, perform `required_recording_steps`, respect
-`allowed_next_operations`, and meet `turn_exit` before advancing. A pending
+`allowed_next_operations` within its `operation_scope`, and meet `turn_exit`
+before advancing. This list guides dialogue and context steps. It does not list
+every task, review, run, resource, integration, or lifecycle operation. Use the
+current schema, actual program guards, and existing user authorization for those
+operations. A closed task still requires authorized reopening before its work
+can change. A pending
 question keeps its original text and identity. Use the current `state_version`
 for mutations. Refresh context after a conflict or interruption. Preserve exact
 digests in program records and approval bindings. Show readable revision titles

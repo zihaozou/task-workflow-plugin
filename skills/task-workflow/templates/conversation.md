@@ -7,7 +7,11 @@ references in the one program-generated record.
 
 Read the fresh `dialogue_contract` before each related reply. Follow its
 `applicability`, ordered `reply_fields`, `required_recording_steps`, `wait_for`,
-`turn_exit`, `approval_target`, and `allowed_next_operations`. Direct status and
+`turn_exit`, `approval_target`, and `allowed_next_operations` within its
+`operation_scope`. This list guides dialogue and context steps. Other task,
+review, run, resource, integration, and lifecycle operations follow the current
+schema, actual guards, and existing user authorization. Closed tasks require
+authorized reopening before their work can change. Direct status and
 ordinary replies answer the current request and retain the existing wait target.
 Preserve digests in program approval bindings; show readable revision titles to
 the user without requiring long digests in conversation.

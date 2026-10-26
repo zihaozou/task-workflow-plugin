@@ -80,7 +80,11 @@ resources.
 The program returns a fresh `dialogue_contract` with task/state identity, stage,
 pending questions and digests, missing records, ordered reply fields, required
 recording steps, wait and exit conditions, exact approval target, applicability,
-and allowed next operations. The coordinator must follow it with the main skill.
+and allowed next operations. The coordinator follows this contract with the main
+skill. Its `operation_scope` limits the list to dialogue and context guidance.
+Other task, review, run, resource, integration, and lifecycle operations follow
+the current schema, actual guards, and existing user authorization. Closed tasks
+still require authorized reopening before their work can change.
 The program validates declared state, source links, and guarded transitions. It
 cannot establish the semantic truth of conversation or guarantee model obedience.
 
