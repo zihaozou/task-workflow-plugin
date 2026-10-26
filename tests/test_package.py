@@ -26,7 +26,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.5')
+        self.assertEqual(manifest['version'], '0.1.6')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -82,6 +82,8 @@ class PackageTests(unittest.TestCase):
                 self.assertTrue(content.startswith('# '))
                 self.assertTrue(content.isascii(), 'Authored templates must be English ASCII')
                 for link in re.findall(r'\]\(([^)]+\.md)\)', content):
+                    if link.startswith('https://'):
+                        continue
                     self.assertTrue((path.parent / link).is_file(), link)
         for path in (base / 'SKILL.md', base / 'references/workflow.md', ROOT / 'README.md'):
             content = path.read_text()
@@ -285,7 +287,7 @@ class ContextTests(unittest.TestCase):
             context = result['hookSpecificOutput']['additionalContext']
             self.assertIn('example', context)
             self.assertNotIn('PRIVATE', context)
-            self.assertEqual(dispatch.call_args_list[-1], mock.call('status', {'root': str(path), 'task_id': 'example'}))
+            self.assertEqual(dispatch.call_args_list[-1], mock.call('context', {'root': str(path), 'task_id': 'example'}))
 
     def test_ambiguous_binding_and_invalid_identifiers_are_quiet(self):
         with tempfile.TemporaryDirectory() as temporary:

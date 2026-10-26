@@ -51,16 +51,16 @@ class TransportTests(unittest.TestCase):
         properties = {key: {"type": "string"} for key in ("root", "task_id", "session_id")}
         self.core.command_schemas = lambda: [{"name": name, "description": name, "inputSchema": {
             "type": "object", "properties": properties, "required": list(properties), "additionalProperties": False}}
-            for name in ("init", "status", "bind-session", "recover")]
+            for name in ("init", "status", "context", "bind-session", "recover")]
         arguments = {"root": "/example", "task_id": "task-a", "session_id": "session-a"}
         state = {**arguments, "items": {}, "version": 4}
         self.server = self.module.Server()
         self.request("initialize")
         tools = self.request("tools/list")["result"]["tools"]
         for tool, core_schema in zip(tools, self.core.command_schemas()):
-            self.assertEqual(tool, {**core_schema, "annotations": {"readOnlyHint": tool["name"] == "status",
+            self.assertEqual(tool, {**core_schema, "annotations": {"readOnlyHint": tool["name"] in ("status", "context"),
                                    "destructiveHint": False, "openWorldHint": False}})
-        for name in ("init", "status", "bind-session", "recover"):
+        for name in ("init", "status", "context", "bind-session", "recover"):
             for output in ({"ok": True, "state": state, "session_bindings": {"session-a": "task-a"}},
                            {"ok": False, "error": {"code": "session_conflict", "message": "Session differs"}}):
                 with self.subTest(name=name, ok=output["ok"]):
@@ -162,11 +162,11 @@ class WireSurfaceTests(unittest.TestCase):
         self.assertEqual(len(replies), len(calls))
         self.assertEqual(replies[0]["result"]["capabilities"], {"tools": {"listChanged": False}})
         tools = replies[1]["result"]["tools"]
-        self.assertTrue({"init", "status", "bind-session", "recover", "run-execute"}.issubset({tool["name"] for tool in tools}))
+        self.assertTrue({"init", "status", "context", "bind-session", "recover", "run-execute"}.issubset({tool["name"] for tool in tools}))
         self.assertTrue(all("_meta" not in tool and "outputSchema" not in tool for tool in tools))
         for tool in tools:
-            if tool["name"] in ("init", "status", "bind-session", "recover"):
-                self.assertEqual(tool["annotations"], {"readOnlyHint": tool["name"] == "status",
+            if tool["name"] in ("init", "status", "context", "bind-session", "recover"):
+                self.assertEqual(tool["annotations"], {"readOnlyHint": tool["name"] in ("status", "context"),
                                                       "destructiveHint": False, "openWorldHint": False})
             else:
                 self.assertNotIn("annotations", tool)

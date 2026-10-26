@@ -1,76 +1,90 @@
-# Conversation structures
+# Required conversation responses
 
-Use these as content guides, not labels to recite to the user. Ask one useful question
-at a time during design discussion. The answer can reveal another question,
-return the task to exploration, or make the design ready for review. There is
-no question quota. An alternate path belongs in discussion only when it has a
-real consequence for this task.
+The main skill defines the mandatory order. These structures specify required
+content for each applicable stage. Use natural language and the user's language;
+do not recite these headings. Persist English summaries with original source
+references in the one program-generated record.
 
-## Exploration update
+Read the fresh `dialogue_contract` before each related reply. Follow its
+`applicability`, ordered `reply_fields`, `required_recording_steps`, `wait_for`,
+`turn_exit`, `approval_target`, and `allowed_next_operations`. Direct status and
+ordinary replies answer the current request and retain the existing wait target.
+Preserve digests in program approval bindings; show readable revision titles to
+the user without requiring long digests in conversation.
 
-> I found **[fact]** in **[source or revision]**. It affects **[requirement or
-> decision]** because **[consequence]**. I will **[next exploration action]**.
+## First discussion reply
 
-Keep facts separate from interpretations. Record unknowns and evidence gaps.
+1. Restate the intended result and why, with inferences identified.
+2. State relevant findings from actual context, their sources, and likely impact.
+3. Invite corrections and ask the most important unresolved question, with its
+   consequence.
 
-## One-question discussion
+Before sending: record intent, exploration, and the exact pending question.
+Wait for that answer. Do not substitute an implementation proposal for finding
+out what the user wants.
 
-> **Decision needed:** [one open question, or one multiple-choice question with
-> concrete choices].
->
-> **Why it matters:** [effect on behavior, scope, verification, or recovery].
->
-> **Known so far:** [confirmed facts and requirements with source references].
->
-> **My proposal, if useful:** [proposal and rationale, explicitly labeled].
+## Answer acknowledgement and next discussion turn
 
-Do not list speculative choices to fill a quota. A question about an important
-choice must explain its consequence. The answer is evidence for that choice;
-it does not approve unseen design details.
+1. State what the answer settles and its consequence.
+2. State new findings or corrected understanding that affect the next choice.
+3. Ask the next recorded important question and explain its consequence, or
+   present the next playback when understanding is coherent.
 
-## Playback before a design draft
+Before dependent work or a dependent question: record the actual answer source,
+update requirements and decisions and their source links, then record the next
+question. Explore and record missing facts first. Keep alternatives grounded in
+actual consequences; no count of alternatives or discussion rounds is required.
 
-> **Confirmed from your messages:** [requirements and choices, each with its
-> source reference].
->
-> **Choices you delegated:** [scope of each delegation and source reference].
->
-> **My proposals:** [unconfirmed choices and rationale].
->
-> **Still open:** [one next question, or "None for this design version."]
+## Playback
 
-When the user corrects the playback, update the record and continue discussion.
-When new facts change a settled consequence, return to the relevant question.
+1. User requirements and confirmed choices, with sources.
+2. Agent proposals and reasons, clearly still proposed.
+3. Explicitly delegated choices, exact scope, and sources.
+4. Remaining important unknowns and a request to correct or confirm this playback.
 
-## Design review and approval
+Before sending: record the playback confirmation question with
+`purpose: playback_confirmation`. Ordinary clarification questions use
+`purpose: clarification` or omit it for the compatibility default. The program
+uses this field to select the required playback response order and wait target;
+question identifiers do not encode purpose. After the answer:
+record its source and corrected requirements/decisions before `process-playback`.
+Wait for actual confirmation. Resume discussion when an important gap remains.
 
-The design draft has a revision and source references. Ask an independent
-reviewer to identify gaps against confirmed requirements and delegated choice
-scope. Revise and review again when material gaps remain. Present the reviewed
-design version and its meaningful effects to the user. Ask for approval of that
-specific version. Record the user-visible approval source and approved revision.
+## Reviewed design and approval
 
-Example: "The reviewed design is revision D3 at [reference]. It selects
-[behavior] and requires [scope]. Do you approve D3 for implementation planning?"
+1. Present the actual coherent design and its exact readable revision and title.
+2. State the independent gap-review outcome and meaningful effects.
+3. Ask for approval of that exact design for planning.
+
+Before sending: record the design and independent review for the same digest.
+Wait for user approval. Record its actual source with `process-design-approve`
+before preparing the implementation plan. New important reviewer questions return
+to discussion before dependent work.
 
 ## Plan approval
 
-Create the implementation plan only after design approval. Link the plan to
-the approved design revision. Show owned work, verification, review, integration,
-and recovery. Ask the user to approve that plan revision for implementation.
-Record the approval source, plan revision, and any limits in the approval.
+1. Show the exact plan revision and title and approved design it implements.
+2. Show work items, ownership, dependencies, verification, independent reviews,
+   integration scope, and recovery.
+3. Ask for approval of that exact plan for implementation.
 
-Example: "Plan P2 implements approved design D3 through [work items]. It will
-verify [outcomes]. Do you approve P2?"
+Before sending: record the plan. Wait for approval. Record its actual source with
+`process-plan-approve` before implementation. Preserve separate integration
+permission and any limits in the approval.
 
-## Reentry when an important choice changes
+## Execution, review, and delivery
 
-> The new fact at [reference] changes [confirmed design or delegated scope].
-> The affected choice is [choice]. I will return to discussion before taking
-> the dependent action. [One useful question with consequence.]
+1. State the new observed result and current item or task state.
+2. Give material verification and actual requirements/quality/overall verdicts.
+3. State the next allowed action or actual missing decision and its consequence.
 
-Use this generic authority check at every phase: if the next action depends on
-an important choice that the confirmed design and explicit delegation do not
-settle, ask the user and return to discussion. Do not infer approval of new
-details from a broad "go ahead." Routine implementation within approved scope
-continues without a new approval.
+Record evidence and transitions before claiming them. Distinguish a worker claim
+from inspected evidence and review acceptance. Continue authorized routine work.
+A status-only request gets the requested status without forced phase progression.
+
+## Reentry
+
+State the new evidence, affected choice, and consequence. Record `process-reenter`
+and the exact question before asking it. Wait for the answer, synchronize sources,
+and revise only affected requirements, decisions, design, plan, and approvals.
+Preserve unaffected facts and evidence. A changed revision needs its own approval.

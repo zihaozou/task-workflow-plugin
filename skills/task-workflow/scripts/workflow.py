@@ -506,6 +506,8 @@ def validate(operation, args):
             fail("invalid_arguments", "Timeout must be positive seconds.")
 
 def require_approved(state):
+    if state.get("process", {}).get("design") and state["process"]["stage"] not in ("implementation", "delivery"):
+        fail("discussion_required", "Complete the current discussion and exact design and plan approvals before execution.")
     if not summary(state)["approved"]:
         fail("approval_required", "Explicit approval of the current design is required.")
     if state.get("process"):
@@ -1724,6 +1726,37 @@ def find_registered_root(cwd):
                 return candidate
     return None
 
+def session_dialogue_context(cwd, session_id):
+    """Read only the explicitly selected task in the current verified project."""
+    if not isinstance(session_id, str) or re.fullmatch(r"[A-Za-z0-9_-]+", session_id) is None:
+        return None
+    if not isinstance(cwd, str) or any(ord(character) < 32 for character in cwd):
+        return None
+    path = Path(cwd)
+    if not path.is_absolute() or not path.is_dir():
+        return None
+    root = find_registered_root(path)
+    if root is None:
+        return None
+    root, store = store_dir(str(root))
+    selected = session_bindings(store).get(session_id)
+    if not isinstance(selected, str):
+        return None
+    identifier(selected)
+    task_path = task_dir(store, selected)
+    if not task_path.is_dir():
+        return None
+    state, _ = load_events(task_path)
+    if state.get("session_id") != session_id or state["root"] != str(root):
+        return None
+    if session_bindings(store).get(session_id) != selected:
+        return None
+    contract = dialogue_contract(state)
+    return {"root": str(root), "session_id": session_id, "status_tool": "context",
+            "task": summary(state), "dialogue_contract": contract, "templates": contract["templates"],
+            "recovery_guidance": "Use this current state version and stage for the related request. Read-only progress questions authorize inspection only. Record actual incoming answers before dependent work; hook delivery grants no authorization."}
+
+
 def registered_task_trees(state):
     store = Path(state['root']) / '.task-workflow'
     result = []
@@ -2045,7 +2078,7 @@ def reconcile_release(args, state, store):
     return {'resource': resource_projection(store, resource)}
 
 
-def dispatch(operation, arguments):
+def _dispatch(operation, arguments):
     validate(operation, arguments)
     args = copy.deepcopy(arguments)
     if operation == "schema":
@@ -2064,15 +2097,18 @@ def dispatch(operation, arguments):
         return release_resource(args, root, store)
     if operation == "run-prepare":
         return prepare_run_staged(args, root, store)
-    if operation in ("status", "list"):
+    if operation in ("status", "list", "context"):
         if args.get("task_id"):
             state, _ = load_events(task_dir(store, args["task_id"]))
-            return {"ok": True, "state": state, "summary": summary(state), "resources": project_resources(store), "session_bindings": session_bindings(store)}
+            result = {"ok": True, "state": state, "summary": summary(state), "session_bindings": session_bindings(store)}
+            if operation != "context":
+                result["resources"] = project_resources(store)
+            return result
         tasks = []
         for path in sorted((store / "tasks").iterdir()):
             if path.is_dir() and not path.is_symlink():
                 state, _ = load_events(path)
-                tasks.append(summary(state))
+                tasks.append({**summary(state), "dialogue_contract": dialogue_contract(state)})
         return {"ok": True, "tasks": tasks, "session_bindings": session_bindings(store)}
     path = task_dir(store, args["task_id"])
     if not path.is_dir():
@@ -2218,11 +2254,29 @@ def dispatch(operation, arguments):
         return {"ok": True, "state": state, "summary": summary(state), **result}
 
 
+def dispatch(operation, arguments):
+    """Attach the dialogue contract to every successful task-bearing result."""
+    result = _dispatch(operation, arguments)
+    if result.get("ok") is not True:
+        return result
+    state = result.get("state")
+    task_id = arguments.get("task_id") or result.get("resource", {}).get("owner_task_id")
+    if not isinstance(state, dict) and task_id:
+        _, store = store_dir(arguments["root"])
+        state, _ = load_events(task_dir(store, task_id))
+    if isinstance(state, dict):
+        result["dialogue_contract"] = dialogue_contract(state)
+    if operation == "context":
+        return {key: value for key, value in result.items() if key != "state" and key != "resources"}
+    return result
+
+
 COMMANDS = {
     "schema": spec("Discover operation schemas."),
     "init": spec("Explicitly enroll an existing task worktree or a base placeholder awaiting worktree-prepare.", {"task_id": "string", "title": "string", "actor": "string", "authorization_source": "string", "project": "string"}, {"worktree": "string", "coordinator": "string", "environment_registry": "object", "owned_worktree": "boolean", "integration_required": "boolean", "session_id": "string"}),
     "worktree-prepare": mutation("Explicitly create or reuse this task's reserved development worktree; path is project/.worktrees/task-id.", {"expected_base": "string", "authorization_source": "string"}, {"branch": "string"}),
     "status": spec("Read authoritative task state without modifying it.", optional={"task_id": "string"}),
+    "context": spec("Read the current task dialogue contract and required recording steps without modifying state.", {"task_id": "string"}),
     "list": spec("List task summaries without modifying state."),
     "recover": mutation("Validate events and rebuild state and record projections."),
     "bind-session": mutation("Explicitly select this enrolled task for its known host session. Preserve historical task associations and reject changing the task's session.", {"session_id": "string"}),
@@ -2271,6 +2325,202 @@ def new_process():
             "design": None, "design_review": None, "design_approval": None,
             "plan": None, "plan_approval": None, "history": [],
             "provenance": {"requirement_origins": {}, "confirmed_requirements": {}, "confirmed_decisions": {}}}
+
+
+def discussion_bindings(process):
+    """Bind discussion summaries and approvals to the facts actually recorded."""
+    return {key + "_digest": digest(process[key]) for key in
+            ("intent", "exploration", "questions", "requirements", "decisions")}
+
+
+def playback_is_current(process):
+    playback = process.get("playback")
+    if not playback:
+        return False
+    # Existing protocol 2 records did not bind these three fields. Keep them
+    # readable; the next discussion mutation requires a fresh complete playback.
+    bindings = discussion_bindings(process)
+    return all(playback.get(key) == value for key, value in bindings.items()
+               if key in playback or key in ("requirements_digest", "decisions_digest"))
+
+
+def question_digest(question):
+    return digest({key: value for key, value in question.items()
+                   if key not in ("status", "answer", "actor", "time", "answer_history")})
+
+
+def unresolved_unknowns(process):
+    resolved = {unknown for question in process["questions"] if question["status"] == "resolved"
+                for unknown in question.get("unknowns", [])}
+    return [unknown for unknown in (process.get("exploration") or {}).get("unknowns", [])
+            if unknown not in resolved]
+
+
+def unrecorded_choices(process):
+    """A reply to structured choices needs a sourced decision before design."""
+    return [question["id"] for question in process["questions"]
+            if question["status"] == "resolved" and question.get("choices")
+            and not any(entry.get("question_id") == question["id"] and entry["status"] == "confirmed"
+                        for entry in process["decisions"])]
+
+
+def dialogue_contract(state):
+    """Return the current reply and recording obligations without model inference."""
+    process = state.get("process")
+    stage = (process or {}).get("stage", "legacy")
+    contract = {"contract_version": 1, "task_id": state["task_id"], "state_version": state["version"],
+        "stage": stage, "pending_questions": [], "latest_answer": None, "missing_records": [],
+        "required_recording_steps": [], "reply_fields": [], "wait_for": None,
+        "turn_exit": "Continue only the current authorized action.", "approval_target": None,
+        "allowed_next_operations": ["context", "status"],
+        "templates": ["templates/conversation.md", "templates/record.md"],
+        "applicability": "Apply this stage contract to related workflow work. The current user request determines scope. For a progress or status question, inspect and answer only; do not advance the stage or force a design question.",
+        "recording_rule": "Record actual findings, questions, answers and decisions with their original source references before dependent work. A successful write and its returned state version are required. Never invent an answer, confirmation or approval. Preserve raw source data.",
+        "authority_rule": "Allowed operations describe recorded prerequisites, not user authorization. Hook delivery grants no authorization."}
+    entrypoint = Path(__file__).resolve()
+    skill_root = entrypoint.parent.parent
+    runtime = {"workflow_entrypoint": str(entrypoint)}
+    if (skill_root / "SKILL.md").is_file():
+        runtime["main_skill"] = str(skill_root / "SKILL.md")
+        runtime["template_paths"] = [str(skill_root / name) for name in contract["templates"]
+                                     if (skill_root / name).is_file()]
+    contract["current_runtime"] = runtime
+    contract["recovery_rule"] = "Use the current runtime entrypoint or current native workflow tools. When recovering or upgrading an existing chat, read the current main skill and stage templates before workflow progress; retained older code and guidance can be stale."
+    if not process:
+        contract["reply_fields"] = ["Current recorded result", "Next authorized action"]
+        return contract
+
+    def missing(name, operation, instruction):
+        contract["missing_records"].append(name)
+        contract["required_recording_steps"].append({"operation": operation, "instruction": instruction})
+
+    pending = process_pending(process)
+    contract["pending_questions"] = [{**copy.deepcopy(question), "question_digest": question_digest(question)}
+                                     for question in pending]
+    resolved = [question for question in process["questions"] if question["status"] == "resolved" and question.get("answer")]
+    if resolved:
+        question = resolved[-1]
+        latest = {"question_id": question["id"], "question_text": question["text"],
+                  "answer": copy.deepcopy(question["answer"]),
+                  "linked_decisions": [copy.deepcopy(entry) for entry in process["decisions"]
+                                       if entry.get("question_id") == question["id"]]}
+        selected = next((choice for choice in question.get("choices", [])
+                         if choice["id"] == question["answer"].get("choice_id")), None)
+        if selected is not None:
+            latest["selected_choice"] = copy.deepcopy(selected)
+        contract["latest_answer"] = latest
+    if not process["intent"]:
+        missing("intent", "process-intent", "Record the user's goal, reason and success criteria with the actual user source.")
+    elif not process["exploration"]:
+        missing("exploration", "process-exploration", "Record inspected behavior, evidence references and current unknowns.")
+    if stage in ("exploration", "discussion"):
+        if process["intent"]:
+            contract["allowed_next_operations"].append("process-exploration")
+        contract["allowed_next_operations"].append("process-intent")
+        if process["intent"] and process["exploration"]:
+            contract["allowed_next_operations"].append("process-decision")
+            if pending:
+                contract["allowed_next_operations"].append("process-answer")
+            else:
+                if not unrecorded_choices(process):
+                    contract["allowed_next_operations"] += ["process-question", "process-requirements"]
+                if not unresolved_unknowns(process) and not unrecorded_choices(process):
+                    contract["allowed_next_operations"].append("process-playback")
+        for question in pending:
+            missing("answer:" + question["id"], "process-answer", "Record the actual reply to " + question["id"] + " with its source before proceeding.")
+        for unknown in unresolved_unknowns(process):
+            missing("unknown:" + unknown, "process-exploration", "Investigate this factual unknown or link it to one sourced question: " + unknown)
+        for question_id in unrecorded_choices(process):
+            missing("decision:" + question_id, "process-decision", "Record the actual outcome as a confirmed decision linked to " + question_id + " and its answer source; preserve agent proposals separately.")
+        if process["exploration"] and not pending:
+            if not process["requirements"]:
+                missing("requirements", "process-requirements", "Record the confirmed scope, constraints and acceptance requirements.")
+            for entry in process["requirements"]:
+                if entry["status"] != "confirmed":
+                    missing("requirement_confirmation:" + entry["id"], "process-requirements", "Obtain and record actual confirmation for " + entry["id"] + ".")
+            if process["requirements"] and not any(entry["kind"] == "acceptance" for entry in process["requirements"]):
+                missing("acceptance_requirement", "process-requirements", "Record an observable acceptance requirement with its actual source.")
+            for entry in process["decisions"]:
+                if entry["status"] == "proposed":
+                    missing("decision_confirmation:" + entry["id"], "process-decision", "Resolve the recorded proposal through a sourced confirmation or rejection.")
+            if not playback_is_current(process):
+                missing("playback", "process-playback", "Present current confirmed requirements and choices separately from proposals; record the actual user confirmation.")
+            if not contract["missing_records"]:
+                contract["allowed_next_operations"].append("process-design")
+
+    history = process.get("history", [])
+    answer_index = max((index for index, entry in enumerate(history) if entry["operation"] == "process-answer"), default=-1)
+    reset_index = max((index for index, entry in enumerate(history)
+                       if entry["operation"] in ("process-intent", "process-exploration", "process-reenter")), default=-1)
+    answered = answer_index > reset_index
+    reentry = bool(pending and any(entry["operation"] == "process-reenter"
+                                  and entry.get("entry_id") == pending[0]["id"] for entry in history))
+    if stage == "exploration":
+        contract["dialogue_mode"] = "first_reply"
+        contract["reply_fields"] = ["User goal and why it matters", "Inspected findings, sources and impact", "Correction invitation and one useful question when a user decision is needed"]
+    elif stage == "discussion":
+        if pending:
+            fields = (["What the recorded answer settled", "Meaningful new findings and impact", "One next recorded question and its consequence"] if answered else
+                      ["User goal and why it matters", "Inspected findings, sources and impact", "Correction invitation and one recorded question with its consequence"])
+            contract.update(dialogue_mode="answer_acknowledgment" if answered else "first_reply",
+                reply_fields=fields + ["Recorded choices and consequences, when present", "Agent proposal clearly attributed, when useful"],
+                wait_for="The user's answer to " + pending[0]["id"], turn_exit="Ask the one recorded question and end the turn. Record the actual answer on the next related prompt before dependent work.")
+            if reentry and not answered:
+                contract.update(dialogue_mode="reentry", reply_fields=["New fact and its source", "Affected confirmed design or delegated scope", "One recorded question and its consequence"])
+            if pending[0].get("purpose", "clarification") == "playback_confirmation":
+                contract.update(dialogue_mode="playback",
+                    reply_fields=["Confirmed user requirements and choices with sources", "Agent proposals", "Delegated choices and authority", "Remaining unknowns and a request to confirm this playback"],
+                    wait_for="The user's confirmation or correction of the recorded playback",
+                    turn_exit="Present the recorded playback in this order, ask its one confirmation question and end the turn. Record the actual answer before recording confirmed playback.")
+        else:
+            contract.update(dialogue_mode="playback",
+                reply_fields=["Confirmed user requirements and choices with sources", "Agent proposals", "Delegated choices and authority", "Remaining unknowns and a request to confirm this playback"],
+                wait_for="An answer or confirmation when the presented discussion requires one", turn_exit="If a question or playback confirmation is needed, ask it and end the turn. Otherwise prepare the design from current confirmed records.")
+            if not process["requirements"] or unrecorded_choices(process):
+                contract["dialogue_mode"] = "answer_acknowledgment" if answered else "first_reply"
+                contract["reply_fields"] = (["What the recorded answer settled", "Meaningful new findings and impact", "One next question or the current playback"] if answered else
+                    ["User goal and why it matters", "Inspected findings, sources and impact", "Correction invitation and one useful question when a user decision is needed"])
+            if playback_is_current(process) and not contract["missing_records"]:
+                contract.update(dialogue_mode="design_preparation", wait_for=None,
+                    turn_exit="Prepare the design from the current confirmed discussion; obtain independent review before asking for approval.")
+    elif stage in ("design", "design_review"):
+        contract["reply_fields"] = ["Current design revision and behavior", "Requirement and decision coverage", "Independent review findings", "Required revisions or next review action"]
+        contract["allowed_next_operations"] += ["process-design", "process-design-review"] if stage == "design_review" else ["process-design"]
+        missing("accepted_design_review", "process-design-review", "Record an independent review of the exact current design revision before requesting design approval.")
+    elif stage == "design_confirmation":
+        design = process["design"]
+        contract["approval_target"] = {"kind": "design", "version": design["version"], "digest": design["digest"]}
+        contract.update(reply_fields=["Reviewed design revision and source", "Selected behavior and meaningful effects", "Review outcome", "Approval request for this exact design revision"],
+            wait_for="Explicit user approval of the displayed design revision", turn_exit="Present the reviewed design, ask for its approval and end the turn.")
+        contract["allowed_next_operations"] += ["process-design", "process-design-review", "process-design-approve"]
+        missing("design_approval", "process-design-approve", "Record the actual user approval of the exact displayed design digest.")
+    elif stage == "plan":
+        contract["reply_fields"] = ["Approved design revision", "Implementation items and dependencies", "Verification and review", "Integration and recovery", "Plan revision to confirm"]
+        contract["allowed_next_operations"].append("process-plan")
+        missing("plan", "process-plan", "Record the implementation plan linked to the approved design before requesting plan approval.")
+    elif stage == "plan_confirmation":
+        plan = process["plan"]
+        contract["approval_target"] = {"kind": "plan", "version": plan["version"], "digest": plan["digest"], "design_digest": plan["design_digest"]}
+        contract.update(reply_fields=["Plan revision and approved design", "Owned work and dependencies", "Verification, review, integration and recovery", "Approval request for this exact plan revision"],
+            wait_for="Explicit user approval of the displayed implementation plan", turn_exit="Present the plan, ask for its approval and end the turn.")
+        contract["allowed_next_operations"] += ["process-plan", "process-plan-approve"]
+        missing("plan_approval", "process-plan-approve", "Record the actual user approval of the exact displayed plan digest before implementation.")
+    elif stage in ("implementation", "delivery"):
+        contract["templates"] += ["templates/worker-briefs.md", "templates/worker-reports.md"]
+        if "template_paths" in runtime:
+            runtime["template_paths"] = [str(skill_root / name) for name in contract["templates"]
+                                         if (skill_root / name).is_file()]
+        contract["reply_fields"] = ["Observed result and evidence", "Current verification and review outcome", "Material blocker or next authorized action"]
+        if design_is_approved(state) and plan_is_approved(state) and not pending:
+            contract["authorized_work"] = "Continue the current authorized action within the approved plan, using its item, execution and review guards."
+        else:
+            missing("current_approval_dependencies", "process-reenter", "Restore discussion and current design and plan approvals before dependent execution.")
+    if process["intent"] and process["exploration"] and not pending and not unrecorded_choices(process):
+        contract["allowed_next_operations"].append("process-reenter")
+    if state.get("task_lifecycle", {}).get("status") == "complete":
+        contract.update(wait_for=None, turn_exit="Report the recorded closed-task result. Reopen only for an authorized new action.",
+                        allowed_next_operations=["context", "status", "bind-session", "recover", "task-reopen"])
+    return contract
 
 
 def require_legacy_process(state):
@@ -2334,6 +2584,9 @@ def design_is_approved(state):
             and process["design"]["intent_digest"] == digest(process["intent"])
             and process["design"]["requirements_digest"] == digest(process["requirements"])
             and process["design"]["decisions_digest"] == digest(process["decisions"]))
+        if valid:
+            valid = all(process["design"].get(key, value) == value
+                        for key, value in discussion_bindings(process).items())
     return valid
 
 
@@ -2364,10 +2617,18 @@ def require_discussed(process):
         fail("exploration_required", "Record intent and exploration evidence first.")
     if process_pending(process):
         fail("question_pending", "Resolve the current key question before advancing.")
-    if not process["playback"]:
-        fail("playback_required", "Record a user-confirmed playback of the current discussion first.")
-    if process["playback"].get("requirements_digest") != digest(process["requirements"]) or process["playback"].get("decisions_digest") != digest(process["decisions"]):
+    require_discussion_records(process)
+    if not playback_is_current(process):
         fail("playback_required", "Confirm playback of the current requirements and choices before design.")
+
+
+def require_discussion_records(process):
+    if unresolved_unknowns(process):
+        fail("unknowns_unresolved", "Investigate the remaining exploration unknowns or resolve their linked questions first.")
+    if unrecorded_choices(process):
+        fail("decision_record_required", "Record each reply to structured choices as a confirmed decision linked to its actual answer source.")
+    for entry in process["decisions"]:
+        validate_answer_decision(process, entry)
 
 
 def process_requirements(process):
@@ -2421,19 +2682,61 @@ def process_scope_digest(state, item, rev):
 
 
 def process_question(process, question, actor):
-    process_object(question, ("id", "text", "rationale", "scope", "important"))
+    if not process["intent"] or not process["exploration"]:
+        fail("exploration_required", "Record intent and exploration evidence before asking a workflow question.")
+    process_object(question, ("id", "text", "rationale", "scope", "important"), ("choices", "unknowns", "source", "purpose"))
     identifier(question["id"])
     text_value(question["text"]); text_value(question["rationale"])
     process_refs(question["scope"], {r["id"] for r in process["requirements"]})
     if type(question["important"]) is not bool:
         fail("invalid_process", "Question importance must be a boolean.")
+    if question.get("purpose", "clarification") not in ("clarification", "playback_confirmation"):
+        fail("invalid_process", "Question purpose must be clarification or playback_confirmation.")
     if process_pending(process):
         fail("question_pending", "Discuss one key question at a time.")
+    if unrecorded_choices(process):
+        fail("decision_record_required", "Record the previous reply's actual outcome and source before the next question.")
     if any(q["id"] == question["id"] for q in process["questions"]):
         fail("already_exists", "Question identifiers cannot be reused.")
+    if "source" in question:
+        process_source(question["source"])
+    process_refs(question.get("unknowns", []), set(process["exploration"]["unknowns"]))
+    choices = question.get("choices", [])
+    if not isinstance(choices, list):
+        fail("invalid_process", "Question choices must be a structured list.")
+    choice_ids = set()
+    for choice in choices:
+        process_object(choice, ("id", "text", "consequence", "source"))
+        identifier(choice["id"]); text_value(choice["text"]); text_value(choice["consequence"])
+        process_source(choice["source"])
+        if choice["id"] in choice_ids:
+            fail("invalid_process", "Question choice identifiers must be unique.")
+        choice_ids.add(choice["id"])
     question.update(status="pending", actor=actor, time=now(), answer=None)
     process["questions"].append(question)
-    process.update(stage="discussion", playback=None)
+    process.update(stage="discussion", playback=None, design_approval=None, plan_approval=None)
+
+
+def validate_answer_decision(process, entry):
+    """Validate explicit normalized choice links without interpreting raw replies."""
+    if "choice_id" in entry and "question_id" not in entry:
+        fail("question_required", "A selected decision choice must name its recorded question.")
+    if "question_id" not in entry:
+        return
+    question = next((question for question in process["questions"] if question["id"] == entry["question_id"]), None)
+    if not question or question["status"] != "resolved" or not question.get("answer"):
+        fail("answer_required", "A linked decision requires the recorded answer to its question.")
+    answer = question["answer"]
+    if entry["status"] == "confirmed":
+        authority = entry.get("confirmation_source", entry["source"])
+        if authority != answer["source"] or authority["kind"] != "user":
+            fail("answer_source_mismatch", "The linked decision must use the actual user answer source as its confirmation.")
+    if answer.get("choice_id") is not None:
+        choice = next((choice for choice in question["choices"] if choice["id"] == answer.get("choice_id")), None)
+        if not choice or entry.get("choice_id") != choice["id"] or entry["choice"] != choice["text"]:
+            fail("answer_choice_mismatch", "The normalized decision must match the persisted selected option identifier and text.")
+    elif "choice_id" in entry:
+        fail("answer_choice_mismatch", "A freeform answer did not select a recorded option; preserve its actual source without inventing an option selection.")
 
 
 def validate_delegated_choice(entry, decisions):
@@ -2550,14 +2853,16 @@ def apply_process(operation, args, state):
         process_strings(entry["success_criteria"], True); process_source(entry["source"], user=True)
         if process["intent"] and process["intent"] != entry and process["intent"]["source"] == entry["source"]:
             fail("confirmation_required", "A revised intent needs a new user source reference.")
-        process.update(intent=entry, playback=None)
+        process.update(intent=entry, playback=None, design_approval=None, plan_approval=None)
+        state["approval"] = None
     elif operation == "process-exploration":
         if stage not in ("exploration", "discussion") or not process["intent"]:
             fail("exploration_required", "Record intent and enter exploration or discussion before adding findings.")
         entry = args["exploration"]
         process_object(entry, ("current_behavior", "evidence", "unknowns"))
         text_value(entry["current_behavior"]); process_strings(entry["evidence"], True); process_strings(entry["unknowns"])
-        process.update(exploration=entry, stage="discussion", playback=None)
+        process.update(exploration=entry, stage="discussion", playback=None, design_approval=None, plan_approval=None)
+        state["approval"] = None
     elif operation in ("process-question", "process-reenter"):
         if operation == "process-question" and stage not in ("exploration", "discussion"):
             fail("discussion_required", "Use process-reenter when the approved design and delegation cannot settle the next action.")
@@ -2566,20 +2871,37 @@ def apply_process(operation, args, state):
         questions = [q for q in process_pending(process) if q["id"] == args["question_id"]]
         if not questions:
             fail("question_required", "Answer the current pending question.")
+        question = questions[0]
+        if args.get("question_digest", question_digest(question)) != question_digest(question):
+            fail("stale_question", "Record an answer against the currently displayed question and choices.")
         process_source(args["source"], user=questions[0]["important"])
         text_value(args["answer"])
-        questions[0].update(status="resolved", answer={"text": args["answer"], "source": args["source"], "actor": args["actor"], "time": now()})
+        choice_id = args.get("choice_id")
+        if question.get("choices") and choice_id is not None:
+            if choice_id not in {choice["id"] for choice in question["choices"]}:
+                fail("choice_required", "An explicit selected option must name one of the recorded question choices.")
+        elif choice_id is not None:
+            fail("unknown_reference", "The question has no recorded option with this identifier.")
+        answer = {"text": args["answer"], "source": args["source"], "actor": args["actor"], "time": now(),
+                  "question_digest": question_digest(question)}
+        if choice_id is not None:
+            answer["choice_id"] = choice_id
+        question.update(status="resolved", answer=answer)
+        process["playback"] = None
     elif operation == "process-playback":
         if stage != "discussion" or not process["exploration"] or process_pending(process):
             fail("question_pending", "Complete exploration and resolve the current question before playback.")
+        require_discussion_records(process)
         text_value(args["summary"]); process_source(args["confirmation_source"], user=True)
         process["playback"] = {"summary": args["summary"], "confirmation_source": args["confirmation_source"], "time": now(),
-            "requirements_digest": digest(process["requirements"]), "decisions_digest": digest(process["decisions"])}
+            **discussion_bindings(process)}
     elif operation == "process-requirements":
         if not process["intent"] or not process["exploration"] or process_pending(process):
             fail("exploration_required", "Complete exploration and the pending question before recording requirements.")
         if stage != "discussion":
             fail("discussion_required", "Return to discussion before revising requirements.")
+        if unrecorded_choices(process):
+            fail("decision_record_required", "Record the selected choice before deriving requirements from it.")
         entries = args["requirements"]
         if not entries:
             fail("requirements_required", "Record structured requirements.")
@@ -2604,7 +2926,7 @@ def apply_process(operation, args, state):
         if stage != "discussion":
             fail("discussion_required", "Record and confirm important choices during discussion.")
         entry = args["decision"]
-        process_object(entry, ("id", "title", "choice", "rationale", "scope", "status", "source"), ("confirmation_source", "delegation_id", "delegates"))
+        process_object(entry, ("id", "title", "choice", "rationale", "scope", "status", "source"), ("confirmation_source", "delegation_id", "delegates", "question_id", "choice_id"))
         identifier(entry["id"])
         for key in ("title", "choice", "rationale"):
             text_value(entry[key])
@@ -2614,6 +2936,7 @@ def apply_process(operation, args, state):
         old = next((d for d in process["decisions"] if d["id"] == entry["id"]), None)
         preserve_origin(old, entry, process["provenance"]["confirmed_decisions"].get(entry["id"]))
         process_confirmation(entry)
+        validate_answer_decision(process, entry)
         if "delegates" in entry and type(entry["delegates"]) is not bool:
             fail("invalid_process", "Delegation authority must be an explicit boolean.")
         if entry["status"] == "delegated":
@@ -2628,7 +2951,7 @@ def apply_process(operation, args, state):
             fail("discussion_required", "Return to discussion before changing an approved design.")
         validate_process_design(process, args["design"])
         process["design"] = process_envelope(args["design"], process["design"], args["actor"],
-            intent_digest=digest(process["intent"]), requirements_digest=digest(process["requirements"]), decisions_digest=digest(process["decisions"]))
+            **discussion_bindings(process))
         process.update(stage="design_review", design_review=None, design_approval=None, plan_approval=None)
         state["design"] = {**process["design"], "content": json.dumps(args["design"], indent=2)}
         state["approval"] = None
@@ -2652,7 +2975,7 @@ def apply_process(operation, args, state):
             fail("stale_design", "Approval must name the current exact design digest.")
         if stage != "design_confirmation" or not review or review["digest"] != design["digest"] or review["version"] != design["version"] or review["verdict"] != "accept":
             fail("design_review_required", "Complete an independent gap review before user design confirmation.")
-        if design["intent_digest"] != digest(process["intent"]) or design["requirements_digest"] != digest(process["requirements"]) or design["decisions_digest"] != digest(process["decisions"]):
+        if any(design.get(key, value) != value for key, value in discussion_bindings(process).items()):
             fail("stale_design", "Requirements or decisions changed after the design; revise and review it again.")
         approval = {"digest": design["digest"], "version": design["version"], "actor": args["actor"], "authorization_source": args["authorization_source"], "time": now()}
         process.update(design_approval=approval, stage="plan")
@@ -2715,6 +3038,7 @@ PROCESS_COMMANDS = {
     "process-reenter": ({"question": "object", "reason": "string"}, "Return to discussion when current design and delegation cannot settle the next action."),
 }
 COMMANDS.update({name: mutation(description, fields) for name, (fields, description) in PROCESS_COMMANDS.items()})
+COMMANDS["process-answer"]["optional"].update({"choice_id": "string", "question_digest": "string"})
 
 
 def process_schema(fields, optional=()):
@@ -2725,13 +3049,17 @@ _TEXT = {"type": "string", "minLength": 1}
 _STRINGS = {"type": "array", "items": _TEXT, "uniqueItems": True}
 _SOURCE = process_schema({"kind": {"type": "string", "enum": ["user", "agent", "evidence"]}, "reference": _TEXT})
 _USER_SOURCE = process_schema({"kind": {"type": "string", "enum": ["user"]}, "reference": _TEXT})
-_QUESTION = process_schema({"id": _TEXT, "text": _TEXT, "rationale": _TEXT, "scope": _STRINGS, "important": {"type": "boolean"}})
+_CHOICE = process_schema({"id": _TEXT, "text": _TEXT, "consequence": _TEXT, "source": _SOURCE})
+_QUESTION = process_schema({"id": _TEXT, "text": _TEXT, "rationale": _TEXT, "scope": _STRINGS, "important": {"type": "boolean"},
+    "choices": {"type": "array", "items": _CHOICE}, "unknowns": _STRINGS, "source": _SOURCE,
+    "purpose": {"type": "string", "enum": ["clarification", "playback_confirmation"]}}, ("choices", "unknowns", "source", "purpose"))
 _CHECK = process_schema({"method": _TEXT, "expected_result": _TEXT})
 _REQUIREMENT = process_schema({"id": _TEXT, "text": _TEXT, "kind": {"type": "string", "enum": ["scope", "constraint", "acceptance"]},
     "status": {"type": "string", "enum": ["proposed", "confirmed"]}, "source": _SOURCE, "confirmation_source": _USER_SOURCE}, ("confirmation_source",))
 _DECISION = process_schema({"id": _TEXT, "title": _TEXT, "choice": _TEXT, "rationale": _TEXT, "scope": _STRINGS,
     "status": {"type": "string", "enum": ["proposed", "confirmed", "delegated", "rejected"]}, "source": _SOURCE,
-    "confirmation_source": _USER_SOURCE, "delegation_id": _TEXT, "delegates": {"type": "boolean"}}, ("confirmation_source", "delegation_id", "delegates"))
+    "confirmation_source": _USER_SOURCE, "delegation_id": _TEXT, "delegates": {"type": "boolean"}, "question_id": _TEXT, "choice_id": _TEXT},
+    ("confirmation_source", "delegation_id", "delegates", "question_id", "choice_id"))
 _COMPONENT = process_schema({"id": _TEXT, "requirement_ids": _STRINGS, "behavior": _TEXT, "interfaces": _STRINGS, "files": _STRINGS})
 _PLAN_ITEM = process_schema({"id": _TEXT, "title": _TEXT, "requirement_ids": _STRINGS, "deliverables": _STRINGS, "files": _STRINGS,
     "interfaces": _STRINGS, "dependencies": _STRINGS, "steps": _STRINGS, "verification": {"type": "array", "items": _CHECK}, "acceptance": _STRINGS})
@@ -2792,10 +3120,14 @@ def process_record_text(state):
                     bullet(scalar(entry))
         else:
             bullet(scalar(value))
+    contract = dialogue_contract(state)
+    dialogue_state = {key: contract[key] for key in ("pending_questions", "missing_records", "required_recording_steps",
+                      "wait_for", "approval_target") if contract[key] is not None}
     section("Current state", {"stage": process["stage"], "process_protocol": process["protocol_version"],
+        "state_version": state["version"], "session_id": state.get("session_id"),
         "project": state["project"]["path"], "worktree": state["worktree"]["path"],
         "design_approved": design_is_approved(state), "plan_approved": plan_is_approved(state),
-        "pending_questions": process_pending(process)})
+        **dialogue_state})
     section("Intent", process["intent"])
     section("Exploration", process["exploration"])
     section("Confirmed requirements", process["requirements"])

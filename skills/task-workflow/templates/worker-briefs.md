@@ -135,3 +135,10 @@ After item reviews pass, inspect the integrated deliverable across items.
 Check interactions, complete verification, approved design and plan alignment,
 remaining risks, and readiness for authorized integration or delivery. Return
 one overall verdict with evidence. This review is separate from item reviews.
+
+## Discussion synchronization
+
+Report each new important unknown with evidence, its consequence, and the affected
+requirement, decision, design, or plan revision. The coordinator records reentry
+and the question before asking the user. An answer and its affected sources must
+be synchronized before dependent work resumes. Preserve unaffected evidence.

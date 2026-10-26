@@ -57,16 +57,32 @@ choice wins. Unclear intent or task identity requires clarification before
 enrollment or mutation.
 
 A clear substantive action request authorizes enrollment for exploration and
-discussion. New tasks use process protocol 2. The agent asks one meaningful
-design question at a time, plays back confirmed requirements separately from
-its proposals, and records the source and scope of important choices. An
-independent gap review precedes user approval of the design revision. The user
-then approves a linked implementation plan revision before implementation.
-When a new important choice exceeds confirmed design or delegated scope, the
-agent returns to discussion. Existing legacy tasks keep their recorded state
-until a guarded, authorized upgrade. Followups reuse the correct task and
-perform only the current requested action. A progress question does not restart
-experiments or release resources.
+discussion. New tasks use process protocol 2. The main skill defines a mandatory
+conversation sequence: inspect actual context; restate intent and why, findings
+and impact, then ask one important question; acknowledge each answer and record
+it before the dependent next question; alternate exploration, questions, and
+playback. Playback separates user requirements, agent proposals, and explicitly
+delegated choices. A coherent design receives independent gap review before the
+user sees and approves that exact revision. The user then sees work and
+verification in a linked plan and approves its exact revision before execution.
+There is no fixed number of questions or alternative designs.
+
+Questions are recorded before sending. Actual answer sources and affected
+requirements and decisions are updated before dependent progression. New important
+worker discoveries return to discussion. Reentry preserves unaffected facts and
+evidence; changed design or plan revisions require fresh applicable approvals.
+Existing legacy tasks retain their recorded state until an authorized upgrade.
+Followups reuse the correct task and perform the current requested action.
+Status questions and ordinary messages receive direct answers and preserve any
+existing wait target. A progress question does not restart experiments or release
+resources.
+
+The program returns a fresh `dialogue_contract` with task/state identity, stage,
+pending questions and digests, missing records, ordered reply fields, required
+recording steps, wait and exit conditions, exact approval target, applicability,
+and allowed next operations. The coordinator must follow it with the main skill.
+The program validates declared state, source links, and guarded transitions. It
+cannot establish the semantic truth of conversation or guarantee model obedience.
 
 There is no setup wizard, user configuration file, execution profile, or global
 task registry. Your existing instructions can supply private conventions. The
@@ -196,8 +212,8 @@ Tests do not prove installation in the active client. Reconnect the MCP process
 after an update because an existing process can retain old source.
 
 SessionStart restores safe facts for an existing task in the current
-project and session. Unenrolled sessions remain quiet. UserPromptSubmit provides
-fixed routing and naming guidance for the main agent. It does not classify
+project and session. Unenrolled sessions remain quiet. UserPromptSubmit restores the current dialogue contract for the exact selected
+project/session task and provides routing and naming guidance for the main agent. It does not classify
 requests, call a separate model or API, parse transcripts, echo prompts, read
 private instructions, or enroll tasks.
 

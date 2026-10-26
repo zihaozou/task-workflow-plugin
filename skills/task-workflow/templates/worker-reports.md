@@ -61,3 +61,10 @@ Design and plan alignment:
 Verdict: pass | fail | blocked
 Remaining work or material limitation:
 ```
+
+## Discussion synchronization
+
+Report each new important unknown with evidence, its consequence, and the affected
+requirement, decision, design, or plan revision. The coordinator records reentry
+and the question before asking the user. An answer and its affected sources must
+be synchronized before dependent work resumes. Preserve unaffected evidence.

@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Supply fixed routing and naming guidance for each nonempty user prompt."""
+"""Supply routing guidance and the exact selected task's current dialogue contract."""
 import json
 import math
 import re
 import sys
+
+import workflow
 
 ROUTING_GUIDANCE = (
     "Task Workflow routing guidance: The main agent judges the current request "
@@ -43,6 +45,13 @@ def context_for(event):
     session_id = event.get("session_id")
     if isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
         guidance += " Host-provided session context for an authorized enrollment or recovery: " + json.dumps({"session_id": session_id}, ensure_ascii=True) + "."
+        try:
+            context = workflow.session_dialogue_context(event.get("cwd"), session_id)
+        except Exception:
+            # Invalid or unavailable state must not obstruct unrelated requests.
+            context = None
+        if context is not None:
+            guidance += " Registered Task Workflow context: " + json.dumps(context, ensure_ascii=True, separators=(",", ":"))
     return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
                                    "additionalContext": guidance}}
 

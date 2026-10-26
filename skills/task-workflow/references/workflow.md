@@ -45,32 +45,51 @@ legacy migration. Discover the live schema before calling any mutation. Pass
 the current state version and actor. Design and plan versions have digests;
 their review and approval operations refer to the exact digest shown.
 
-Start with intent and exploration. Record actual behavior and evidence before
-turning assumptions into requirements. Ask one important open or multiple-choice
-question at a time, with its rationale and scope. An answer can lead to another
-question or more exploration. There is no required number of questions or
-alternative paths. Record source references for requirements, decisions,
-answers, and approvals. The source must identify an actual user-visible message
-or revision. Play back confirmed user content separately from agent proposals
-and explicitly delegated choices. A user confirmation only covers the content
-shown in that playback.
+For `process-question` and `process-reenter`, `question.scope` contains existing
+requirement identifiers, not descriptions or file paths. Use an empty list when
+no applicable requirements are recorded yet. Do not invent requirements merely
+to ask a question. Optional `unknowns` entries must match recorded exploration
+unknowns; use the live schema and current records for these references.
+Set `question.purpose` to `playback_confirmation` when asking the user to confirm
+a playback. Use `clarification` for clarification questions; omission retains
+that default for compatibility. The program selects playback reply fields and
+waits from this persisted field, not from question identifiers or text heuristics.
 
-Draft a design with behavior, components, interfaces, mapped requirements and
-decisions, assumptions, verification, and unresolved choices. Ask an independent
-reviewer to find design gaps. Revise as needed. Ask the user to approve the
-reviewed design digest. Then write a plan with item ownership, dependencies,
-deliverables, acceptance, verification, and review focus. Ask the user to
-approve that plan digest before implementation. The approved design and plan
-are separate, versioned authority sources. An approval of a broad request does
-not approve later details that the user did not see.
+The mandatory sequence lives in the main skill. Inspect actual context before
+the first substantive discussion reply. Record intent and exploration, then
+record the first question before sending it. The reply restates intent and why,
+then findings and impact, then one important unresolved question and consequence.
+Invite corrections. Wait for that question's answer.
 
-At every phase, check whether the next consequential action is settled by the
-confirmed design and delegated choice scope. If not, record the new question
-and return to discussion through `process-reenter`. Continue routine work
-within approved scope. Use [../templates/phases.md](../templates/phases.md)
-for each phase's inputs, writes, exit checks, and handoff. Use
-[../templates/conversation.md](../templates/conversation.md) for concise
-question and playback structures.
+Acknowledge what each answer settles. Record its actual source and update affected
+requirements and decisions before a dependent question or step. Explore newly
+exposed factual gaps and record observations before relying on them. Record each
+new question before sending. Repeat exploration, questions, and playback as the
+understanding develops. There is no required count of questions or alternatives.
+Play back user requirements and confirmed choices, agent proposals, delegated
+choices with exact scope, and remaining unknowns in that order. Record the playback
+question before sending; wait for confirmation, record its answer and corrected
+sources, then record confirmed playback. A source must identify an actual message,
+event, or reviewed revision. A user confirmation covers only the content shown.
+
+Write a coherent design with behavior, components, interfaces, mapped requirements
+and decisions, assumptions, verification, and recovery. Obtain independent gap
+review for its exact digest. New important reviewer or worker unknowns return to
+discussion before dependent work. Show the actual reviewed design, readable revision
+and title, review outcome, and meaningful effects. Wait for explicit approval of
+that design. Record it before preparing the plan. Then show the linked plan's
+exact readable revision and title, work, ownership, dependencies, verification, independent
+reviews, integration scope, and recovery. Wait for plan approval and record its
+actual source before implementation. Broad approval does not cover unseen details.
+
+At every stage, check whether confirmed design and explicit delegation settle the
+next important choice. If not, use `process-reenter`, record its question before
+asking, and synchronize the answer and affected sources before dependent work.
+Preserve unaffected facts and evidence. Revise affected design and plan versions;
+old approvals cannot approve changed versions. Routine work within approved scope
+continues. Follow [../templates/phases.md](../templates/phases.md) for required
+writes, waits, exit checks, and handoffs, and
+[../templates/conversation.md](../templates/conversation.md) for ordered responses.
 
 The coordinator delegates focused implementation with owned paths, expected
 behavior, verification, and evidence requirements. Workers implement, fix, and
@@ -201,6 +220,21 @@ required cleanup. Keep earlier closure history when reopening work.
 
 ## 5. Tools, hooks, and recovery
 
+Normal program results and the read-only context operation return a fresh
+`dialogue_contract`. Its `contract_version`, `task_id`, `state_version`, and
+`stage` identify the current state. `pending_questions` includes question text,
+rationale, choices, and digest; `missing_records` names synchronization gaps.
+Follow ordered `reply_fields`, `required_recording_steps`, `wait_for`, `turn_exit`,
+`approval_target`, and `allowed_next_operations`. Check `applicability` against
+the current request: direct status and ordinary replies preserve a pending wait
+without forced discussion or phase progression. `templates` links the required
+response and record structures. Refresh context after a version conflict or
+interruption. Source-linked answers and decisions must precede dependent work.
+
+Guards check declared state, provenance links, and revisions. They cannot verify
+natural-language semantic truth or guarantee model obedience. Compare the record
+with actual messages, project facts, and evidence before reporting progress.
+
 MCP tools use the same program and persistence. Reconnect the process after an
 update and rediscover schemas. Replacing source does not reload an existing
 process. Use one current interface for mutations in a task.
@@ -226,8 +260,8 @@ SessionStart restores safe facts only for existing tasks in the current
 project. Validate `cwd` and `session_id`, then use exact recorded session
 bindings. Unenrolled sessions remain quiet. Do not put prompts, arbitrary logs,
 private instruction files, or task prose into recovery context. The
-UserPromptSubmit hook adds fixed routing and naming guidance for the main
-agent. It does not classify requests, call a separate model or API, read
+UserPromptSubmit hook restores the fresh contract for the exact selected task in
+the current project/session, plus routing and naming guidance for the main agent. It does not classify requests, call a separate model or API, read
 transcripts or private instructions, echo prompts, or enroll work. The main
 agent chooses the route using the conversation it already has.
 

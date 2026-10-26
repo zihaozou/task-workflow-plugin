@@ -10,7 +10,10 @@ relevant phase starts. Do not invent approval for legacy tasks.
 
 Task identity, protocol version, current phase, state version, blocked reason,
 next action, current approved design and plan revisions, and session binding
-when verified. A missing protocol version means legacy state, not implicit
+when verified. Include the current dialogue stage, exact pending question and
+its source/digest and explicit purpose (`clarification` or
+`playback_confirmation`), missing records, required next recording steps, and wait or
+approval target when present in the program contract. A missing protocol version means legacy state, not implicit
 upgrade. State a pending user action only when one is actually required.
 
 ## Intent
@@ -79,4 +82,7 @@ cleanup evidence. Distinguish integration, run, resource, and task closure.
 
 Chronological references to important questions, answers, playback, proposals,
 delegations, design and plan approvals, reentries, and supersessions. Each entry
-names its source and affected revision. Preserve prior decisions for audit.
+names its source and affected revision. Link answers to their questions and
+decisions to the answers or explicit delegation that supports them. Record
+questions before sending and synchronize answers and affected sources before
+dependent work. Preserve prior decisions and superseded approvals for audit.

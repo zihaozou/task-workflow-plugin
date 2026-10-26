@@ -55,6 +55,9 @@ class Fixture(unittest.TestCase):
                 'expected_version': self.state['version'], **fields})
         finally:
             self.refresh()
+        self.assertEqual(result['dialogue_contract']['task_id'], 'task')
+        if 'state' in result:
+            self.assertEqual(result['dialogue_contract']['state_version'], result['state']['version'])
         return result
 
     def approved(self):

@@ -56,7 +56,7 @@ def context_for(event):
     if len(matches) != 1:
         return None
     task_id = matches[0]['task_id']
-    result = workflow.dispatch('status', {'root': str(root), 'task_id': task_id})
+    result = workflow.dispatch('context', {'root': str(root), 'task_id': task_id})
     status = result.get('summary')
     if not isinstance(status, dict) or status.get('task_id') != task_id or status.get('session_id') != session_id:
         return None
@@ -85,10 +85,12 @@ def context_for(event):
     templates = ['templates/conversation.md', 'templates/record.md']
     if facts.get('stage') in ('implementation', 'delivery'):
         templates += ['templates/worker-briefs.md', 'templates/worker-reports.md']
-    context = 'Registered Task Workflow context: ' + json.dumps(
-        {'root': str(root), 'session_id': session_id, 'status_tool': 'status', 'task': facts,
+    context_data = {'root': str(root), 'session_id': session_id, 'status_tool': 'context', 'task': facts,
          'templates': templates,
-         'recovery_guidance': 'Restore the recorded phase and its template. Read current task status before continuing authorized work. Hook delivery does not authorize work.'},
+         'recovery_guidance': 'Restore the recorded phase and its template. Read current task context before continuing authorized work. Hook delivery does not authorize work.'}
+    if isinstance(result.get('dialogue_contract'), dict):
+        context_data['dialogue_contract'] = result['dialogue_contract']
+    context = 'Registered Task Workflow context: ' + json.dumps(context_data,
         separators=(',', ':'), ensure_ascii=True)
     return {'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}
 

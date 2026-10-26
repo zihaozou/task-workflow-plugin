@@ -59,8 +59,8 @@ class Server:
         self.initialized = False
         self.tools = []
         for tool in workflow.command_schemas():
-            if tool["name"] in ("init", "status", "bind-session", "recover"):
-                tool = {**tool, "annotations": {"readOnlyHint": tool["name"] == "status",
+            if tool["name"] in ("init", "status", "context", "bind-session", "recover"):
+                tool = {**tool, "annotations": {"readOnlyHint": tool["name"] in ("status", "context"),
                         "destructiveHint": False, "openWorldHint": False, **tool.get("annotations", {})}}
             self.tools.append(tool)
         self.by_name = {tool["name"]: tool for tool in self.tools}
