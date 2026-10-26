@@ -1,94 +1,154 @@
-# Required conversation responses
+# Required conversation layouts
 
-The main skill defines the mandatory order. These structures specify required
-content for each applicable stage. Use natural language and the user's language;
-do not recite these headings. Persist English summaries with original source
-references in the one program-generated record.
+Use these stage layouts with the mandatory sequence in the main skill. Use the
+user's language in conversation and English summaries in the one task record.
+Bold labels group content; bullets state one finding, choice, action, or result.
+Use a table when relationships are easier to compare. Put the exact recorded
+question or approval request in its own final section. Omit empty optional groups
+and routine statements about recording, provenance, or workflow mechanics.
+Show useful source links beside relevant findings. Keep machine identifiers,
+state versions, and digests in the record. Readable revision names remain visible.
 
 Read the fresh `dialogue_contract` before each related reply. Follow its
-`applicability`, ordered `reply_fields`, `required_recording_steps`, `wait_for`,
-`turn_exit`, `approval_target`, and `allowed_next_operations` within its
-`operation_scope`. This list guides dialogue and context steps. Other task,
-review, run, resource, integration, and lifecycle operations follow the current
-schema, actual guards, and existing user authorization. Closed tasks require
-authorized reopening before their work can change. Direct status and
-ordinary replies answer the current request and retain the existing wait target.
-Preserve digests in program approval bindings; show readable revision titles to
-the user without requiring long digests in conversation.
+`applicability`, `reply_fields`, `presentation`, `required_recording_steps`,
+`wait_for`, `turn_exit`, `approval_target`, and `allowed_next_operations` within
+its `operation_scope`. Other operations follow the current schema, actual guards,
+and existing user authority. Direct status replies preserve the current wait.
+
+Examples below illustrate format only. Their JSON report behavior is not a
+requirement for another task. Replace every detail with actual task evidence.
 
 ## First discussion reply
 
-1. Restate the intended result and why, with inferences identified.
-2. State relevant findings from actual context, their sources, and likely impact.
-3. Invite corrections and ask the most important unresolved question, with its
-   consequence.
+Required order: **Goal**, **What I found**, relevant **My proposal** when needed,
+then **Question**. State intent and reason, observed behavior and impact, then
+why the unresolved choice matters and its exact recorded question. Invite
+correction without adding another question.
 
-Before sending: record intent, exploration, and the exact pending question.
-Wait for that answer. Do not substitute an implementation proposal for finding
-out what the user wants.
+> **Goal**
+> - Add JSON output for another script while preserving CSV behavior.
+>
+> **What I found**
+> - `report.py` writes `report.csv` with `name` and `count` columns.
+> - There is no format option, so JSON needs a new command interface.
+>
+> **Question**
+> The interface determines how the other script receives results. Please correct
+> any misunderstanding. How should it request and receive JSON?
 
-## Answer acknowledgement and next discussion turn
+Before sending: record intent, exploration, and question. Wait for its answer.
 
-1. State what the answer settles and its consequence.
-2. State new findings or corrected understanding that affect the next choice.
-3. Ask the next recorded important question and explain its consequence, or
-   present the next playback when understanding is coherent.
+## Answer acknowledgement and discussion
 
-Before dependent work or a dependent question: record the actual answer source,
-update requirements and decisions and their source links, then record the next
-question. Explore and record missing facts first. Keep alternatives grounded in
-actual consequences; no count of alternatives or discussion rounds is required.
+Required order: **Settled**, relevant **New findings**, relevant **My proposal**,
+then **Question**. Omit groups with no new content.
+
+> **Settled**
+> - `--format json` writes to stdout; the existing command keeps writing CSV.
+>
+> **My proposal**
+> - Use one JSON array with one object per row, so scripts read one document.
+>
+> **Question**
+> Does that array structure fit the receiving script?
+
+Record the answer and update source-linked requirements/decisions before the
+next dependent question or action. Record that question before sending.
+Explore factual gaps first. No question count or alternative count is required.
 
 ## Playback
 
-1. User requirements and confirmed choices, with sources.
-2. Agent proposals and reasons, clearly still proposed.
-3. Explicitly delegated choices, exact scope, and sources.
-4. Remaining important unknowns and a request to correct or confirm this playback.
+Required order: **Your requirements and confirmed choices**, pending **My
+proposals**, explicit **Choices you delegated**, unresolved **Open questions**,
+then **Confirm**. Omit empty optional groups. A confirmed agent proposal belongs
+with confirmed choices; preserve its agent origin and user confirmation in state.
 
-Before sending: record the playback confirmation question with
-`purpose: playback_confirmation`. Ordinary clarification questions use
-`purpose: clarification` or omit it for the compatibility default. The program
-uses this field to select the required playback response order and wait target;
-question identifiers do not encode purpose. After the answer:
-record its source and corrected requirements/decisions before `process-playback`.
-Wait for actual confirmation. Resume discussion when an important gap remains.
+> **Your requirements and confirmed choices**
+> - Select JSON with `--format json` and write it to stdout.
+> - Keep the existing CSV output and column names.
+>
+> **My proposals**
+> - Use one array containing one object per row.
+>
+> **Confirm**
+> Does this description match what you want?
 
-## Reviewed design and approval
+Record the confirmation question with `purpose: playback_confirmation` before
+sending. Clarification questions use `purpose: clarification`, the default when
+omitted. Purpose does not depend on a question's identifier. Wait for the actual
+answer, update affected requirement/decision sources, then record confirmed
+`process-playback`. Continue discussion if an important choice remains open.
 
-1. Present the actual coherent design and its exact readable revision and title.
-2. State the independent gap-review outcome and meaningful effects.
-3. Ask for approval of that exact design for planning.
+## Spec and approval
 
-Before sending: record the design and independent review for the same digest.
-Wait for user approval. Record its actual source with `process-design-approve`
-before preparing the implementation plan. New important reviewer questions return
-to discussion before dependent work.
+Use **Spec Dn - title** and the sections in [spec.md](spec.md). Show the actual
+reviewed content, grouped under meaningful labels, followed by **Review** and
+**Approve**. Keep its digest bound in program state. A link alone does not show
+unseen behavior or decisions for approval.
 
-## Plan approval
+> **Spec D2 - JSON report output**
+>
+> **Required behavior**
+> - `--format json` writes one array of report rows to stdout.
+> - The existing command continues writing `report.csv`.
+>
+> **Acceptance**
+> | Condition | Expected result |
+> | --- | --- |
+> | JSON selected | Parsed rows use `name` and `count`. |
+> | Existing command | CSV content remains unchanged. |
+>
+> **Review**
+> - The independent reviewer found no remaining material gap in D2.
+>
+> **Approve**
+> Do you approve Spec D2 for implementation planning?
 
-1. Show the exact plan revision and title and approved design it implements.
-2. Show work items, ownership, dependencies, verification, independent reviews,
-   integration scope, and recovery.
-3. Ask for approval of that exact plan for implementation.
+This excerpt illustrates layout; an actual approval reply includes all material
+Spec sections. Record the Spec and independent review before asking. Wait for
+actual approval and record it before planning. New important gaps return to
+discussion before dependent work.
 
-Before sending: record the plan. Wait for approval. Record its actual source with
-`process-plan-approve` before implementation. Preserve separate integration
-permission and any limits in the approval.
+## Plan and approval
+
+Use **Plan Pn - title**, its approved Spec reference, **File responsibilities**,
+**Tasks**, **Verification and review**, applicable **Integration and recovery**,
+then **Approve**. Follow [plan.md](plan.md) for concrete task content and example.
+Use meaningful component names in the reply. Keep internal component IDs and
+serialized command argument arrays in the record. Present readable executable
+commands beside each check's expected result in the task or verification table;
+do not append a second dump of the same command metadata. Include a compact
+product-data JSON example when its shape affects the design. Keep all material
+behavior, decisions, and tasks visible; approval cannot rely on a link alone.
+Lifecycle phase names alone are insufficient work items. Record the plan before
+showing it. Wait for approval and record it before implementation.
 
 ## Execution, review, and delivery
 
-1. State the new observed result and current item or task state.
-2. Give material verification and actual requirements/quality/overall verdicts.
-3. State the next allowed action or actual missing decision and its consequence.
+Use **Result**, **Checks**, relevant **Needs attention**, then **Next**.
 
-Record evidence and transitions before claiming them. Distinguish a worker claim
-from inspected evidence and review acceptance. Continue authorized routine work.
-A status-only request gets the requested status without forced phase progression.
+> **Result**
+> - JSON rows now use the existing report column names.
+>
+> **Checks**
+> | Check | Outcome |
+> | --- | --- |
+> | JSON output parses as an array | Passed |
+> | Default CSV content unchanged | Passed |
+>
+> **Next**
+> - Independent item review is pending.
 
-## Reentry
+Record evidence and actual transitions before reporting them. A worker claim
+alone does not establish acceptance. Distinguish requirements, quality, and
+overall verdicts where relevant. Continue routine authorized work.
 
-State the new evidence, affected choice, and consequence. Record `process-reenter`
-and the exact question before asking it. Wait for the answer, synchronize sources,
-and revise only affected requirements, decisions, design, plan, and approvals.
-Preserve unaffected facts and evidence. A changed revision needs its own approval.
+## Status and reentry
+
+A direct status reply uses **Status** and relevant **Next**. State actual progress
+and an existing pending decision without repeating it as a new question. Preserve
+the wait target and stage.
+
+For reentry, use **New finding**, **Impact**, then **Question**. Record the evidence,
+`process-reenter`, and question before asking. Wait for its answer, synchronize
+sources, and revise affected design/plan approvals while preserving other evidence.

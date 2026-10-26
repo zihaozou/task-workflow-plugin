@@ -2461,10 +2461,11 @@ def dialogue_contract(state):
         contract["reply_fields"] = ["User goal and why it matters", "Inspected findings, sources and impact", "Correction invitation and one useful question when a user decision is needed"]
     elif stage == "discussion":
         if pending:
-            fields = (["What the recorded answer settled", "Meaningful new findings and impact", "One next recorded question and its consequence"] if answered else
-                      ["User goal and why it matters", "Inspected findings, sources and impact", "Correction invitation and one recorded question with its consequence"])
+            fields = (["What the recorded answer settled", "Meaningful new findings and impact"] if answered else
+                      ["User goal and why it matters", "Inspected findings, sources and impact"])
+            question_field = "One next recorded question and its consequence" if answered else "Correction invitation and one recorded question with its consequence"
             contract.update(dialogue_mode="answer_acknowledgment" if answered else "first_reply",
-                reply_fields=fields + ["Recorded choices and consequences, when present", "Agent proposal clearly attributed, when useful"],
+                reply_fields=fields + ["Recorded choices and consequences, when present", "Agent proposal clearly attributed, when useful", question_field],
                 wait_for="The user's answer to " + pending[0]["id"], turn_exit="Ask the one recorded question and end the turn. Record the actual answer on the next related prompt before dependent work.")
             if reentry and not answered:
                 contract.update(dialogue_mode="reentry", reply_fields=["New fact and its source", "Affected confirmed design or delegated scope", "One recorded question and its consequence"])
@@ -2521,6 +2522,39 @@ def dialogue_contract(state):
     if state.get("task_lifecycle", {}).get("status") == "complete":
         contract.update(wait_for=None, turn_exit="Report the recorded closed-task result. Reopen only for an authorized new action.",
                         allowed_next_operations=["context", "status", "bind-session", "recover", "task-reopen"])
+    mode = contract.get("dialogue_mode")
+    sections = ["Result", "Evidence", "Next action"]
+    optional = ["Next action"]
+    if mode == "first_reply":
+        sections, optional = ["Goal", "What I found", "My proposal", "Question"], ["My proposal"]
+    elif mode == "answer_acknowledgment":
+        sections, optional = ["Settled", "New findings", "My proposal", "Question"], ["New findings", "My proposal"]
+    elif mode == "playback":
+        sections = ["Your requirements and confirmed choices", "My proposals", "Choices you delegated", "Open questions", "Confirm"]
+        optional = ["My proposals", "Choices you delegated", "Open questions"]
+    elif mode == "reentry":
+        sections, optional = ["New finding", "Impact", "Question"], []
+    if stage in ("design", "design_review", "design_confirmation"):
+        contract["templates"].append("templates/spec.md")
+        sections = ["Spec (Design)", "Intent and success", "Scope", "Current behavior and impact", "Required behavior",
+                    "Decisions and authority", "Constraints", "Delegated choices", "Acceptance and failure conditions", "Open questions", "Review"]
+        optional = ["Delegated choices", "Open questions"]
+        if stage == "design_confirmation":
+            sections.append("Approve")
+    elif stage in ("plan", "plan_confirmation"):
+        contract["templates"] += ["templates/spec.md", "templates/plan.md"]
+        sections = ["Plan and approved Spec", "File responsibilities", "Tasks", "Verification and review", "Integration and recovery"]
+        optional = ["Integration and recovery"]
+        if stage == "plan_confirmation":
+            sections.append("Approve")
+    elif stage in ("implementation", "delivery"):
+        contract["templates"] += ["templates/spec.md", "templates/plan.md"]
+        sections, optional = ["Result", "Checks", "Needs attention", "Next"], ["Needs attention"]
+    contract["presentation"] = {"layout": "Readable sections with grouped bullets or tables; omit empty optional groups and routine internal chatter.",
+        "sections": sections, "optional_sections": optional,
+        "question": "Place the concrete question or exact revision approval request in a separate final section when waiting for the user."}
+    if "template_paths" in runtime:
+        runtime["template_paths"] = [str(skill_root / name) for name in contract["templates"] if (skill_root / name).is_file()]
     return contract
 
 
@@ -2671,7 +2705,7 @@ def process_scope_digest(state, item, rev):
     return digest({"requirements": [r for r in process["requirements"] if r["id"] in refs],
         "dependencies": dependencies,
         "intent": process["intent"],
-        "global_design": {key: design[key] for key in ("behavior", "rationale", "impact", "assumptions")},
+        "global_design": {key: design[key] for key in ("behavior", "rationale", "impact", "assumptions", "current_impact", "out_of_scope", "failure_conditions") if key in design},
         "components": [c for c in design["components"] if refs.intersection(c["requirement_ids"])],
         "decisions": [d for d in process["decisions"] if refs.intersection(d["scope"]) or not d["scope"]],
         "selected_decisions": [entry_id for entry_id in design["decisions"] if entry_id in relevant_decisions],
@@ -2747,7 +2781,7 @@ def validate_delegated_choice(entry, decisions):
 
 
 def validate_process_design(process, design):
-    process_object(design, ("behavior", "components", "decisions", "rationale", "impact", "assumptions", "verification", "unresolved", "delegated_scope"))
+    process_object(design, ("behavior", "components", "decisions", "rationale", "impact", "current_impact", "out_of_scope", "failure_conditions", "assumptions", "verification", "unresolved", "delegated_scope"))
     requirements = process_requirements(process)
     decisions = {entry["id"]: entry for entry in process["decisions"]}
     for entry in decisions.values():
@@ -2755,9 +2789,10 @@ def validate_process_design(process, design):
             process_refs(entry["scope"], requirements)
         if entry["status"] == "delegated":
             validate_delegated_choice(entry, decisions)
-    for key in ("behavior", "rationale", "impact"):
+    for key in ("behavior", "rationale", "impact", "current_impact"):
         text_value(design[key])
-    process_strings(design["assumptions"])
+    for key in ("assumptions", "out_of_scope", "failure_conditions"):
+        process_strings(design[key])
     for key in ("decisions", "unresolved", "delegated_scope"):
         process_refs(design[key], decisions)
     if design["unresolved"] or any(d["status"] == "proposed" for d in decisions.values()) or any(decisions[x]["status"] not in ("confirmed", "delegated") for x in design["decisions"]):
@@ -2797,26 +2832,84 @@ def validate_process_plan(process, plan):
     process_strings(plan["dependencies"]); text_value(plan["review_focus"])
     if not isinstance(plan["items"], list) or not plan["items"]:
         fail("invalid_process", "A plan needs at least one implementation item.")
-    covered, ids = set(), set()
+    components = {component["id"]: component for component in process["design"]["content"]["components"]}
+    covered, ids, covered_components = set(), set(), set()
     for item in plan["items"]:
-        process_object(item, ("id", "title", "requirement_ids", "deliverables", "files", "interfaces", "dependencies", "steps", "verification", "acceptance"))
+        process_object(item, ("id", "title", "requirement_ids", "component_ids", "deliverables", "files", "file_changes", "interfaces", "dependencies", "steps", "verification", "acceptance"))
         identifier(item["id"]); text_value(item["title"])
         if item["id"] == "overall" or item["id"] in ids:
             fail("invalid_process", "Plan item identifiers must be unique and cannot use overall.")
         ids.add(item["id"])
         process_refs(item["requirement_ids"], requirements, True)
         covered.update(item["requirement_ids"])
-        for key in ("deliverables", "files", "interfaces", "dependencies", "steps", "acceptance"):
-            process_strings(item[key], key in ("deliverables", "files", "steps", "acceptance"))
+        process_refs(item["component_ids"], components, True)
+        covered_components.update(item["component_ids"])
+        component_requirements = {ref for component_id in item["component_ids"] for ref in components[component_id]["requirement_ids"]}
+        if set(item["requirement_ids"]) - component_requirements:
+            fail("requirement_coverage", "Each work item must map its requirements to the selected Spec components.")
+        for key in ("deliverables", "files", "interfaces", "dependencies", "acceptance"):
+            process_strings(item[key], key in ("deliverables", "files", "acceptance"))
         for filename in item["files"]:
             safe_relative(filename)
+        if not isinstance(item["file_changes"], list):
+            fail("invalid_process", "Each work item needs a structured file responsibility map.")
+        mapped = set()
+        for change in item["file_changes"]:
+            process_object(change, ("path", "action", "responsibility"))
+            safe_relative(change["path"]); text_value(change["responsibility"])
+            if change["path"] in mapped or change["action"] not in ("create", "modify", "test", "delete"):
+                fail("invalid_process", "File responsibilities need unique paths and a valid action.")
+            mapped.add(change["path"])
+        if mapped != set(item["files"]):
+            fail("file_coverage", "File responsibilities must cover the work item's owned files exactly once.")
         if not isinstance(item["verification"], list) or not item["verification"]:
             fail("invalid_process", "Each plan item needs expected verification results.")
+        checks, checked_requirements = set(), set()
         for check in item["verification"]:
-            process_object(check, ("method", "expected_result"))
+            process_object(check, ("id", "kind", "requirement_ids", "targets", "method", "expected_result"), ("argv",))
+            identifier(check["id"])
+            if check["id"] in checks or check["kind"] not in ("command", "inspection"):
+                fail("invalid_process", "Checks need unique identifiers and command or inspection kind.")
+            checks.add(check["id"])
+            process_refs(check["requirement_ids"], set(item["requirement_ids"]) | set(plan["shared_requirements"]), True)
+            checked_requirements.update(check["requirement_ids"])
+            process_strings(check["targets"], check["kind"] == "inspection")
+            for target in check["targets"]:
+                safe_relative(target)
+            if check["kind"] == "command":
+                if not isinstance(check.get("argv"), list) or not check["argv"]:
+                    fail("invalid_process", "Command checks require a nonempty executable argv.")
+                for argument in check["argv"]:
+                    text_value(argument)
+            elif "argv" in check:
+                fail("invalid_process", "Inspection checks declare source targets instead of executable argv.")
             text_value(check["method"]); text_value(check["expected_result"])
+        if set(item["requirement_ids"]) - checked_requirements:
+            fail("requirement_coverage", "Every work item requirement needs a named check and expected outcome.")
+        if not isinstance(item["steps"], list) or not item["steps"]:
+            fail("invalid_process", "Each work item needs structured actions linked to files and checks.")
+        steps, acted_files, acted_interfaces, linked_checks = set(), set(), set(), set()
+        for step in item["steps"]:
+            process_object(step, ("id", "action", "files", "interfaces", "verification_ids"))
+            identifier(step["id"]); text_value(step["action"])
+            if step["id"] in steps:
+                fail("invalid_process", "Action identifiers must be unique within their work item.")
+            steps.add(step["id"])
+            process_refs(step["files"], set(item["files"]), True)
+            process_refs(step["interfaces"], set(item["interfaces"]))
+            process_refs(step["verification_ids"], checks, True)
+            acted_files.update(step["files"]); acted_interfaces.update(step["interfaces"])
+            linked_checks.update(step["verification_ids"])
+        if acted_files != set(item["files"]):
+            fail("file_coverage", "Every owned file must appear in a concrete work item action.")
+        if linked_checks != checks:
+            fail("check_coverage", "Every planned check must be linked from an action.")
+        if acted_interfaces != set(item["interfaces"]):
+            fail("interface_coverage", "Every declared work item interface must appear in an action.")
     if set(requirements) - covered:
         fail("requirement_coverage", "The implementation plan must cover every confirmed requirement.")
+    if set(components) - covered_components:
+        fail("component_coverage", "The implementation plan must cover every approved Spec component.")
     graph = {item["id"]: item["dependencies"] for item in plan["items"]}
     def visit(item_id, ancestors):
         if item_id in ancestors:
@@ -3054,7 +3147,11 @@ _CHOICE = process_schema({"id": _TEXT, "text": _TEXT, "consequence": _TEXT, "sou
 _QUESTION = process_schema({"id": _TEXT, "text": _TEXT, "rationale": _TEXT, "scope": _STRINGS, "important": {"type": "boolean"},
     "choices": {"type": "array", "items": _CHOICE}, "unknowns": _STRINGS, "source": _SOURCE,
     "purpose": {"type": "string", "enum": ["clarification", "playback_confirmation"]}}, ("choices", "unknowns", "source", "purpose"))
-_CHECK = process_schema({"method": _TEXT, "expected_result": _TEXT})
+_CHECK = process_schema({"id": _TEXT, "kind": {"type": "string", "enum": ["command", "inspection"]},
+    "requirement_ids": _STRINGS, "targets": _STRINGS, "method": _TEXT, "expected_result": _TEXT,
+    "argv": {"type": "array", "items": _TEXT}}, ("argv",))
+_STEP = process_schema({"id": _TEXT, "action": _TEXT, "files": _STRINGS, "interfaces": _STRINGS, "verification_ids": _STRINGS})
+_FILE_CHANGE = process_schema({"path": _TEXT, "action": {"type": "string", "enum": ["create", "modify", "test", "delete"]}, "responsibility": _TEXT})
 _REQUIREMENT = process_schema({"id": _TEXT, "text": _TEXT, "kind": {"type": "string", "enum": ["scope", "constraint", "acceptance"]},
     "status": {"type": "string", "enum": ["proposed", "confirmed"]}, "source": _SOURCE, "confirmation_source": _USER_SOURCE}, ("confirmation_source",))
 _DECISION = process_schema({"id": _TEXT, "title": _TEXT, "choice": _TEXT, "rationale": _TEXT, "scope": _STRINGS,
@@ -3062,8 +3159,10 @@ _DECISION = process_schema({"id": _TEXT, "title": _TEXT, "choice": _TEXT, "ratio
     "confirmation_source": _USER_SOURCE, "delegation_id": _TEXT, "delegates": {"type": "boolean"}, "question_id": _TEXT, "choice_id": _TEXT},
     ("confirmation_source", "delegation_id", "delegates", "question_id", "choice_id"))
 _COMPONENT = process_schema({"id": _TEXT, "requirement_ids": _STRINGS, "behavior": _TEXT, "interfaces": _STRINGS, "files": _STRINGS})
-_PLAN_ITEM = process_schema({"id": _TEXT, "title": _TEXT, "requirement_ids": _STRINGS, "deliverables": _STRINGS, "files": _STRINGS,
-    "interfaces": _STRINGS, "dependencies": _STRINGS, "steps": _STRINGS, "verification": {"type": "array", "items": _CHECK}, "acceptance": _STRINGS})
+_PLAN_ITEM = process_schema({"id": _TEXT, "title": _TEXT, "requirement_ids": _STRINGS, "component_ids": _STRINGS,
+    "deliverables": _STRINGS, "files": _STRINGS, "file_changes": {"type": "array", "items": _FILE_CHANGE},
+    "interfaces": _STRINGS, "dependencies": _STRINGS, "steps": {"type": "array", "items": _STEP},
+    "verification": {"type": "array", "items": _CHECK}, "acceptance": _STRINGS})
 PROCESS_SCHEMAS = {
     "process-intent": {"intent": process_schema({"goal": _TEXT, "why": _TEXT, "success_criteria": _STRINGS, "source": _USER_SOURCE})},
     "process-exploration": {"exploration": process_schema({"current_behavior": _TEXT, "evidence": _STRINGS, "unknowns": _STRINGS})},
@@ -3072,7 +3171,8 @@ PROCESS_SCHEMAS = {
     "process-requirements": {"requirements": {"type": "array", "items": _REQUIREMENT}},
     "process-decision": {"decision": _DECISION},
     "process-design": {"design": process_schema({"behavior": _TEXT, "components": {"type": "array", "items": _COMPONENT},
-        "decisions": _STRINGS, "rationale": _TEXT, "impact": _TEXT, "assumptions": _STRINGS,
+        "decisions": _STRINGS, "rationale": _TEXT, "impact": _TEXT, "current_impact": _TEXT,
+        "out_of_scope": _STRINGS, "failure_conditions": _STRINGS, "assumptions": _STRINGS,
         "verification": {"type": "array", "items": process_schema({"requirement_id": _TEXT, "method": _TEXT, "expected_result": _TEXT})},
         "unresolved": _STRINGS, "delegated_scope": _STRINGS})},
     "process-plan": {"plan": process_schema({"shared_requirements": _STRINGS, "dependencies": _STRINGS, "review_focus": _TEXT,
@@ -3121,6 +3221,178 @@ def process_record_text(state):
                     bullet(scalar(entry))
         else:
             bullet(scalar(value))
+    def entry(title, value):
+        parts = str(value).splitlines() or [""]
+        lines.append("- **" + title + ":** " + parts[0])
+        lines.extend("  " + part for part in parts[1:])
+    def group(title):
+        lines.extend(["", "### " + title, ""])
+    def cell(value):
+        return str(value).replace("|", "\\|").replace("\r", "").replace("\n", "<br>")
+    def table(headers, rows):
+        lines.append("| " + " | ".join(headers) + " |")
+        lines.append("| " + " | ".join("---" for _ in headers) + " |")
+        lines.extend("| " + " | ".join(cell(value) for value in row) + " |" for row in rows)
+    def listed(title, values, absent="None recorded."):
+        if values is None:
+            entry(title, "Not recorded in this revision.")
+        elif values:
+            for value in values:
+                entry(title, value)
+        else:
+            entry(title, absent)
+    def source(value):
+        return value["kind"] + ": " + value["reference"] if value else "Not recorded"
+    def requirement_rows(kind):
+        return [(item["id"], item["text"], item["status"], source(item["source"]), source(item.get("confirmation_source")))
+                for item in process["requirements"] if item["kind"] == kind]
+    def artifact_authority(envelope, approval, review=None):
+        entry("Revision", str(envelope["version"]) + "; digest " + envelope["digest"])
+        entry("Recorded by", envelope["actor"])
+        if review:
+            entry("Independent review", review["verdict"] + " by " + review["actor"] + ": " + review["notes"])
+            listed("Review evidence", review["evidence"])
+        if approval:
+            entry("Approval source", approval["authorization_source"])
+        else:
+            entry("Approval", "Pending for this revision.")
+    def render_spec():
+        lines.extend(["", "## Design", ""])
+        envelope = process["design"]
+        if not envelope:
+            lines.append("Not recorded.")
+            return
+        design = envelope["content"]
+        current = all(envelope.get(key, value) == value for key, value in discussion_bindings(process).items())
+        group("Spec (Design) D" + str(envelope["version"]) + ("" if current else " (historical; discussion changed)"))
+        artifact_authority(envelope, process["design_approval"], process["design_review"])
+        origin = next((item for item in reversed(process["history"]) if item["operation"] == "process-design"
+                       and item.get("design_digest") == envelope["digest"]), {})
+        version = origin.get("state_version")
+        revision_source = ("[Task event " + str(version) + "](events/" + f"{version:08d}.json" + ")"
+                           if type(version) is int else "Immutable process-design events for digest " + envelope["digest"])
+        entry("Revision source", revision_source)
+        if not current:
+            entry("Binding status", "Historical Spec content. Current discussion differs and is not approved by this revision. Current intent, exploration, requirements and decisions remain in their own record sections; retrieve the bound context from the revision source.")
+        group("Intent and success")
+        if current:
+            intent = process["intent"] or {}
+            entry("Goal", intent.get("goal", "Not recorded")); entry("Why", intent.get("why", "Not recorded"))
+            listed("Success criterion", intent.get("success_criteria"))
+            entry("Intent source", source(intent.get("source")))
+        else:
+            entry("Bound intent and success", revision_source)
+        group("Scope")
+        rows = requirement_rows("scope") if current else []
+        if rows:
+            table(["Requirement", "In scope", "Status", "Origin", "Confirmation"], rows)
+        elif not current:
+            entry("Bound scope", revision_source)
+        listed("Out of scope", design.get("out_of_scope"))
+        group("Current behavior and impact")
+        if current:
+            exploration = process["exploration"] or {}
+            entry("Current behavior", exploration.get("current_behavior", "Not recorded"))
+            listed("Evidence", exploration.get("evidence"))
+        else:
+            entry("Bound exploration", revision_source)
+        entry("Current impact", design.get("current_impact", "Not recorded in this revision."))
+        entry("Change impact", design["impact"])
+        group("Required behavior")
+        entry("Behavior", design["behavior"]); entry("Rationale", design["rationale"])
+        for component in design["components"]:
+            entry("Component " + component["id"], component["behavior"])
+            entry("Requirements", ", ".join(component["requirement_ids"]))
+            entry("Files", ", ".join(component["files"]))
+            if component["interfaces"]:
+                entry("Interfaces", "; ".join(component["interfaces"]))
+        group("Decisions and authority")
+        selected = set(design["decisions"]) | set(design["delegated_scope"])
+        decisions = [item for item in process["decisions"] if item["id"] in selected] if current else []
+        if not decisions:
+            if current or not selected:
+                lines.append("No separate decisions selected for this revision.")
+            else:
+                listed("Selected decision reference", sorted(selected))
+                entry("Bound decision authority", revision_source)
+        for decision in decisions:
+            entry(decision["id"] + " (" + decision["status"] + ")", decision["choice"])
+            entry("Rationale", decision["rationale"])
+            entry("Origin", source(decision["source"]))
+            if decision.get("confirmation_source"):
+                entry("Confirmation", source(decision["confirmation_source"]))
+            if decision.get("delegation_id"):
+                entry("Delegation authority", decision["delegation_id"])
+        group("Constraints")
+        rows = requirement_rows("constraint") if current else []
+        if rows:
+            table(["Requirement", "Constraint", "Status", "Origin", "Confirmation"], rows)
+        elif not current:
+            entry("Bound constraints", revision_source)
+        else:
+            lines.append("No separate constraints recorded.")
+        listed("Assumption", design["assumptions"])
+        if design["delegated_scope"]:
+            group("Delegated choices")
+            if not current:
+                listed("Delegation reference", design["delegated_scope"])
+                entry("Bound delegation authority", revision_source)
+            for decision in decisions:
+                if decision["id"] in design["delegated_scope"]:
+                    entry(decision["id"], decision["choice"] + "; requirements " + (", ".join(decision["scope"]) or "shared scope"))
+        group("Acceptance and failure conditions")
+        rows = requirement_rows("acceptance") if current else []
+        if rows:
+            table(["Requirement", "Acceptance condition", "Status", "Origin", "Confirmation"], rows)
+        elif not current:
+            entry("Bound acceptance requirements", revision_source)
+        table(["Requirement", "Verification", "Expected outcome"],
+              [(check["requirement_id"], check["method"], check["expected_result"]) for check in design["verification"]])
+        listed("Failure condition", design.get("failure_conditions"))
+        group("Open questions")
+        listed("Unresolved decision", design["unresolved"])
+    def render_plan():
+        lines.extend(["", "## Implementation plan", ""])
+        envelope = process["plan"]
+        if not envelope:
+            lines.append("Not recorded.")
+            return
+        plan = envelope["content"]
+        group("Plan P" + str(envelope["version"]))
+        artifact_authority(envelope, process["plan_approval"])
+        entry("Approved Spec digest", envelope["design_digest"])
+        listed("Shared requirement", plan["shared_requirements"])
+        listed("External dependency", plan["dependencies"])
+        entry("Review focus", plan["review_focus"])
+        group("File responsibilities")
+        rows = []
+        for item in plan["items"]:
+            changes = item.get("file_changes", [{"path": path, "action": "Not recorded", "responsibility": "Not recorded in this revision."} for path in item["files"]])
+            for change in changes:
+                rows.append((change["path"], change["action"], change["responsibility"], item["id"], ", ".join(item.get("component_ids", [])) or "Not recorded"))
+        table(["File", "Action", "Responsibility", "Work item", "Spec components"], rows)
+        for item in plan["items"]:
+            group("Work item " + item["id"])
+            entry("Title", item["title"]); entry("Requirements", ", ".join(item["requirement_ids"]))
+            listed("Deliverable", item["deliverables"])
+            listed("Interface", item["interfaces"])
+            listed("Depends on", item["dependencies"])
+            lines.extend(["", "**Ordered actions**", ""])
+            for number, step in enumerate(item["steps"], 1):
+                if isinstance(step, str):
+                    entry(str(number), step)
+                    continue
+                entry(str(number) + ". " + step["id"], step["action"])
+                entry("Files", ", ".join(step["files"]))
+                if step["interfaces"]:
+                    entry("Interfaces", "; ".join(step["interfaces"]))
+                entry("Checks", ", ".join(step["verification_ids"]))
+            lines.extend(["", "**Checks and expected outcomes**", ""])
+            table(["Check", "Method or command", "Read targets", "Requirements", "Expected outcome"],
+                  [(check.get("id", "Not recorded"), (json.dumps(check["argv"], ensure_ascii=True) + "; " if "argv" in check else "") + check["method"],
+                    ", ".join(check.get("targets", [])) or "Not recorded", ", ".join(check.get("requirement_ids", [])) or "Not recorded", check["expected_result"])
+                   for check in item["verification"]])
+            listed("Acceptance", item["acceptance"])
     contract = dialogue_contract(state)
     dialogue_state = {key: contract[key] for key in ("pending_questions", "missing_records", "required_recording_steps",
                       "wait_for", "approval_target") if contract[key] is not None}
@@ -3133,12 +3405,26 @@ def process_record_text(state):
     section("Exploration", process["exploration"])
     section("Confirmed requirements", process["requirements"])
     section("Sourced decisions", process["decisions"])
-    section("Design", {"design": process["design"], "gap_review": process["design_review"], "approval": process["design_approval"]})
-    section("Implementation plan", {"plan": process["plan"], "approval": process["plan_approval"]})
-    section("Execution and review", {"items": state["items"], "worktree_preparation": state.get("worktree_preparation")})
+    render_spec()
+    render_plan()
+    execution_items = {}
+    for item_id, item in state["items"].items():
+        projected = {key: value for key, value in item.items() if key != "plan_item"}
+        if item.get("plan_item"):
+            plan = process["plan"]
+            same_revision = plan and any(entry == item["plan_item"] for entry in plan["content"]["items"])
+            projected["plan_reference"] = ("Work item " + item_id + " in Plan P" + str(plan["version"]) if same_revision else
+                "Work item " + item_id + "; its approved plan revision is preserved in immutable task events.")
+        execution_items[item_id] = projected
+    section("Execution and review", {"items": execution_items, "worktree_preparation": state.get("worktree_preparation")})
     section("Experiments and runs", {"experiments": state["experiments"], "runs": state["runs"]})
     section("Delivery", {"integration": state["integration"], "task_lifecycle": state.get("task_lifecycle"), "cleaned": state.get("cleaned", False)})
-    section("Decision history", {"questions": process["questions"], "playback": process["playback"], "changes": process["history"]})
+    record_questions = copy.deepcopy(process["questions"])
+    for question in record_questions:
+        if question.get("answer"):
+            question["answer"].pop("text", None)
+            question["answer"]["content_reference"] = "Original reply preserved in immutable task events and the cited source."
+    section("Decision history", {"questions": record_questions, "playback": process["playback"], "changes": process["history"]})
     return "\n".join(lines) + "\n"
 
 

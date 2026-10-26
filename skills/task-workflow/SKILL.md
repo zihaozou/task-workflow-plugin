@@ -50,7 +50,13 @@ literal values.
 This ordered process is required for an enrolled task. It is not optional
 speaking advice. Use natural Chinese or English with the user. Write persisted
 summaries and deliverables in English and reference the original messages.
-Do not recite internal field names as conversation labels.
+Use concise bold labels with grouped bullets or tables, following the stage
+layouts in [templates/conversation.md](templates/conversation.md). Keep one
+finding, choice, action, or result per bullet. Put the recorded question or
+approval request in a separate final section. Omit empty optional sections.
+Keep source identifiers, state versions, digests, and routine recording narration
+in the record; show relevant source links only where they help assess a finding.
+Use readable revision titles. Do not turn these layouts into long paragraphs.
 
 Use process protocol 2 for new tasks. Legacy tasks retain their recorded state
 until a guarded `process-upgrade` with actual authorization. Never invent prior
@@ -127,12 +133,19 @@ choice blocks a coherent design.
 
 ### 4. Review the coherent design, then request approval
 
-Write a coherent design with `process-design`: intent, requirements and decision
-references, behavior, components, interfaces, impact, verification, recovery,
-assumptions, and delegated choices. Obtain an independent gap review against
-those sources and record `process-design-review` for that exact design digest.
-Resolve material gaps; bring new important unknowns from any worker back into
-the discussion before dependent work. Review a revised design as needed.
+Spec (Design) is the same design revision and approval stage. Use the name Spec
+in conversation; retain the program's design operations and the record's Design
+section. Write the complete Spec with `process-design` using
+[templates/spec.md](templates/spec.md). Cover intent, success, scope, observed
+current behavior and impact, required behavior, decisions and authority,
+constraints, delegated choices, acceptance, failure conditions, and open questions.
+Use authoritative intent, requirements, exploration, decisions, components, and
+verification records rather than duplicating their authority in prose. Obtain an
+independent gap review against those sources and record `process-design-review` for that exact design digest.
+The reviewer must identify important guesses a builder would still need to make
+before creating a concrete plan. Resolve factual gaps from existing evidence,
+settle choices within explicit delegation, and bring new important unknowns from
+any worker back into the discussion before dependent work. Review a revised design as needed.
 
 Show the actual reviewed design, its readable revision and title, review outcome, and
 meaningful effects. Ask explicitly for approval of that exact design. Wait for
@@ -143,8 +156,24 @@ approved design revision and digest match.
 ### 5. Present the plan, then request approval
 
 After design approval, record `process-plan` linked to the approved design.
-Present the exact plan revision and title, ordered work, ownership, dependencies,
-verification, independent reviews, integration scope, and recovery. Ask for
+Use [templates/plan.md](templates/plan.md) to present the exact plan revision
+and title, linked approved Spec, and concrete tasks. Specify each exact file and
+its responsibility, consumed and produced interfaces, ordered action steps,
+named checks and their assertions, verification commands or inspection targets,
+and expected outcomes. Map tasks to Spec components and acceptance requirements.
+Include ownership, dependencies, independent review, applicable integration and
+recovery. Prepare/Implement/Verify/Review/Integrate is a lifecycle overview;
+it does not replace concrete implementation tasks. An implementer must be able
+to act without inventing consequential behavior or test expectations. In the
+approval reply, use meaningful component names and readable executable command
+text paired with expected outcomes. Keep serialized `argv`, schema objects, and
+internal component/requirement/source identifier inventories in the record unless
+an identifier helps the user assess a decision. Show each check with its action,
+command or inspection target, and expected result together; do not repeat the
+same checks in a separate command-metadata dump. A compact product-data JSON
+example is useful when its actual shape is a material design choice. Keep every
+material behavior, decision, and task visible for approval; a link alone is
+insufficient. Ask for
 approval of that plan for implementation. Wait for the user's response. Record
 its source with `process-plan-approve`. Exit only when the current plan has
 approval and still links to the approved design. Design approval alone does

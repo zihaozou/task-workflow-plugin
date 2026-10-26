@@ -1,6 +1,6 @@
 {
   "name": "task-workflow",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "A workflow for development tasks, resources, and frozen experiments.",
   "author": {
     "name": "Task Workflow contributors"

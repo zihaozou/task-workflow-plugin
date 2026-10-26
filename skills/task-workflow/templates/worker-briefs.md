@@ -66,21 +66,28 @@ requirements or design. Do not select product behavior on the user's behalf.
 Design digest and content reference:
 Confirmed requirement and decision references:
 Exploration evidence:
-Review scope: coverage, assumptions, interfaces, verification, recovery
-Return gaps with locations, consequences, and evidence:
+Review scope: builder readiness, coverage, interfaces, failure conditions, acceptance, recovery
+Return unanswered important questions, affected Spec sections, consequences, and evidence:
 Stop at user choice or missing fact:
 ```
 
-Independently compare design revision with confirmed requirements, decision
-sources, delegation scope, and exploration evidence. Return specific gaps,
-unsupported assumptions, conflicts, and questions. Do not implement or approve
-the design for the user.
+Independently compare the exact Spec (Design) revision with confirmed
+requirements, decision sources, delegation scope, and exploration evidence.
+Determine whether a competent builder can create a concrete plan without guessing
+important behavior. Return unresolved questions in order of consequence, affected
+sections, evidence, and how a wrong choice changes the plan. Respect explicit
+builder freedom and omit wording preferences without a behavior consequence.
+Do not implement or approve the design for the user.
 
 ## Implementer
 
 ```text
 Plan item and approved design/plan digests:
-Owned paths and permitted interfaces:
+Owned paths, per-file actions and responsibilities:
+Spec component and requirement mappings:
+Consumed/produced exact interfaces:
+Ordered action steps and linked verification IDs:
+Named checks/assertions, commands or inspection targets, expected outcomes:
 Required behavior and acceptance criteria:
 Dependencies and current revisions:
 Verification to run and evidence to return:

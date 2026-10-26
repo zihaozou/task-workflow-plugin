@@ -3,6 +3,8 @@
 For each applicable phase, check INPUT before action, follow CONVERSATION in
 order, use the program operation in WRITE, honor WAIT, meet EXIT before advancing,
 and pass RETURN to the next phase. The main skill contains the mandatory sequence.
+Use the bold stage labels, grouped bullets/tables, and separate final question
+in [conversation.md](conversation.md). Omit empty optional presentation groups.
 A direct status or ordinary reply does not advance a phase. The live operation
 schema is the authority for exact arguments and guards. Every mutation uses the current task version and actor.
 
@@ -64,10 +66,14 @@ approval, implementation, and final review.
 ## Design draft and independent gap review
 
 - INPUT: Confirmed playback, requirements, decisions, and exploration evidence.
-- CONVERSATION: Explain behavior, components, interfaces, impact, verification,
-  assumptions, and unresolved choices. Present the actual revision reviewed.
+- CONVERSATION: Present the actual Spec (Design) revision using [spec.md](spec.md):
+  intent/success, scope, current behavior/impact, required behavior, decisions and
+  authority, constraints/delegation, acceptance, failure conditions, and actual
+  open questions. Group content under meaningful bold labels.
 - WRITE: `process-design`, then `process-design-review` with the design digest,
-  independent verdict, notes, and evidence. Revise and review material gaps.
+  independent verdict, notes, and evidence. The builder gap review identifies
+  important guesses that would prevent a concrete plan. Revise and review
+  material gaps against the exact current digest.
 - WAIT: Await the independent review. Bring new important unknowns back into
   discussion before dependent work.
 - EXIT: An independent gap review accepts the same design digest that will be
@@ -88,9 +94,11 @@ approval, implementation, and final review.
 ## Implementation plan and user plan approval
 
 - INPUT: Approved design digest and mapped requirements.
-- CONVERSATION: Present work items, ownership, dependencies, verification,
-  separate review, integration, and recovery. Ask for approval of the plan
-  version the user saw.
+- CONVERSATION: Use [plan.md](plan.md) for file responsibilities and concrete
+  tasks: owned paths, exact interfaces, ordered actions, named checks/assertions,
+  verification commands or inspection targets, expected results, dependencies,
+  independent reviews, and applicable integration/recovery. Ask for approval in
+  a separate final section. Lifecycle labels alone are insufficient tasks.
 - WRITE: `process-plan` with shared requirements, dependencies, review focus,
   and item details; then `process-plan-approve` with plan digest and actual
   user approval source.

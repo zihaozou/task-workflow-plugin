@@ -73,6 +73,8 @@ class DialogueContractTests(Fixture):
         question = current['pending_questions'][0]
         self.assertEqual(question['choices'][0]['consequence'], 'Only the recorded component changes.')
         self.assertEqual(question['source'], AGENT)
+        self.assertIn('question', current['reply_fields'][-1])
+        self.assertEqual(current['presentation']['sections'][-1], 'Question')
         self.assertIn('end the turn', current['turn_exit'])
         self.error('answer_required', lambda: self.op('process-decision', decision=self.decision()))
         self.error('question_pending', lambda: self.op('process-design', design=self.design_content()))
@@ -98,13 +100,18 @@ class DialogueContractTests(Fixture):
         self.assertEqual(self.contract()['latest_answer']['linked_decisions'][0]['confirmation_source'], USER)
         self.op('process-question', question=self.choices('Q2'))
         self.assertEqual(self.contract()['dialogue_mode'], 'answer_acknowledgment')
+        self.assertIn('question', self.contract()['reply_fields'][-1])
         second_source = {'kind': 'user', 'reference': 'Conversation: second actual choice'}
         self.op('process-answer', question_id='Q2', answer='Keep this scope too.', source=second_source, choice_id='keep')
         self.op('process-decision', decision=self.decision('Q2', second_source))
         self.op('process-playback', summary='Both actual selections preserve the scope.', confirmation_source=second_source)
         self.designed()
         record = (self.root / '.task-workflow/tasks/task/record.md').read_text()
-        self.assertIn(raw_answer, record)
+        self.assertNotIn(raw_answer, record)
+        self.assertEqual(self.state['process']['questions'][0]['answer']['text'], raw_answer)
+        self.assertEqual(self.contract()['latest_answer']['answer']['text'], 'Keep this scope too.')
+        events = list((self.root / '.task-workflow/tasks/task/events').glob('*.json'))
+        self.assertTrue(any(raw_answer in json.dumps(json.loads(event.read_text()), ensure_ascii=False) for event in events))
         self.assertIn('Keep the current scope', record)
         self.assertIn('Conversation: second actual choice', record)
         approval = self.contract()['approval_target']
@@ -156,7 +163,8 @@ class DialogueContractTests(Fixture):
         self.op('process-question', question={**self.question('Q2'), 'text': 'Which third option should the design explore?'})
         self.assertEqual(self.contract()['pending_questions'][0]['id'], 'Q2')
         record = (self.root / '.task-workflow/tasks/task/record.md').read_text()
-        self.assertIn(raw_answer, record)
+        self.assertNotIn(raw_answer, record)
+        self.assertIn('Explore a third option', record)
         self.assertIn(source['reference'], record)
 
     def test_generated_current_state_uses_the_actual_dialogue_contract(self):

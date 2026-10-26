@@ -46,16 +46,24 @@ points to an actual user-visible message, program event, or reviewed revision.
 
 ## Design
 
-Revision, source requirements and decisions, behavior, affected components,
-interfaces, data changes, verification approach, recovery, open questions,
-independent gap-review result, and user approval reference. Keep reviewed draft
+Render the Spec inside this Design section using [spec.md](spec.md). Spec and
+Design name the same revision. Include intent/success, scope, current behavior
+and impact, required behavior, decisions and authority, constraints/delegation,
+acceptance, failure conditions, and actual open questions. Show meaningful
+subheadings, grouped bullets, and acceptance tables. Preserve authoritative
+references, component interfaces, recovery, independent builder gap-review result,
+and user approval source. Keep reviewed draft
 and approved revision distinct. Approval covers the revision presented.
 
 ## Implementation plan
 
-Revision and approved design revision; ordered work items, owned paths,
-dependencies, verification, integration, recovery, and user plan-approval
-reference. If the design changes materially, return to discussion and revise
+Use [plan.md](plan.md). Render the revision, approved Spec reference, file
+responsibilities, and concrete task blocks. Each block includes component and
+requirement mappings, owned file actions/responsibilities, interface declarations,
+dependencies, ordered action steps, named tests/assertions or inspection criteria,
+verification commands/targets and expected results, acceptance, and review focus.
+Include applicable integration/recovery and user plan-approval source. Lifecycle
+phase names alone do not describe implementation tasks. If the design changes materially, return to discussion and revise
 the dependent plan.
 
 ## Execution and review

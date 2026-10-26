@@ -27,6 +27,8 @@ class ProcessTests(Fixture):
 
     def design_content(self):
         return {'behavior': 'Implement the requested fixture behavior.',
+            'current_impact': 'The current fixture value does not expose the requested behavior.',
+            'out_of_scope': ['Change the declared lock format'], 'failure_conditions': ['The scoped behavior check fails.'],
             'components': [
                 {'id': 'code', 'requirement_ids': ['R1'], 'behavior': 'Update the code value.', 'interfaces': ['VALUE'], 'files': ['code.py']},
                 {'id': 'lock', 'requirement_ids': ['R2'], 'behavior': 'Retain the lock declaration.', 'interfaces': [], 'files': ['uv.lock']}],
@@ -46,9 +48,12 @@ class ProcessTests(Fixture):
     def plan_content(self):
         return {'shared_requirements': [], 'dependencies': [], 'review_focus': 'Inspect scope coverage and actual checks.',
             'items': [
-                {'id': name, 'title': 'Implement ' + name, 'requirement_ids': [ref], 'deliverables': ['Accepted ' + filename],
-                 'files': [filename], 'interfaces': [], 'dependencies': [], 'steps': ['Inspect the scope', 'Implement and verify'],
-                 'verification': [{'method': 'Execute scoped check', 'expected_result': 'Exit zero'}], 'acceptance': ['Independent review accepts']}
+                {'id': name, 'title': 'Implement ' + name, 'requirement_ids': [ref], 'component_ids': [name], 'deliverables': ['Accepted ' + filename],
+                 'files': [filename], 'file_changes': [{'path': filename, 'action': 'modify', 'responsibility': 'Implement the declared ' + name + ' behavior.'}],
+                 'interfaces': [], 'dependencies': [], 'steps': [{'id': 'update', 'action': 'Update the declared ' + name + ' value and inspect its result.',
+                    'files': [filename], 'interfaces': [], 'verification_ids': ['scope-check']}],
+                 'verification': [{'id': 'scope-check', 'kind': 'inspection', 'requirement_ids': [ref], 'targets': [filename],
+                    'method': 'Inspect the declared ' + name + ' value.', 'expected_result': 'The required value and format are present.'}], 'acceptance': ['Independent review accepts']}
                 for name, ref, filename in [('code', 'R1', 'code.py'), ('lock', 'R2', 'uv.lock')]]}
 
     def planned(self, plan=None):
@@ -139,7 +144,7 @@ class ProcessTests(Fixture):
         self.op('process-design-approve', design_digest=self.state['design']['digest'], authorization_source='Current design confirmed')
         self.op('process-plan', plan=self.plan_content())
         old_plan = self.state['process']['plan']['digest']
-        plan = self.plan_content(); plan['items'][0]['steps'].append('Inspect final value')
+        plan = self.plan_content(); plan['items'][0]['steps'][0]['action'] += ' Inspect the final value again.'
         self.op('process-plan', plan=plan)
         self.error('stale_plan', lambda: self.op('process-plan-approve', plan_digest=old_plan, authorization_source='Old confirmation'))
 
@@ -282,7 +287,7 @@ class ProcessTests(Fixture):
         design['assumptions'] = ['First assumption.\n## Embedded assumption heading\nSecond assumption line.']
         self.designed(design)
         plan = self.plan_content(); plan['items'][0]['title'] = 'Code item\n## Embedded item heading'
-        plan['items'][0]['steps'] = ['First step.\n\n## Embedded step heading\nContinue the same step.']
+        plan['items'][0]['steps'][0]['action'] = 'First step.\n\n## Embedded step heading\nContinue the same step.'
         self.planned(plan)
         record = (self.root / '.task-workflow/tasks/task/record.md').read_text()
         headings = [line for line in record.splitlines() if line.startswith('## ')]

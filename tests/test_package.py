@@ -26,7 +26,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.7')
+        self.assertEqual(manifest['version'], '0.1.8')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -56,8 +56,35 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(set(server), {'type', 'command', 'args', 'cwd'})
             self.assertEqual(server['type'], 'stdio')
             self.assertEqual(server['command'], 'python3')
-            self.assertEqual(server['cwd'], '${PLUGIN_ROOT}')
-            self.assertTrue(Path(server['args'][0].replace('${PLUGIN_ROOT}', str(ROOT))).is_file())
+            self.assertEqual(server['cwd'], '.')
+            self.assertEqual(server['args'], ['skills/task-workflow/scripts/mcp_server.py'])
+            self.assertTrue((ROOT / server['cwd'] / server['args'][0]).is_file())
+
+    def test_declared_relative_mcp_command_starts_from_plugin_path_with_spaces(self):
+        server = json.loads((ROOT / '.mcp.json').read_text())['mcpServers']['task-workflow']
+        with tempfile.TemporaryDirectory(prefix='plugin root with spaces ') as temporary:
+            plugin = Path(temporary)
+            target = plugin / 'skills/task-workflow/scripts'
+            target.mkdir(parents=True)
+            for source in SCRIPTS.glob('*.py'):
+                shutil.copyfile(source, target / source.name)
+            messages = [
+                {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize', 'params': {}},
+                {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list', 'params': {}},
+                {'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {
+                    'name': 'schema', 'arguments': {'root': str(plugin)}}},
+            ]
+            result = subprocess.run([server['command']] + server['args'],
+                                    cwd=plugin / server['cwd'],
+                                    input=''.join(json.dumps(message) + '\n' for message in messages),
+                                    text=True, capture_output=True, timeout=10)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            replies = [json.loads(line) for line in result.stdout.splitlines()]
+            self.assertEqual([reply['id'] for reply in replies], [1, 2, 3])
+            self.assertEqual(replies[0]['result']['serverInfo']['name'], 'task-workflow')
+            self.assertIn('context', {tool['name'] for tool in replies[1]['result']['tools']})
+            self.assertFalse(replies[2]['result']['isError'])
+            self.assertTrue(json.loads(replies[2]['result']['content'][0]['text'])['ok'])
 
     def test_skill_supports_implicit_routing_and_has_no_setup_dependency(self):
         skill = (ROOT / 'skills/task-workflow/SKILL.md').read_text()
@@ -73,7 +100,7 @@ class PackageTests(unittest.TestCase):
     def test_structured_templates_are_shipped_and_linked(self):
         base = ROOT / 'skills/task-workflow'
         assets = ('README.md', 'phases.md', 'conversation.md', 'record.md',
-                  'worker-briefs.md', 'worker-reports.md')
+                  'worker-briefs.md', 'worker-reports.md', 'spec.md', 'plan.md')
         for name in assets:
             path = base / 'templates' / name
             with self.subTest(name=name):
@@ -224,6 +251,17 @@ class NativeHookDiscoveryTests(unittest.TestCase):
                     self.assertTrue(detail['summary']['installed'])
                     self.assertTrue(detail['summary']['enabled'])
                     self.assertEqual(len(detail['hooks']), 2)
+                    native_mcp = subprocess.run([cli, 'mcp', 'get', 'task-workflow', '--json'],
+                                                env=env, cwd=staged, capture_output=True,
+                                                text=True, timeout=30)
+                    self.assertEqual(native_mcp.returncode, 0, native_mcp.stderr)
+                    transport = json.loads(native_mcp.stdout)['transport']
+                    self.assertEqual(transport['command'], 'python3')
+                    self.assertEqual(transport['args'], ['skills/task-workflow/scripts/mcp_server.py'])
+                    installed_root = Path(transport['cwd'])
+                    self.assertTrue(installed_root.is_relative_to(home))
+                    self.assertTrue((installed_root / transport['args'][0]).is_file())
+                    self.assertNotIn('${PLUGIN_ROOT}', json.dumps(transport))
                     send({'id': 2, 'method': 'hooks/list', 'params': {'cwds': [str(staged)]}})
                     result = response(2)
                     entry = result['data'][0]

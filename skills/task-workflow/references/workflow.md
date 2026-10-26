@@ -55,6 +55,32 @@ a playback. Use `clarification` for clarification questions; omission retains
 that default for compatibility. The program selects playback reply fields and
 waits from this persisted field, not from question identifiers or text heuristics.
 
+Use the fixed readable layouts in [../templates/conversation.md](../templates/conversation.md):
+concise bold labels, one point per bullet, tables for comparisons, and the exact
+question or approval request in a separate final section. Omit empty optional
+groups and routine recording narration. Keep complete provenance and digest
+bindings in the one record; show relevant source links beside useful findings.
+
+Spec and Design are the same revision and approval stage. Use Spec in conversation
+and retain the Design record heading and `process-design` operations. Follow
+[../templates/spec.md](../templates/spec.md) for complete content and independent
+builder gap review. New design content adds `current_impact`, `out_of_scope`, and
+`failure_conditions`; its other sections derive from authoritative intent,
+requirements, exploration, decisions, components, and verification.
+
+Follow [../templates/plan.md](../templates/plan.md) for concrete tasks. New plan
+items map `component_ids` to approved Spec components. `file_changes` covers each
+owned path exactly once with action and responsibility. Structured `steps` name
+an action, owned files, declared interfaces, and item-local verification IDs.
+Checks contain item-local IDs, kind (`command` or `inspection`), requirement IDs,
+targets, method, and expected result. Command checks include nonempty `argv`;
+inspection targets are safe repository-relative paths. Check targets outside
+ownership permit observation, not mutation. Named tests/assertions and concrete
+expected results must resolve the behavior an implementer cannot choose alone.
+Prepare/Implement/Verify/Review/Integrate remains an overview, not a task plan.
+Existing stored design and plan envelopes remain readable and approvable without
+rewriting their approved content or digest. New submissions use the current schema.
+
 The mandatory sequence lives in the main skill. Inspect actual context before
 the first substantive discussion reply. Record intent and exploration, then
 record the first question before sending it. The reply restates intent and why,
@@ -231,8 +257,9 @@ integration, and lifecycle operations follow the current schema, actual guards,
 and existing user authorization. Closed tasks still require authorized reopening
 before their work can change. Check `applicability` against
 the current request: direct status and ordinary replies preserve a pending wait
-without forced discussion or phase progression. `templates` links the required
-response and record structures. Refresh context after a version conflict or
+without forced discussion or phase progression. `presentation` specifies readable section layout and a separate final question.
+`templates` links the required response, record, Spec, and plan structures as
+applicable. Refresh context after a version conflict or
 interruption. Source-linked answers and decisions must precede dependent work.
 
 Guards check declared state, provenance links, and revisions. They cannot verify

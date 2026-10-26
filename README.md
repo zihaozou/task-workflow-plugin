@@ -36,7 +36,11 @@ guidance](https://developers.openai.com/plugins/build/plugins#add-a-marketplace-
 
 The Codex package uses `.codex-plugin/plugin.json`, `.mcp.json`, `skills/`,
 and `hooks/hooks.json`. The manifest explicitly declares the hook file. The
-client resolves `${PLUGIN_ROOT}` in server and hook commands. `mcp.json` is a
+native MCP declaration uses plugin-relative `cwd: "."` and
+`args: ["skills/task-workflow/scripts/mcp_server.py"]` with `python3`. The tested
+native client resolves these relative paths from the plugin root; it does not
+expand `${PLUGIN_ROOT}` in MCP arguments or `cwd`. Hook commands run through a
+shell and retain their quoted `${PLUGIN_ROOT}` paths. `mcp.json` is a
 matching portable MCP declaration for other consumers.
 
 Native discovery was checked with Codex CLI `0.164.0-alpha.11.1`. With root
@@ -65,6 +69,13 @@ playback. Playback separates user requirements, agent proposals, and explicitly
 delegated choices. A coherent design receives independent gap review before the
 user sees and approves that exact revision. The user then sees work and
 verification in a linked plan and approves its exact revision before execution.
+Stage replies use concise bold labels, grouped bullets or tables, and a separate
+question. Empty optional groups and routine workflow narration are omitted.
+Spec and Design mean the same reviewed revision in the one task record. Specs
+cover complete behavior, authority, constraints, impact, failure conditions, and
+acceptance. Plans assign concrete file responsibilities, interfaces, action steps,
+named checks, verification commands or inspection targets, and expected outcomes.
+Lifecycle phase names alone do not form an implementation plan.
 There is no fixed number of questions or alternative designs.
 
 Questions are recorded before sending. Actual answer sources and affected

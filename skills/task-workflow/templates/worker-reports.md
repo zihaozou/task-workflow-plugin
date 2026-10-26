@@ -21,7 +21,8 @@ Suggested next action:
 Design revision reviewed:
 Requirement and decision sources checked:
 Verdict: gaps found | no material gaps found
-Gaps: [location | evidence | consequence | needed resolution]
+Builder readiness: concrete plan possible | important guesses remain
+Gaps: [question | Spec section | evidence | effect on plan | needed resolution]
 Unsupported choices or approval claims:
 Questions for coordinator:
 ```
@@ -33,7 +34,7 @@ Plan item and approved revisions:
 Owned paths changed:
 Change revision or diff reference:
 Behavior implemented:
-Verification: [check | result | evidence]
+Verification: [named check | assertion or criterion | command/target | expected outcome | actual result | evidence]
 Deviations or open choices:
 Handoff state: ready for review | blocked
 ```
