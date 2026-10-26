@@ -1,6 +1,6 @@
 ---
 name: task-workflow
-description: Automatically route substantive development and experiment action requests into exploration and design, then coordinate approved implementation, evidence review, Git integration, and frozen runs. Use for explicit invocation, clear substantive action requests, or authorized task continuation. Handle ordinary chat, advice, read-only status, and simple bounded requests directly.
+description: Automatically route substantive development and experiment action requests into exploration and design, then coordinate approved implementation, evidence review, Git integration, and frozen runs. Use for explicit invocation, clear substantive action requests, or authorized task continuation. Handle ordinary chat, advice, read-only status, and simple requests directly.
 ---
 
 # Task Workflow
@@ -9,7 +9,7 @@ description: Automatically route substantive development and experiment action r
 
 The main agent chooses the route from the current request and conversation
 context. The user's explicit routing choice wins. Handle ordinary chat, advice,
-read-only status, and simple bounded requests directly. Automatically use this
+read-only status, and simple requests directly. Automatically use this
 skill for substantive development or experiment action requests, starting with
 exploration and design. A clear action request authorizes enrollment for that
 purpose; record the request as the authorization source. If intent or task
@@ -46,7 +46,7 @@ literal values.
 ## Roles and review
 
 The primary agent coordinates and reviews the task. Choose the model for each
-bounded delegation: Luna for simple lookup, documentation, and mechanical
+focused delegation: Luna for simple lookup, documentation, and mechanical
 checks; Sol by default for implementation and review. Use Astra only after
 explicit user approval. If a lighter model is unavailable, choose an available
 Sol model. Do not escalate automatically to Astra. Reuse a worker only while
@@ -103,6 +103,12 @@ from the user's already loaded instructions, then pass concrete parameters to
 the program. A state query does not provision or release a resource. A finished
 run does not authorize release. Reuse only after checking recorded ownership,
 fit, references, and actual availability.
+
+Do not impose plugin-level size, file-count, JSON, label, or output-length caps.
+Preserve snapshot contents and provenance. Do not set default command deadlines
+or maximum user-supplied timeouts. Let actual provider availability and scheduling
+govern resource admission. Host, framework, and machine capacity remain
+environmental constraints.
 
 An experiment has one research goal and can contain several frozen runs. A
 code or configuration change for the same goal creates a new run. A changed

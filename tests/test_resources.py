@@ -8,11 +8,11 @@ from test_workflow import Fixture, w
 
 
 class ResourceTests(Fixture):
-    def register(self, **fields):
+    def register(self, valid_for_seconds=3600, **fields):
         return self.op('resource-register', resource_id='resource', handle='opaque-fixture-1', provided_by='user',
             can_release=True, authorization_source='User granted release permission', ownership_evidence=['Fixture owner receipt'],
             capabilities={'units': 2, 'kind': 'fixture'}, observed_state='available', evidence=['Fixture availability'],
-            valid_for_seconds=3600, **fields)['resource']
+            **({} if valid_for_seconds is None else {"valid_for_seconds": valid_for_seconds}), **fields)['resource']
 
     def resource(self):
         return w.dispatch('resource-status', {'root': str(self.root), 'resource_id': 'resource'})['resource']
@@ -122,21 +122,21 @@ class ResourceTests(Fixture):
         self.refresh(); self.op('run-reconcile', run_id='run')
         self.assertEqual(self.state['runs']['run']['status'], 'awaiting_artifacts')
 
-    def test_dispatch_and_start_recheck_owner_seal_and_active_conflict(self):
+    def test_different_runs_share_resource_and_start_rechecks_owner_and_seal(self):
         self.integrated(); self.register()
         self.prepare(resource_id='resource', requirements={'units': 2})
         first = self.op('run-dispatch', run_id='run')
         self.prepare(run_id='second', resource_id='resource', requirements={'units': 2})
         second = self.op('run-dispatch', run_id='second')
-        # A crash after claiming but before recording start must still block capacity reuse.
+        # A claim belongs to its own Run and does not reserve the whole resource.
         claim = Path(first['run']['directory']) / 'execution.claim'
         claim.mkdir()
         self.error('cancellation_denied', lambda: self.op('run-cancel', run_id='run', reason='Claim requires reconciliation'))
-        denied = subprocess.run(second['runner_argv'], capture_output=True, timeout=30)
-        self.assertNotEqual(denied.returncode, 0)
-        self.assertFalse((Path(second['run']['directory']) / 'execution.claim').exists())
+        completed = subprocess.run(second['runner_argv'], capture_output=True, timeout=30)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.assertTrue((Path(second['run']['directory']) / 'execution.claim').exists())
         claim.rmdir()  # Remove only this synthetic empty fixture claim.
-        # Preserve the first actual start as an unreconciled capacity reference.
+        # Admission still checks resource ownership and any sealed release intent.
         original = w.commit_event
         _, store = w.store_dir(str(self.root))
         resource_path = w.resource_dir(store, 'resource')
@@ -154,12 +154,14 @@ class ResourceTests(Fixture):
         resource_change(release=None)
         done = subprocess.run(first['runner_argv'], capture_output=True, timeout=30)
         self.assertEqual(done.returncode, 0, done.stderr.decode())
-        # An unreconciled actual start still owns capacity after its process exits.
-        denied = subprocess.run(second['runner_argv'], capture_output=True, timeout=30)
-        self.assertNotEqual(denied.returncode, 0)
-        self.assertFalse((Path(second['run']['directory']) / 'execution.claim').exists())
+        # Each Run remains at most once, and every live reference blocks release.
+        duplicate = subprocess.run(second['runner_argv'], capture_output=True, timeout=30)
+        self.assertNotEqual(duplicate.returncode, 0)
+        self.assertEqual(len(self.resource()['run_refs']), 2)
+        self.refresh()
+        self.error('release_denied', lambda: self.release(self.resource(), [sys.executable, '-c', 'pass']))
         self.refresh(); self.op('run-reconcile', run_id='run')
-        self.assertEqual(subprocess.run(second['runner_argv'], capture_output=True, timeout=30).returncode, 0)
+        self.op('run-reconcile', run_id='second')
 
     def test_unclaimed_local_admission_failure_stays_cancellable(self):
         self.integrated(); self.register(); current = self.prepare(resource_id='resource')['run']
@@ -184,3 +186,68 @@ class ResourceTests(Fixture):
         with mock.patch.object(w, 'run', side_effect=cancel_before_start):
             self.error('execution_receipt_invalid', lambda: self.op('run-execute', run_id='cancelled'))
         self.assertEqual(self.state['runs']['cancelled']['status'], 'cancelled')
+
+    def test_optional_and_long_observation_validity(self):
+        self.approved()
+        resource = self.register(valid_for_seconds=None)
+        self.assertIsNone(resource['observation']['valid_until'])
+        self.assertNotIn('valid_for_seconds', resource['observation'])
+        self.assertTrue(w.observation_current(resource))
+        for seconds in (172800, 10 ** 100):
+            resource = self.op('resource-observe', resource_id='resource', expected_resource_version=resource['version'],
+                capabilities={'units': 2}, observed_state='available', evidence=['Supplied validity'],
+                valid_for_seconds=seconds)['resource']
+            self.assertEqual(resource['observation']['valid_for_seconds'], seconds)
+            self.assertTrue(w.observation_current(resource))
+        resource = self.op('resource-observe', resource_id='resource', expected_resource_version=resource['version'],
+            capabilities={'units': 2}, observed_state='available', evidence=['No expiry'])['resource']
+        self.assertNotIn('valid_for_seconds', resource['observation'])
+        self.error('invalid_duration', lambda: self.op('resource-observe', resource_id='resource',
+            expected_resource_version=resource['version'], capabilities={'units': 2}, observed_state='available',
+            evidence=['Invalid validity'], valid_for_seconds=0))
+        schemas = {entry['name']: entry['inputSchema'] for entry in w.command_schemas()}
+        for operation in ('resource-register', 'resource-observe'):
+            self.assertNotIn('valid_for_seconds', schemas[operation]['required'])
+            self.assertIn('valid_for_seconds', schemas[operation]['properties'])
+
+    def test_many_capabilities_and_long_values_preserve_requirement_fit(self):
+        capabilities = {'capability_' + str(index): 'v' * 1001 for index in range(101)}
+        capabilities['gpu_count'] = 1000000
+        w.validate_capabilities(capabilities)
+        self.approved()
+        self.op('resource-register', resource_id='resource', handle='opaque-large-capabilities', provided_by='user',
+            can_release=False, authorization_source='User supplied resource', ownership_evidence=['Owner receipt'],
+            capabilities=capabilities, observed_state='available', evidence=['Availability'])
+        self.op('run-plan', run_id='large', resource_id='resource', requirements=capabilities)
+        self.error('resource_mismatch', lambda: self.op('run-plan', run_id='too-large', resource_id='resource',
+            requirements={'gpu_count': 1000001}))
+
+    def test_two_workloads_overlap_on_one_resource(self):
+        self.integrated(); self.register()
+        gate = self.base / 'shared-resource-gate'
+        self.op('run-prepare', run_id='first', environment_id='runtime', lockfiles=['uv.lock'], resource_id='resource',
+            argv=['python', '-c', 'import pathlib,sys,time; gate=pathlib.Path(sys.argv[1]); '
+                  'exec("while not gate.exists(): time.sleep(0.01)")', str(gate)],
+            artifacts=[], dependency_declaration='no-external-local-dependencies')
+        first = self.op('run-dispatch', run_id='first')
+        self.op('run-prepare', run_id='second', environment_id='runtime', lockfiles=['uv.lock'], resource_id='resource',
+            argv=['python', '-c', 'import pathlib,sys; pathlib.Path(sys.argv[1]).touch()', str(gate)],
+            artifacts=[], dependency_declaration='no-external-local-dependencies')
+        second = self.op('run-dispatch', run_id='second')
+        process = subprocess.Popen(first['runner_argv'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            import time
+            deadline = time.monotonic() + 30
+            while self.refresh()['runs']['first']['status'] != 'running':
+                self.assertIsNone(process.poll())
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.01)
+            self.assertIsNone(process.poll())
+            completed = subprocess.run(second['runner_argv'], capture_output=True, timeout=30)
+            self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+            output, errors = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, errors.decode())
+        finally:
+            gate.touch()
+            if process.poll() is None:
+                process.communicate(timeout=30)

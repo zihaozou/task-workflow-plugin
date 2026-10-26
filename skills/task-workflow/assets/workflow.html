@@ -31,8 +31,7 @@
   function request(method, params) {
     return new Promise((resolve,reject) => {
       const id=nextId++;
-      const timer=setTimeout(() => {pending.delete(id);reject(new Error('timeout'));}, 10000);
-      pending.set(id,{resolve,reject,timer});send({jsonrpc:'2.0',id,method,params});
+      pending.set(id,{resolve,reject});send({jsonrpc:'2.0',id,method,params});
     });
   }
   function status(value) {$('connection').textContent=value;$('connection').hidden=!value;}
@@ -41,11 +40,11 @@
     context={...context,...update};
     if(update.theme==='light'||update.theme==='dark')document.documentElement.dataset.theme=update.theme;
     for(const [key,value] of Object.entries(update.styles?.variables||{})) {
-      if(/^--(?:color|font)-[a-z0-9-]+$/.test(key)&&typeof value==='string'&&value.length<200&&!/url\s*\(|[;{}]/i.test(value))document.documentElement.style.setProperty(key,value);
+      if(/^--(?:color|font)-[a-z0-9-]+$/.test(key)&&typeof value==='string'&&!/url\s*\(|[;{}]/i.test(value))document.documentElement.style.setProperty(key,value);
     }
     for(const side of ['top','right','bottom','left']) {
       const value=context.safeAreaInsets?.[side];
-      if(typeof value==='number'&&Number.isFinite(value))document.documentElement.style.setProperty('--safe-'+side,Math.min(1000,Math.max(0,value))+'px');
+      if(typeof value==='number'&&Number.isFinite(value))document.documentElement.style.setProperty('--safe-'+side,Math.max(0,value)+'px');
     }
   }
   const readable=value=>{const result=String(value||'unknown');return result.charAt(0).toUpperCase()+result.slice(1).replace(/_/g,' ');};
@@ -68,7 +67,7 @@
     $('details').replaceChildren();$('details').hidden=!task;$('empty').hidden=!!task;
     if(!task){$('phase').textContent='Unbound';return;}
     const current=phaseState(task);$('phase').textContent=current.phase;
-    if(current.detail)$('details').append(text('p',String(current.detail).slice(0,100)));
+    if(current.detail)$('details').append(text('p',current.detail));
   }
   function accept(result) {
     if(!isObject(result)||result.isError)throw new Error('unavailable');
@@ -95,7 +94,7 @@
     if(Object.hasOwn(message,'id')&&!message.method){
       const call=pending.get(message.id);if(!call)return;
       if(origin===null)origin=event.origin;
-      clearTimeout(call.timer);pending.delete(message.id);
+      pending.delete(message.id);
       if(message.error)call.reject(new Error('host error'));else if(isObject(message.result))call.resolve(message.result);else call.reject(new Error('invalid response'));
       return;
     }
@@ -105,7 +104,7 @@
     else if(message.method==='ui/notifications/tool-cancelled')status('Read cancelled. Refresh to retry.');
     else if(message.method==='ui/resource-teardown'&&Object.hasOwn(message,'id')){
       send({jsonrpc:'2.0',id:message.id,result:{}});disposed=true;clearInterval(refreshTimer);
-      for(const call of pending.values()){clearTimeout(call.timer);call.reject(new Error('closed'));}pending.clear();window.removeEventListener('message',receive);
+      for(const call of pending.values()){call.reject(new Error('closed'));}pending.clear();window.removeEventListener('message',receive);
     }
   }
   window.addEventListener('message',receive);

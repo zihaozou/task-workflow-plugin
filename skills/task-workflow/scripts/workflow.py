@@ -12,11 +12,13 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
 import threading
+import time
 import uuid
 
 
@@ -24,9 +26,7 @@ VERSION = 1
 PORTABLE_FORMAT = 2
 EXECUTION_PROTOCOL = 2
 STATES = ("pending", "implementing", "reviewing", "complete")
-IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
-MAX_JSON = 4 * 1024 * 1024
-MAX_OUTPUT = 16000
+IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 TERMINAL_RUNS = ("complete", "failed", "cancelled")
 
 class WorkflowError(Exception):
@@ -55,12 +55,12 @@ def sha_file(path):
 
 def identifier(value):
     if not isinstance(value, str) or not IDENTIFIER.fullmatch(value):
-        fail("invalid_identifier", "Identifiers must contain 1-64 letters, digits, underscores or hyphens.")
+        fail("invalid_identifier", "Identifiers must start with a letter or digit and contain only letters, digits, underscores or hyphens.")
     return value
 
 def text_value(value):
-    if not isinstance(value, str) or not value.strip() or len(value) > 100000:
-        fail("invalid_text", "A nonempty bounded text value is required.")
+    if not isinstance(value, str) or not value.strip():
+        fail("invalid_text", "A nonempty text value is required.")
     return value
 
 def existing_dir(value):
@@ -93,23 +93,47 @@ def no_symlinks(path, anchor):
         if current.is_symlink():
             fail("unsafe_path", "Symlink paths are prohibited.")
 
-def run(argv, cwd=None, timeout=60, max_output=MAX_OUTPUT, input_text=None):
-    # Disk-backed capture prevents a noisy child from exhausting Python memory.
-    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+def wait_with_timeout(waiter, timeout):
+    """Honor an optional total duration with platform-compatible individual waits."""
+    if timeout is None:
+        return waiter(None)
+    deadline = time.monotonic_ns() + timeout * 1_000_000_000
+    while True:
+        remaining = max(0, deadline - time.monotonic_ns())
+        # TIMEOUT_MAX comes from Python's platform wait implementation. Splitting
+        # a larger duration here preserves its full deadline without overflow.
+        seconds = min(remaining, int(threading.TIMEOUT_MAX) * 1_000_000_000) / 1_000_000_000
         try:
-            result = subprocess.run(argv, cwd=cwd, input=input_text.encode() if input_text is not None else None,
-                                    **({} if input_text is not None else {"stdin": subprocess.DEVNULL}),
-                                    stdout=stdout, stderr=stderr,
-                                    timeout=timeout, shell=False)
-            code, error = result.returncode, None
+            return waiter(seconds)
+        except subprocess.TimeoutExpired:
+            if time.monotonic_ns() >= deadline:
+                raise
+
+
+def run(argv, cwd=None, timeout=None, input_text=None):
+    # Child output streams to disk and is returned in full after completion.
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr, tempfile.TemporaryFile() as stdin:
+        process = None
+        try:
+            if input_text is not None:
+                stdin.write(input_text.encode())
+                stdin.seek(0)
+            process = subprocess.Popen(argv, cwd=cwd,
+                                       stdin=stdin if input_text is not None else subprocess.DEVNULL,
+                                       stdout=stdout, stderr=stderr, shell=False)
+            wait_with_timeout(lambda seconds: process.wait(timeout=seconds), timeout)
+            code, error = process.returncode, None
         except subprocess.TimeoutExpired:
             code, error = None, "timeout"
         except OSError:
             code, error = None, "unavailable"
+        finally:
+            if process is not None and process.poll() is None:
+                process.kill()
+                process.wait()
         result = {"returncode": code}
         for name, stream in (("stdout", stdout), ("stderr", stderr)):
-            stream.seek(0, 2)
-            stream.seek(max(0, stream.tell() - max_output))
+            stream.seek(0)
             result[name] = stream.read().decode("utf-8", "replace")
         if error:
             result["error"] = error
@@ -212,8 +236,8 @@ def task_dir(store, task_id):
 
 def read_json(path):
     try:
-        if path.is_symlink() or path.stat().st_size > MAX_JSON:
-            fail("corrupt_state", "State file is unsafe or too large.")
+        if path.is_symlink() or not path.is_file():
+            fail("corrupt_state", "State file is unsafe.")
         return json.loads(path.read_text())
     except (OSError, ValueError):
         fail("corrupt_state", "A workflow state file is missing or invalid.")
@@ -393,8 +417,6 @@ def commit_event(path, state, previous, operation, actor):
         event["patches"] = state_patch(before, state)
     event["hash"] = digest(event)
     raw = canonical(event) + b"\n"
-    if len(raw) > MAX_JSON:
-        fail("state_too_large", "Task event exceeds the bounded storage size.")
     destination = path / "events" / f"{state['version']:08d}.json"
     # Publish complete bytes with an exclusive hard link: readers cannot observe a
     # partial final event and existing event filenames can never be overwritten.
@@ -461,18 +483,18 @@ def validate(operation, args):
         if key in args:
             identifier(args[key])
     for key in ("argv", "lockfiles", "artifacts", "owned_paths", "evidence", "ownership_evidence"):
-        if key in args and (len(args[key]) > 200 or any(not isinstance(x, str) or not x or "\x00" in x for x in args[key])):
-            fail("invalid_arguments", "Argument arrays require bounded nonempty strings.")
+        if key in args and any(not isinstance(x, str) or not x or "\x00" in x for x in args[key]):
+            fail("invalid_arguments", "Argument arrays require nonempty strings without null characters.")
     if "argv" in args and not args["argv"]:
         fail("invalid_arguments", "A nonempty executable argv is required.")
     if "expected_version" in args and args["expected_version"] < 1:
         fail("invalid_arguments", "Expected version must be a positive integer.")
     for duration_key in ("expected_duration_seconds", "recovery_margin_seconds"):
-        if duration_key in args and not 1 <= args[duration_key] <= 365 * 86400:
-            fail("invalid_duration", "Expected duration and recovery margin must be positive seconds, bounded to one year.")
+        if duration_key in args and args[duration_key] < 1:
+            fail("invalid_duration", "Expected duration and recovery margin must be positive seconds.")
     if "timeout" in args:
-        if args["timeout"] < 1 or (operation not in ("run-execute", "run-dispatch") and args["timeout"] > 3600):
-            fail("invalid_arguments", "Run timeout must be positive; command checks are bounded to 3600 seconds.")
+        if args["timeout"] < 1:
+            fail("invalid_arguments", "Timeout must be positive seconds.")
 
 def require_approved(state):
     if not summary(state)["approved"]:
@@ -608,7 +630,7 @@ def prepare_worktree(args, state, path, store, previous):
             fail("worktree_association", "The reserved branch changed before preparation completed.")
         if not target.exists():
             root.mkdir(parents=True, exist_ok=True)
-            result = run(["git", "-C", str(project), "worktree", "add", "--", str(target), association["branch"]], timeout=300)
+            result = run(["git", "-C", str(project), "worktree", "add", "--", str(target), association["branch"]])
             if result["returncode"] != 0:
                 fail("worktree_creation", "Git did not complete the reserved worktree; inspect reality and retry this reservation.")
         identity = git_identity(str(target))
@@ -663,7 +685,7 @@ def apply_item(operation, args, state, task_path):
     elif operation == "verify":
         if item["status"] not in ("implementing", "reviewing"):
             fail("invalid_transition", "Verification requires an active item.")
-        result = run(args["argv"], cwd=state["worktree"]["path"], timeout=args.get("timeout", 300))
+        result = run(args["argv"], cwd=state["worktree"]["path"], timeout=args.get("timeout"))
         try:
             unchanged = revision(state) == current["revision"]
         except WorkflowError:
@@ -673,7 +695,7 @@ def apply_item(operation, args, state, task_path):
         evidence_dir.mkdir(exist_ok=True)
         evidence_id = uuid.uuid4().hex
         log_path = evidence_dir / (evidence_id + ".json")
-        atomic_json(log_path, {"stdout_tail": result.pop("stdout", ""), "stderr_tail": result.pop("stderr", ""), "output_limit_bytes": MAX_OUTPUT})
+        atomic_json(log_path, {"stdout_tail": result.pop("stdout", ""), "stderr_tail": result.pop("stderr", "")})
         item["verifications"].append({**current, "argv": args["argv"], "actor": actor, "time": now(),
                                      "passed": result["returncode"] == 0 and unchanged,
                                      "unchanged": unchanged, "result": result, "log": str(log_path), "log_sha256": sha_file(log_path)})
@@ -736,7 +758,7 @@ def remove_integration_scratch(state, integration):
     check_scratch(state, integration)
     if git(scratch, "rev-parse", "HEAD") != integration["commit"] or git(scratch, "status", "--porcelain=v1", "--untracked-files=all", "--ignored"):
         fail("integration_scratch", "Preserve changed or unique material in the integration worktree.")
-    result = run(["git", "-C", state["project"]["path"], "worktree", "remove", "--", str(scratch)], timeout=120)
+    result = run(["git", "-C", state["project"]["path"], "worktree", "remove", "--", str(scratch)])
     if result["returncode"] != 0:
         fail("integration_scratch", "Git refused safe removal of the isolated integration worktree.")
 
@@ -790,7 +812,7 @@ def integrate(args, state, path, previous):
         if not scratch.exists():
             if integration["status"] != "preparing":
                 fail("integration_scratch", "The recorded integration worktree is missing.")
-            result = run(["git", "-C", str(project), "worktree", "add", "--detach", "--", str(scratch), integration["base"]], timeout=300)
+            result = run(["git", "-C", str(project), "worktree", "add", "--detach", "--", str(scratch), integration["base"]])
             if result["returncode"] != 0:
                 fail("integration_scratch", "Git did not complete the isolated worktree; inspect it before retrying.")
         check_scratch(state, integration)
@@ -799,7 +821,7 @@ def integrate(args, state, path, previous):
                 fail("integration_scratch", "An interrupted squash has unrecorded changes; preserve it for inspection.")
             integration["status"] = "merging"
             previous = commit_event(path, state, previous, "integrate-merge-intent", args["actor"])
-            result = run(["git", "-C", str(scratch), "merge", "--squash", "--no-commit", "--", head], timeout=300)
+            result = run(["git", "-C", str(scratch), "merge", "--squash", "--no-commit", "--", head])
             conflicts = git(scratch, "ls-files", "--unmerged")
             if conflicts or result["returncode"] != 0:
                 integration.update(status="conflict" if conflicts else "unknown", result=result, conflicts=conflicts)
@@ -824,7 +846,7 @@ def integrate(args, state, path, previous):
                         or run(["git", "-C", str(scratch), "diff", "--quiet"])["returncode"] != 0
                         or git(scratch, "ls-files", "--others", "--exclude-standard")):
                     fail("integration_scratch", "The prepared squash changed before commit; preserve it for inspection.")
-                result = run(["git", "-C", str(scratch), "commit", "-m", integration["commit_message"]], timeout=300)
+                result = run(["git", "-C", str(scratch), "commit", "-m", integration["commit_message"]])
                 candidate = git(scratch, "rev-parse", "HEAD")
                 if result["returncode"] != 0 and candidate == integration["base"]:
                     integration.update(status="unknown", result=result)
@@ -841,7 +863,7 @@ def integrate(args, state, path, previous):
             if base_now != candidate:
                 if base_now != integration["base"] or project_status(state) or revision(state) != rev:
                     fail("revision_conflict", "Base or task changed before publication; the candidate is preserved.")
-                result = run(["git", "-C", str(project), "merge", "--ff-only", "--no-overwrite-ignore", "--no-edit", "--", candidate], timeout=300)
+                result = run(["git", "-C", str(project), "merge", "--ff-only", "--no-overwrite-ignore", "--no-edit", "--", candidate])
                 if result["returncode"] != 0:
                     integration.update(result=result)
                     return {"integration": integration}, previous, True
@@ -860,8 +882,6 @@ def env_fingerprint(path, forbidden=()):
     metadata = {}
     for package_root in sorted(env.glob("lib/python*/site-packages")):
         for pth in sorted(package_root.glob("*.pth")):
-            if pth.stat().st_size > 1024 * 1024:
-                fail("environment_unverifiable", "Environment path metadata exceeds the size limit.")
             value = pth.read_text(errors="replace")
             metadata[str(pth.relative_to(env))] = sha_file(pth)
             for line in value.splitlines():
@@ -889,7 +909,7 @@ def env_fingerprint(path, forbidden=()):
     python = env / "bin" / "python"
     if not python.is_file() or not os.access(python, os.X_OK):
         fail("invalid_environment", "The registered environment must contain an executable bin/python.")
-    result = run([str(python), "-I", "-c", "import importlib.metadata,json,sys; print(json.dumps({'prefix':sys.prefix,'version':sys.version,'packages':sorted((d.metadata.get('Name',''),d.version) for d in importlib.metadata.distributions())},sort_keys=True))"], timeout=60, max_output=1024 * 1024)
+    result = run([str(python), "-I", "-c", "import importlib.metadata,json,sys; print(json.dumps({'prefix':sys.prefix,'version':sys.version,'packages':sorted((d.metadata.get('Name',''),d.version) for d in importlib.metadata.distributions())},sort_keys=True))"])
     if result["returncode"] != 0:
         fail("environment_unverifiable", "The registered environment could not report its package inventory.")
     try:
@@ -917,49 +937,113 @@ def excluded(parts):
     return any(p in (".git", ".venv", "venv", "__pycache__", ".cache", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules") or p.endswith(".pyc") for p in parts)
 
 def check_dependencies(files, declaration):
-    if ".gitmodules" in files or any(p.endswith(".gitattributes") and b"filter=lfs" in content for p, content in files.items()):
+    if ".gitmodules" in files:
         fail("unsupported_dependency", "Submodules and Git LFS require an explicit supported export strategy.")
-    for name, data in files.items():
-        if data.startswith(b"version https://git-lfs.github.com/spec/"):
-            fail("unsupported_dependency", "Git LFS pointers cannot be used as experiment code or data.")
-        if name.endswith(("pyproject.toml", "requirements.txt", "uv.lock", "poetry.lock")):
-            text = data.decode("utf-8", "replace")
-            if re.search(r"(?:file://|^-e\s|^--editable\s)", text, re.M):
-                fail("unsupported_dependency", "External local dependencies require a supported explicit export strategy.")
-            local_assignments = re.findall(r"(?:path|editable|directory)\s*=\s*([^,}\n]+)", text)
-            if any(value.strip() not in ('"."', "'.'") for value in local_assignments):
-                fail("unsupported_dependency", "External local dependencies require a supported explicit export strategy.")
+    for name, source in files.items():
+        # Snapshot mappings contain disk paths; bytes remain accepted for callers
+        # that inspect an individual dependency document.
+        with contextlib.ExitStack() as stack:
+            stream = stack.enter_context(source.open('rb')) if isinstance(source, Path) else None
+            prefix = stream.read(len(b"version https://git-lfs.github.com/spec/")) if stream else source
+            if prefix.startswith(b"version https://git-lfs.github.com/spec/"):
+                fail("unsupported_dependency", "Git LFS pointers cannot be used as experiment code or data.")
+            if name.endswith(".gitattributes"):
+                if stream:
+                    stream.seek(0)
+                    lfs = any(b"filter=lfs" in line for line in stream)
+                else:
+                    lfs = b"filter=lfs" in source
+                if lfs:
+                    fail("unsupported_dependency", "Submodules and Git LFS require an explicit supported export strategy.")
+            if name.endswith(("pyproject.toml", "requirements.txt", "uv.lock", "poetry.lock")):
+                if stream:
+                    stream.seek(0)
+                data = stream.read() if stream else source
+                text = data.decode("utf-8", "replace")
+                if re.search(r"(?:file://|^-e\s|^--editable\s)", text, re.M):
+                    fail("unsupported_dependency", "External local dependencies require a supported explicit export strategy.")
+                local_assignments = re.findall(r"(?:path|editable|directory)\s*=\s*([^,}\n]+)", text)
+                if any(value.strip() not in ('"."', "'.'") for value in local_assignments):
+                    fail("unsupported_dependency", "External local dependencies require a supported explicit export strategy.")
     if declaration != "no-external-local-dependencies":
         fail("dependency_declaration_required", "Declare no-external-local-dependencies after checking imports and external inputs.")
 
+
+def inventory_records(stream):
+    """Read null-delimited Git records without buffering the whole inventory."""
+    pending = b''
+    for chunk in iter(lambda: stream.read(1024 * 1024), b''):
+        records = (pending + chunk).split(b'\0')
+        pending = records.pop()
+        yield from records
+    if pending:
+        fail('archive_failed', 'Git returned an unterminated object inventory.')
+
+
 def archive_preflight(project, commit):
-    """Read Git object sizes, never blob contents, before bounded export."""
+    """Inspect object types before export; blob sizes do not restrict admission."""
     with tempfile.TemporaryFile() as listing, tempfile.TemporaryFile() as errors:
         try:
-            result = subprocess.run(["git", "-C", project, "ls-tree", "-r", "-l", "-z", "--full-tree", commit], stdout=listing, stderr=errors, timeout=60)
-        except (OSError, subprocess.TimeoutExpired):
+            result = subprocess.run(["git", "-C", project, "ls-tree", "-r", "-l", "-z", "--full-tree", commit], stdout=listing, stderr=errors)
+        except OSError:
             fail("archive_failed", "Git could not inspect the snapshot object inventory.")
-        if result.returncode != 0 or listing.tell() > 16 * 1024 * 1024:
-            fail("snapshot_too_large", "Snapshot metadata is unavailable or exceeds the inventory limit.")
+        if result.returncode != 0:
+            fail("archive_failed", "Git could not inspect the snapshot object inventory.")
         listing.seek(0)
-        total = 0
-        for record in listing.read().split(b"\0"):
-            if not record:
-                continue
+        for record in inventory_records(listing):
             try:
                 header, name = record.split(b"\t", 1)
                 mode, kind, object_id, size = header.split()
+                if kind == b'blob' and int(size) < 0:
+                    raise ValueError
             except ValueError:
                 fail("archive_failed", "Git returned an invalid object inventory.")
             if mode == b"160000" or kind == b"commit":
                 fail("unsupported_dependency", "Submodule contents cannot silently disappear from experiment snapshots.")
             if mode == b"120000":
                 fail("unsafe_snapshot", "Tracked symlinks require an explicit supported export strategy.")
-            if kind == b"blob":
-                length = int(size)
-                total += length
-                if length > 64 * 1024 * 1024 or total > 240 * 1024 * 1024:
-                    fail("snapshot_too_large", "Tracked blobs exceed snapshot export limits; no blob data was copied.")
+
+
+@contextlib.contextmanager
+def exported_snapshot(project, commit):
+    """Stream Git's archive and each exported file through temporary disk storage."""
+    with tempfile.TemporaryDirectory(prefix='task-workflow-export-') as temporary:
+        staging = Path(temporary)
+        files, modes = {}, {}
+        with tempfile.TemporaryFile() as archive, tempfile.TemporaryFile() as errors:
+            try:
+                result = subprocess.run(['git', '-C', project, 'archive', '--format=tar', commit],
+                                        stdout=archive, stderr=errors)
+            except OSError:
+                fail('archive_failed', 'Git could not export the integrated commit.')
+            if result.returncode != 0:
+                fail('archive_failed', 'Git could not export the integrated commit.')
+            archive.seek(0)
+            try:
+                with tarfile.open(fileobj=archive, mode='r|') as tar:
+                    for member in tar:
+                        relative = safe_relative(member.name.rstrip('/'))
+                        if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                            fail('unsafe_snapshot', 'Symlinks, hard links and special archive entries are prohibited.')
+                        if member.isdir() or excluded(relative.parts):
+                            continue
+                        target = staging / str(relative)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with tar.extractfile(member) as source, target.open('wb') as destination:
+                            shutil.copyfileobj(source, destination, length=1024 * 1024)
+                        files[str(relative)] = target
+                        modes[str(relative)] = member.mode & 0o777
+            except (tarfile.TarError, OSError):
+                fail('archive_failed', 'Git returned an invalid snapshot archive.')
+        yield files, modes
+
+
+def source_has_prefix(source, prefix):
+    with source.open('rb') as original, prefix.open('rb') as partial:
+        for chunk in iter(lambda: partial.read(1024 * 1024), b''):
+            if original.read(len(chunk)) != chunk:
+                return False
+    return True
 
 def require_coordinator(args, state):
     if args["actor"] != state["coordinator"]:
@@ -1221,87 +1305,46 @@ def prepare_run(args, state, root):
     for name in args["lockfiles"] + args["artifacts"]:
         safe_relative(name)
     archive_preflight(state["project"]["path"], commit)
-    # Archive only Git objects. It never copies .git, environments, caches or
-    # mutable working tree files, and never hard-links experiment code.
-    files = {}
-    modes = {}
-    total = 0
-    with tempfile.TemporaryFile() as archive:
-        try:
-            with tempfile.TemporaryFile() as errors:
-                process = subprocess.Popen(["git", "-C", state["project"]["path"], "archive", "--format=tar", commit], stdout=subprocess.PIPE, stderr=errors)
-                try:
-                    while True:
-                        chunk = process.stdout.read(1024 * 1024)
-                        if not chunk:
-                            break
-                        total += len(chunk)
-                        if total > 256 * 1024 * 1024:
-                            process.kill()
-                            process.wait()
-                            fail("snapshot_too_large", "Git archive exceeds the 256 MiB export limit.")
-                        archive.write(chunk)
-                    if process.wait(timeout=120) != 0:
-                        fail("archive_failed", "Git could not export the integrated commit.")
-                finally:
-                    process.stdout.close()
-                    if process.poll() is None:
-                        process.kill()
-                        process.wait()
-        except (subprocess.SubprocessError, OSError):
-            fail("archive_failed", "Git could not export the integrated commit.")
-        archive.seek(0)
-        total = 0
-        with tarfile.open(fileobj=archive, mode="r:") as tar:
-            for member in tar.getmembers():
-                relative = safe_relative(member.name.rstrip("/"))
-                if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
-                    fail("unsafe_snapshot", "Symlinks, hard links and special archive entries are prohibited.")
-                if member.isdir() or excluded(relative.parts):
-                    continue
-                total += member.size
-                if member.size > 64 * 1024 * 1024 or total > 256 * 1024 * 1024:
-                    fail("snapshot_too_large", "Snapshot export exceeds bounded limits.")
-                files[str(relative)] = tar.extractfile(member).read()
-                modes[str(relative)] = member.mode & 0o777
-    check_dependencies(files, args.get("dependency_declaration", "reason"))
-    for name in args["lockfiles"]:
-        if name not in files:
-            fail("lockfile_missing", "A declared dependency lockfile is absent from the exported commit.")
-    marker = destination / '.preparation-intent.json'
-    ownership = {'token': planned['preparation_token'], 'intent': planned['preparation_intent'],
-                 'files': {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}}
-    if destination.exists():
-        if read_json(marker) != ownership:
-            fail('preparation_changed', 'The preserved partial snapshot differs from its owned preparation intent.')
-    else:
-        destination.mkdir()
-        atomic_json(marker, ownership)
-    code = destination / 'code'
-    allowed = {'.preparation-intent.json', 'code'}
-    for name in files:
-        relative = PurePosixPath('code') / name
-        allowed.add(str(relative))
-        allowed.update(str(parent) for parent in relative.parents if str(parent) != '.')
-    for entry in destination.rglob('*'):
-        relative = str(entry.relative_to(destination))
-        if entry.is_symlink() or relative not in allowed or not (entry.is_file() or entry.is_dir()):
-            fail('preparation_changed', 'Unexpected partial snapshot material must be preserved for inspection.')
-        if entry.is_file() and relative != '.preparation-intent.json':
-            data = files[str(PurePosixPath(relative).relative_to('code'))]
-            if not data.startswith(entry.read_bytes()):
-                fail('preparation_changed', 'Owned partial code differs from the immutable source; preserve it.')
-    code.mkdir(exist_ok=True)
-    for name, data in files.items():
-        file_path = code / name
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        if file_path.exists():
-            file_path.chmod(0o600)
-        with open(file_path, 'wb') as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        file_path.chmod((modes[name] & 0o111) | 0o444)
+    # Only immutable Git objects enter the independent snapshot.
+    with exported_snapshot(state['project']['path'], commit) as (files, modes):
+        check_dependencies(files, args.get("dependency_declaration", "reason"))
+        for name in args["lockfiles"]:
+            if name not in files:
+                fail("lockfile_missing", "A declared dependency lockfile is absent from the exported commit.")
+        marker = destination / '.preparation-intent.json'
+        ownership = {'token': planned['preparation_token'], 'intent': planned['preparation_intent'],
+                     'files': {name: sha_file(source) for name, source in files.items()}}
+        if destination.exists():
+            if read_json(marker) != ownership:
+                fail('preparation_changed', 'The preserved partial snapshot differs from its owned preparation intent.')
+        else:
+            destination.mkdir()
+            atomic_json(marker, ownership)
+        code = destination / 'code'
+        allowed = {'.preparation-intent.json', 'code'}
+        for name in files:
+            relative = PurePosixPath('code') / name
+            allowed.add(str(relative))
+            allowed.update(str(parent) for parent in relative.parents if str(parent) != '.')
+        for entry in destination.rglob('*'):
+            relative = str(entry.relative_to(destination))
+            if entry.is_symlink() or relative not in allowed or not (entry.is_file() or entry.is_dir()):
+                fail('preparation_changed', 'Unexpected partial snapshot material must be preserved for inspection.')
+            if entry.is_file() and relative != '.preparation-intent.json':
+                source = files[str(PurePosixPath(relative).relative_to('code'))]
+                if not source_has_prefix(source, entry):
+                    fail('preparation_changed', 'Owned partial code differs from the immutable source; preserve it.')
+        code.mkdir(exist_ok=True)
+        for name, source in files.items():
+            file_path = code / name
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            if file_path.exists():
+                file_path.chmod(0o600)
+            with source.open('rb') as original, open(file_path, 'wb') as stream:
+                shutil.copyfileobj(original, stream, length=1024 * 1024)
+                stream.flush()
+                os.fsync(stream.fileno())
+            file_path.chmod((modes[name] & 0o111) | 0o444)
     code_manifest = manifest(code)
     run_state = {**association, "run_id": run_id, "status": "prepared", "commit": commit,
                  "design_digest": state["design"]["digest"], "frozen_approval": copy.deepcopy(state["approval"]),
@@ -1488,7 +1531,7 @@ def cleanup(args, state, store):
                 link.unlink()  # Remove only the checkout entrypoint, never its external environment.
             else:
                 fail("revision_conflict", "An environment entrypoint changed during cleanup.")
-        result = run(["git", "-C", state["project"]["path"], "worktree", "remove", "--", str(target)], timeout=120)
+        result = run(["git", "-C", state["project"]["path"], "worktree", "remove", "--", str(target)])
         if result["returncode"] != 0:
             fail("cleanup_failed", "Git refused safe worktree removal; files were not force removed.")
     state["cleaned"] = {"time": now(), "actor": args["actor"]}
@@ -1501,9 +1544,7 @@ def main(argv=None):
     parser.add_argument("--json-args", default="{}", help="JSON argument object, or '-' to read stdin")
     options = parser.parse_args(argv)
     try:
-        raw = sys.stdin.read(MAX_JSON + 1) if options.json_args == "-" else options.json_args
-        if len(raw.encode()) > MAX_JSON:
-            fail("invalid_arguments", "JSON arguments exceed the size limit.")
+        raw = sys.stdin.read() if options.json_args == "-" else options.json_args
         args = json.loads(raw)
         if not isinstance(args, dict) or ("root" in args and args["root"] != options.root):
             fail("invalid_arguments", "JSON must be an object with no conflicting root.")
@@ -1556,8 +1597,8 @@ def bootstrap_project(project):
             if before.count(block) != 1:
                 fail('exclude_conflict', 'The managed exclusion block changed; preserve it for explicit reconciliation.')
             return {'path': str(target), 'sha256': hashlib.sha256(before).hexdigest(), 'reused': True}
-        if target.exists() and (not target.is_file() or len(before) > MAX_JSON):
-            fail('exclude_conflict', 'The repository exclude file is unsafe or too large.')
+        if target.exists() and not target.is_file():
+            fail('exclude_conflict', 'The repository exclude file is unsafe.')
         after = before + block
         audit_dir = common / 'task-workflow-bootstrap'
         no_symlinks(audit_dir, common)
@@ -1723,11 +1764,11 @@ def run_association(args, state):
         'resource_id': args.get('resource_id'), 'requirements': copy.deepcopy(requirements)}
 
 def validate_capabilities(values):
-    if not isinstance(values, dict) or len(values) > 100:
-        fail('invalid_capabilities', 'Capabilities must be a bounded object of named scalar values.')
+    if not isinstance(values, dict):
+        fail('invalid_capabilities', 'Capabilities must be an object of named scalar values.')
     for key, value in values.items():
         identifier(key)
-        if type(value) not in (str, int, bool) or (type(value) is int and value < 0) or (isinstance(value, str) and (not value or len(value) > 1000)):
+        if type(value) not in (str, int, bool) or (type(value) is int and value < 0) or (isinstance(value, str) and not value):
             fail('invalid_capabilities', 'Capability values must be nonnegative integers, booleans or nonempty strings.')
 
 def resource_dir(store, resource_id):
@@ -1740,8 +1781,21 @@ def read_resource(store, resource_id):
 
 def observation_current(resource):
     try:
-        return dt.datetime.now(dt.timezone.utc) <= dt.datetime.fromisoformat(resource['observation']['valid_until'])
-    except (KeyError, TypeError, ValueError):
+        observation = resource['observation']
+        moment = dt.datetime.now(dt.timezone.utc)
+        if observation.get('valid_until') is not None:
+            return moment <= dt.datetime.fromisoformat(observation['valid_until'])
+        started = dt.datetime.fromisoformat(observation['time'])
+        validity = observation.get('valid_for_seconds')
+        if validity is None:
+            return True
+        if type(validity) is not int or validity < 1:
+            return False
+        elapsed = moment - started
+        # Compare integer seconds without constructing an overflowing datetime.
+        seconds = elapsed.days * 86400 + elapsed.seconds
+        return seconds < validity or (seconds == validity and elapsed.microseconds == 0)
+    except (KeyError, TypeError, ValueError, OverflowError):
         return False
 
 def resource_owner(resource, actor):
@@ -1804,13 +1858,6 @@ def validate_resource_reference(store, state, association, require_available=Fal
         offered = resource['capabilities'].get(key)
         if (type(needed) is int and (type(offered) is not int or offered < needed)) or (type(needed) is not int and (type(offered) is not type(needed) or offered != needed)):
             fail('resource_mismatch', 'The observed resource capabilities do not meet this run requirement.')
-    for other, run_id, current in resource_associations(store, resource_id):
-        if other['task_id'] == state['task_id'] and run_id == association.get('run_id'):
-            continue
-        claimed_queue = (current['status'] == 'queued' and
-                         (Path(current['directory']) / 'execution.claim').exists())
-        if require_available and (current['status'] in ('running', 'unknown') or claimed_queue):
-            fail('resource_in_use', 'Resolve the active or uncertain execution before reusing this resource.')
 
 def register_resource(args, state, store):
     require_coordinator(args, state)
@@ -1840,11 +1887,20 @@ def register_resource(args, state, store):
 def make_observation(args):
     if args['observed_state'] not in ('available', 'unavailable', 'released', 'unknown') or not args['evidence']:
         fail('resource_evidence_required', 'A supported observed state and evidence references are required.')
-    if not 1 <= args['valid_for_seconds'] <= 86400:
-        fail('invalid_duration', 'Observation validity must be between one second and one day.')
+    validity = args.get('valid_for_seconds')
+    if validity is not None and validity < 1:
+        fail('invalid_duration', 'Observation validity must be positive seconds.')
     moment = dt.datetime.now(dt.timezone.utc)
-    return {'time': moment.isoformat(), 'valid_until': (moment + dt.timedelta(seconds=args['valid_for_seconds'])).isoformat(),
-            'evidence': args['evidence'], 'actor': args['actor']}
+    observation = {'time': moment.isoformat(), 'valid_until': None,
+                   'evidence': args['evidence'], 'actor': args['actor']}
+    if validity is not None:
+        observation['valid_for_seconds'] = validity
+        try:
+            observation['valid_until'] = (moment + dt.timedelta(seconds=validity)).isoformat()
+        except OverflowError:
+            # Preserve the supplied duration when its end is beyond datetime's range.
+            pass
+    return observation
 
 def observe_resource(args, state, store):
     resource, previous = read_resource(store, args['resource_id'])
@@ -1886,7 +1942,7 @@ def release_resource(args, root, store):
             'authorization_source': text_value(args['authorization_source']), 'eligibility_key': args['eligibility_key'], 'time': now()}
         previous = commit_event(resource_path, resource, previous, 'resource-release-intent', args['actor'])
         command = list(args['argv'])
-    result = run(command, cwd=str(root), timeout=args.get('timeout', 300))
+    result = run(command, cwd=str(root), timeout=args.get('timeout'))
     receipt = {'token': token, 'resource_id': args['resource_id'], 'argv_digest': digest(command), 'result': result, 'time': now()}
     atomic_json(resource_path / 'release-receipt.json', receipt)
     with lifecycle_lock(store):
@@ -2042,7 +2098,7 @@ def dispatch(operation, arguments):
             project = state["project"]["path"]
             if integration.get("status") != "complete" or git(project, "rev-parse", "HEAD") != integration["commit"] or project_status(state):
                 fail("integration_required", "Verify the exact clean integrated base commit.")
-            result = run(args["argv"], cwd=project, timeout=args.get("timeout", 300))
+            result = run(args["argv"], cwd=project, timeout=args.get("timeout"))
             unchanged = git(project, "rev-parse", "HEAD") == integration["commit"] and not project_status(state)
             log_folder = path / "evidence"
             no_symlinks(log_folder, path)
@@ -2113,8 +2169,8 @@ COMMANDS.update({
     "run-execute": mutation("Execute frozen argv once and preserve an actual process receipt.", {"run_id": "string"}, {"timeout": "integer", "detached": "boolean"}),
     "run-observe": mutation("Observe an externally provided matching actual execution receipt.", {"run_id": "string", "receipt_path": "string", "evidence": "array"}),
     "run-reconcile": mutation("Reconcile a matching execution receipt without repeating execution.", {"run_id": "string"}, {"receipt_path": "string", "evidence": "array"}),
-    "resource-register": mutation("Register an opaque project resource with ownership and observation evidence.", {"resource_id": "string", "handle": "string", "provided_by": "string", "can_release": "boolean", "authorization_source": "string", "ownership_evidence": "array", "capabilities": "object", "observed_state": "string", "evidence": "array", "valid_for_seconds": "integer"}),
-    "resource-observe": mutation("Record fresh observed resource facts.", {"resource_id": "string", "expected_resource_version": "integer", "capabilities": "object", "observed_state": "string", "evidence": "array", "valid_for_seconds": "integer"}),
+    "resource-register": mutation("Register an opaque project resource with ownership and observation evidence.", {"resource_id": "string", "handle": "string", "provided_by": "string", "can_release": "boolean", "authorization_source": "string", "ownership_evidence": "array", "capabilities": "object", "observed_state": "string", "evidence": "array"}, {"valid_for_seconds": "integer"}),
+    "resource-observe": mutation("Record fresh observed resource facts.", {"resource_id": "string", "expected_resource_version": "integer", "capabilities": "object", "observed_state": "string", "evidence": "array"}, {"valid_for_seconds": "integer"}),
     "resource-status": spec("Project resource facts and derived release eligibility.", {"resource_id": "string"}),
     "resource-release": mutation("Record explicit release intent before one supplied release action.", {"resource_id": "string", "expected_resource_version": "integer", "eligibility_key": "string", "authorization_source": "string", "argv": "array"}, {"timeout": "integer"}),
     "resource-release-reconcile": mutation("Confirm matching release receipt and evidence without repeating release.", {"resource_id": "string", "expected_resource_version": "integer", "token": "string", "evidence": "array"}),

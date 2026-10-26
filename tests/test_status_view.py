@@ -67,24 +67,23 @@ class ProjectionTests(unittest.TestCase):
         store = status_view.ViewStore(core)
         for arguments in ({}, {"root": "/private/root"}, {"task_id": "task-1"}, {"root": "/private/root", "task_id": "../other"}):
             self.assertEqual(store.open(arguments)["status"], "unbound")
-        self.assertEqual(store.refresh("guessed")["reason"], "expired")
+        self.assertEqual(store.refresh("guessed")["reason"], "unavailable")
         core.dispatch.assert_not_called()
         self.assertEqual(store.open({"root": "/private/root", "task_id": "task-1", "session_id": "other"})["reason"], "context_mismatch")
         core.dispatch.return_value["state"]["task_id"] = "other"
         self.assertEqual(store.open({"root": "/private/root", "task_id": "task-1"})["reason"], "unavailable")
 
-    def test_expiry_and_capacity_are_bounded(self):
+    def test_references_survive_more_than_128_views_and_an_hour(self):
         core = self.core()
-        current = [0]
-        store = status_view.ViewStore(core, lambda: current[0])
-        first = store.open({"root": "/private/root", "task_id": "task-1"})["view_ref"]
-        current[0] = status_view.VIEW_LIFETIME - 1
-        self.assertEqual(store.refresh(first)["status"], "bound")
-        current[0] += status_view.VIEW_LIFETIME
-        self.assertEqual(store.refresh(first)["reason"], "expired")
-        for _ in range(status_view.MAX_VIEWS + 2):
-            store.open({"root": "/private/root", "task_id": "task-1"})
-        self.assertEqual(len(store.views), status_view.MAX_VIEWS)
+        store = status_view.ViewStore(core)
+        with mock.patch("time.monotonic", return_value=0):
+            first = store.open({"root": "/private/root", "task_id": "task-1"})["view_ref"]
+        with mock.patch("time.monotonic", return_value=7200):
+            for _ in range(130):
+                store.open({"root": "/private/root", "task_id": "task-1"})
+            self.assertEqual(store.refresh(first)["status"], "bound")
+        self.assertEqual(len(store.views), 131)
+        self.assertEqual(status_view.ViewStore(core).refresh(first)["reason"], "unavailable")
 
     def test_private_errors_and_unknown_source_facts(self):
         core = self.core()
@@ -99,20 +98,41 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(task["resources"][0]["state"], "unknown")
         self.assertEqual(task["resources"][0]["provided_by"], "unknown")
 
-    def test_projection_bounds_and_separate_aggregate_closure(self):
+    def test_complete_projection_and_separate_aggregate_closure(self):
         state = record()
         state["items"] = {"item-" + str(i): {"title": "title", "status": "complete"} for i in range(110)}
         state["integration"] = {"status": "complete"}
         before = copy.deepcopy(state)
         result = status_view.project_task(state)
         self.assertEqual(state, before)
-        self.assertEqual(len(result["items"]), 100)
-        self.assertTrue(result["truncated"])
+        self.assertEqual(len(result["items"]), 110)
+        self.assertFalse(result["truncated"])
         self.assertEqual(result["stage"], "integrated")
         self.assertEqual(result["closure"]["status"], "open")
         for outcome in ("completed", "stopped", "abandoned"):
             state["task_lifecycle"] = {"status": "complete", "closure": {"outcome": outcome}}
             self.assertEqual(status_view.project_task(state)["closure"]["outcome"], outcome)
+
+    def test_projection_keeps_all_rows_labels_identifiers_and_counts(self):
+        state = record()
+        long_id = "task-" + "a" * 200
+        state.update(task_id=long_id, title="Full label " * 100, version=10**20)
+        state["items"] = {"item-" + str(i): {"title": "Detail " * 100, "status": "complete"} for i in range(150)}
+        state["experiments"] = {"experiment-" + str(i): {"status": "open"} for i in range(150)}
+        state["runs"] = {"run-" + str(i): {"status": "running"} for i in range(150)}
+        source = [dict(resources()[0], resource_id="resource-" + str(i), version=10**20,
+                       run_refs=[{"task_id": long_id, "run_id": "run-" + str(j), "status": "running"} for j in range(150)]) for i in range(150)]
+        task = status_view.project_task(state, source)
+        for key in ("items", "experiments", "runs", "resources"):
+            self.assertEqual(len(task[key]), 150)
+        self.assertEqual(task["task_id"], long_id)
+        self.assertEqual(task["title"], state["title"].strip())
+        self.assertEqual(task["version"], 10**20)
+        self.assertEqual(task["items"][0]["title"], "Detail " * 99 + "Detail")
+        self.assertEqual(len(task["resources"][0]["run_refs"]), 150)
+        self.assertEqual(task["resources"][0]["version"], 10**20)
+        opened = status_view.ViewStore(self.core(state)).open({"root": "/private/root", "task_id": long_id})
+        self.assertEqual(opened["status"], "bound")
 
 
 class WireTests(unittest.TestCase):
@@ -262,19 +282,28 @@ for(const [width,height] of [[375,812],[768,1024],[1440,900]]){
     await page.evaluate(()=>document.querySelector('iframe').style.height='100vh');
   }
 }
-// Exercise the request timeout without spending ten seconds per test.
-await child.evaluate(()=>{const original=window.setTimeout;window.setTimeout=(fn,delay,...args)=>original(fn,delay===10000?20:delay,...args);});
+// A delayed reply remains pending beyond the former ten-second deadline.
+await child.evaluate(()=>{window.testTimeouts=[];window.setTimeout=(fn,delay)=>{window.testTimeouts.push({fn,delay});return window.testTimeouts.length;};});
 await page.evaluate(()=>window.dropRefresh=true);
 await frame.locator('#refresh').click();
+await page.waitForFunction(()=>window.calls.filter(call=>call.method==='tools/call').length>=3);
+await child.evaluate(()=>{for(const timer of window.testTimeouts)if(timer.delay<=20000)timer.fn();});
+assert.equal(await child.evaluate(()=>window.testTimeouts.length),0);
+assert.equal(await frame.locator('#refresh').isEnabled(),false);
+assert.equal(await frame.locator('#connection').isVisible(),false);
+const delayed=await page.evaluate(()=>window.calls.filter(call=>call.method==='tools/call').at(-1));
+await page.evaluate(id=>{window.data.tasks[0].items[0].title='Long detail '.repeat(50);window.data.tasks[0].stage='review';window.data.tasks[0].runs=[];document.querySelector('iframe').contentWindow.postMessage({jsonrpc:'2.0',id,result:{structuredContent:window.data}},'*');},delayed.id);
+await page.waitForFunction(()=>!document.querySelector('iframe').contentDocument.querySelector('#refresh').disabled);
+assert.equal(await frame.locator('#details').textContent(),'Long detail '.repeat(50));
+// Automatic refresh pauses after an explicit host failure and resumes after a manual read.
+await page.evaluate(()=>{window.dropRefresh=false;window.failRefresh=true;});
+await frame.locator('#refresh').click();
 await frame.locator('#connection').filter({hasText:'Refresh unavailable'}).waitFor();
-assert.equal(await frame.locator('#refresh').isEnabled(),true);
-assert.equal(await frame.locator('#details').isVisible(),true);
-// Automatic refresh pauses after disconnection and resumes on a successful manual read.
 await page.evaluate(()=>window.beforePaused=window.calls.filter(call=>call.method==='tools/call').length);
 await child.evaluate(()=>window.testIntervals.get(10000)());
 await page.waitForTimeout(30);
 assert.equal(await page.evaluate(()=>window.calls.filter(call=>call.method==='tools/call').length-window.beforePaused),0);
-await page.evaluate(()=>window.dropRefresh=false);
+await page.evaluate(()=>window.failRefresh=false);
 await frame.locator('#refresh').click();
 await frame.locator('#connection').waitFor({state:'hidden'});
 // Automatic refresh is visibility-gated and coalesces outstanding reads.
@@ -297,7 +326,7 @@ await frame.locator('#connection').filter({hasText:'Reopen Workflow'}).waitFor()
 assert.equal(await frame.locator('#refresh').isEnabled(),false);
 assert.equal(await frame.locator('details,footer,input').count(),0);
 assert.equal(await frame.locator('input').count(),0);
-console.log('Browser bridge, escaped rendering, current task, read-only refresh, errors, timeout, theme and responsive widths passed.');
+console.log('Browser bridge, escaped rendering, current task, read-only refresh, errors, delayed replies, theme and responsive widths passed.');
 } finally {await browser.close();}
 })().catch(error=>{console.error(error);process.exit(1);});
 """

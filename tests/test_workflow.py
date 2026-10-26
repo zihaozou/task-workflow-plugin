@@ -209,3 +209,105 @@ class WorkflowTests(Fixture):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class UnrestrictedCoreTests(Fixture):
+    def test_large_text_state_cli_and_identifier_round_trip(self):
+        content = 'x' * (4 * 1024 * 1024 + 1)
+        self.op('design', content=content)
+        self.assertEqual(self.refresh()['design']['content'], content)
+        long_id = 'item_' + 'a' * 100
+        self.op('item-add', item_id=long_id, title='Large identifier', owned_paths=['code.py'])
+        self.assertIn(long_id, self.state['items'])
+        arguments = {'task_id': 'task', 'actor': 'owner', 'expected_version': self.state['version'], 'content': content}
+        result = subprocess.run([sys.executable, str(SCRIPT), 'decision', '--root', str(self.root), '--json-args', '-'],
+                                input=json.dumps(arguments), capture_output=True, text=True, check=True)
+        response = json.loads(result.stdout)
+        self.assertEqual(response['state']['decisions'][-1]['content'], content)
+
+    def test_complete_output_large_argv_and_explicit_timeout(self):
+        self.tree(); self.approved()
+        self.op('item-start', item_id='overall', actor='implementer')
+        self.op('item-submit', item_id='overall', actor='implementer')
+        argv = [sys.executable, '-c', 'import sys; print("A" * 20000); print("B" * 20000, file=sys.stderr)'] + ['argument'] * 201
+        self.op('verify', item_id='overall', argv=argv, timeout=7200)
+        evidence = self.state['items']['overall']['verifications'][-1]
+        log = w.read_json(Path(evidence['log']))
+        self.assertEqual(log['stdout_tail'], 'A' * 20000 + '\n')
+        self.assertEqual(log['stderr_tail'], 'B' * 20000 + '\n')
+        self.assertNotIn('output_limit_bytes', log)
+        result = w.run([sys.executable, '-c', 'print("complete")'], timeout=10 ** 100)
+        self.assertEqual(result['stdout'], 'complete\n')
+        self.assertEqual(result['returncode'], 0)
+        result = w.run([sys.executable, '-c', 'import sys; print(len(sys.stdin.read()))'],
+                       timeout=10 ** 100, input_text='x' * 100000)
+        self.assertEqual(result['returncode'], 0)
+        self.assertEqual(result['stdout'], '100000\n')
+
+    def test_internal_subprocesses_have_no_deadline(self):
+        actual_run = w.run
+        actual_subprocess_run = subprocess.run
+        def capture(argv, **kwargs):
+            if 'timeout' in kwargs:
+                self.assertIsNone(kwargs['timeout'], argv)
+            return actual_run(argv, **kwargs)
+        def capture_direct(argv, **kwargs):
+            self.assertIsNone(kwargs.get('timeout'), argv)
+            return actual_subprocess_run(argv, **kwargs)
+        with mock.patch.object(w, 'run', side_effect=capture), mock.patch.object(w.subprocess, 'run', side_effect=capture_direct):
+            self.integrated()
+            self.prepare()
+            self.op('cleanup', dry_run=False)
+
+    def test_large_blob_exports_as_disk_paths_and_chunked_streams(self):
+        size = 64 * 1024 * 1024 + 1
+        blob = self.repo / 'large.bin'
+        with blob.open('wb') as stream:
+            stream.truncate(size)
+        self.git(self.repo, 'add', 'large.bin'); self.git(self.repo, 'commit', '-m', 'Large sparse fixture')
+        commit = self.git(self.repo, 'rev-parse', 'HEAD')
+        w.archive_preflight(str(self.repo), commit)
+        original_copy = w.shutil.copyfileobj
+        sizes = []
+        def copy(source, destination, length):
+            sizes.append(length)
+            return original_copy(source, destination, length)
+        with mock.patch.object(w.shutil, 'copyfileobj', side_effect=copy):
+            with w.exported_snapshot(str(self.repo), commit) as (files, modes):
+                exported = files['large.bin']
+                self.assertIsInstance(exported, Path)
+                self.assertEqual(exported.stat().st_size, size)
+                self.assertEqual(w.sha_file(exported), w.sha_file(blob))
+                w.check_dependencies(files, 'no-external-local-dependencies')
+            self.assertFalse(exported.exists())
+        self.assertTrue(sizes)
+        self.assertTrue(all(value == 1024 * 1024 for value in sizes))
+
+    def test_inventory_accepts_large_total_blob_sizes(self):
+        def inventory(argv, **kwargs):
+            self.assertIsNone(kwargs.get('timeout'))
+            record = b'100644 blob ' + b'a' * 40 + b' 1099511627776\t' + b'b' * 200 + b'\0'
+            for _ in range(10):
+                kwargs['stdout'].write(record * 10000)
+            return subprocess.CompletedProcess(argv, 0)
+        commit = self.git(self.repo, 'rev-parse', 'HEAD')
+        with mock.patch.object(w.subprocess, 'run', side_effect=inventory):
+            w.archive_preflight(str(self.repo), commit)
+
+    def test_large_environment_metadata_and_inventory(self):
+        package_root = next((self.environment / 'lib').glob('python*/site-packages'))
+        metadata = package_root / 'large.pth'
+        metadata.write_text('#' + 'x' * (1024 * 1024 + 1))
+        original = w.run
+        def inventory(argv, **kwargs):
+            self.assertIsNone(kwargs.get('timeout'))
+            result = original(argv, **kwargs)
+            if 'import importlib.metadata,json,sys' in argv[-1]:
+                data = json.loads(result['stdout'])
+                data['packages'] = [['package_' + 'x' * 100 + str(index), '1'] for index in range(10000)]
+                result['stdout'] = json.dumps(data)
+            return result
+        with mock.patch.object(w, 'run', side_effect=inventory):
+            fingerprint = w.env_fingerprint(str(self.environment))
+        self.assertEqual(len(fingerprint['inventory']['packages']), 10000)
+        self.assertEqual(fingerprint['path_metadata'][str(metadata.relative_to(self.environment))], w.sha_file(metadata))

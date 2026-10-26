@@ -72,7 +72,7 @@ def execute(root, task_id, run_id, token, timeout=None):
     with log:
         try:
             if process is not None:
-                code = process.wait(timeout=timeout)
+                code = w.wait_with_timeout(lambda seconds: process.wait(timeout=seconds), timeout)
         except subprocess.TimeoutExpired:
             code = 124
         finally:
@@ -92,18 +92,10 @@ def stop_process(process):
         return
     # Signal only the new workload process group, including surviving children.
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        pass
-    try:
         os.killpg(process.pid, signal.SIGKILL)
     except ProcessLookupError:
         pass
-    process.wait(timeout=5)
+    process.wait()
 
 
 def main():

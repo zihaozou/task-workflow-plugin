@@ -4,7 +4,7 @@
 
 The main agent uses the current request and conversation context to choose the
 route. The user's explicit routing choice wins. Handle ordinary chat, advice,
-read-only status, and simple bounded requests directly. Use this skill
+read-only status, and simple requests directly. Use this skill
 automatically for substantive development or experiment action requests,
 starting with exploration and design. A clear action request authorizes
 enrollment for that purpose; record the request as the authorization source.
@@ -40,9 +40,9 @@ facts. Explain unresolved effects, file scope, verification, and recovery before
 approval. After approval, continue routine implementation. Discuss new unknowns
 and material scope or behavior changes.
 
-The coordinator delegates bounded implementation with owned paths, expected
+The coordinator delegates focused implementation with owned paths, expected
 behavior, verification, and evidence requirements. Workers implement, fix, and
-test without recursive delegation. Choose a model for every bounded delegation:
+test without recursive delegation. Choose a model for every focused delegation:
 Luna for simple lookup, documentation, and mechanical checks; Sol by default for
 implementation and review. Astra requires explicit user approval. If a lighter
 model is unavailable, choose an available Sol model. Never escalate automatically
@@ -102,7 +102,9 @@ after checking actual availability, compatibility, and all run references. A
 planned reservation establishes a resource reference. Planning and preparation
 can reference pending capacity after identity, ownership, release seal, and
 capability checks. Actual start requires a fresh available observation and no
-active or uncertain conflicting execution. Finishing a run records its
+conflicting execution reported by the provider. The plugin imposes no blanket
+active-run limit; actual provider availability and scheduling govern admission.
+Finishing a run records its
 execution outcome; it does not grant release permission. Release requires
 explicit permission, verified ownership, and resolved active references.
 Reconcile uncertain release results before retrying. A status read has no
@@ -130,11 +132,10 @@ dispatch or launch. Preserve their frozen files and records, then create a new
 Run identity with the same approved inputs. Existing actual execution receipts
 remain available for reconciliation through their original runtime.
 
-Runs have no default execution time limit. An explicit positive `timeout` on
-`run-execute` or `run-dispatch` sets the workload limit in seconds without a
-maximum. Verification, integration, and release commands retain their separate
-bounded command timeouts. `run-execute` waits for a receipt by default;
-`detached: true` returns after launching the pinned runner.
+Runs and commands have no default execution time limit. A timeout is optional
+and applies only when the user supplies it; the plugin does not set a maximum.
+`run-execute` waits for a receipt by default; `detached: true` returns after
+launching the pinned runner.
 
 For an external executor, call `run-dispatch` with `root`, `task_id`, `actor`,
 `expected_version`, and `run_id`. Its optional `timeout` becomes immutable.
@@ -178,9 +179,14 @@ tab. The user selects the tab manually. The entrypoint alone does not provide a
 verified current-chat identifier. An unbound view explains its state; the model
 binds the known task through the view tool. Do not guess another chat's task,
 scan the home directory, or add global navigation. Refresh does not query an
-external execution service.
+external execution service. The plugin adds no view count, row, or expiration
+caps and no UI refresh deadline. The view refresh cadence remains 10 seconds.
 
-SessionStart restores bounded facts only for existing tasks in the current
+The plugin imposes no transport or hook input-size, file-count, JSON, label, or
+context caps, and no fixed hook deadline. Preserve complete snapshots and their
+provenance. Host, framework, and machine limits remain environmental behavior.
+
+SessionStart restores safe facts only for existing tasks in the current
 project. Validate `cwd` and `session_id`, then use exact recorded session
 bindings. Unenrolled sessions remain quiet. Do not put prompts, arbitrary logs,
 private instruction files, or task prose into recovery context. The

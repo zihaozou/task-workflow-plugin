@@ -90,6 +90,17 @@ class TransportTests(unittest.TestCase):
             self.assertEqual([reply.get("error", {}).get("code") for reply in replies[:2]], [-32700, -32700])
             self.assertEqual(replies[2], {"jsonrpc": "2.0", "id": 3, "result": {}})
 
+    def test_real_wire_accepts_message_larger_than_one_mib(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            folder = Path(temporary)
+            for name in ("mcp_server.py", "status_view.py"):
+                (folder / name).write_bytes((SCRIPTS / name).read_bytes())
+            (folder / "workflow.py").write_text("def command_schemas(): return []\nclass WorkflowError(Exception): pass\n")
+            request = {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {"payload": "x" * (1024 * 1024 + 1)}}
+            process = subprocess.run([sys.executable, str(folder / "mcp_server.py")], input=json.dumps(request) + "\n", text=True, capture_output=True, timeout=10)
+            self.assertEqual(process.returncode, 0, process.stderr)
+            self.assertEqual(json.loads(process.stdout), {"jsonrpc": "2.0", "id": 1, "result": {}})
+
 
 if __name__ == "__main__":
     unittest.main()

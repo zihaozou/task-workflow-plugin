@@ -11,7 +11,6 @@ import workflow
 import status_view
 
 VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
-MAX_LINE = 1024 * 1024
 
 
 def validate(value, schema, location="arguments"):
@@ -140,18 +139,13 @@ def main():
     server = Server()
     stream = sys.stdin.buffer
     while True:
-        line = stream.readline(MAX_LINE + 1)
+        line = stream.readline()
         if not line:
             break
-        if len(line) > MAX_LINE:
-            while line and not line.endswith(b"\n"):
-                line = stream.readline(MAX_LINE + 1)
-            response = server.error(None, -32700, "Message exceeds size limit")
-        else:
-            try:
-                response = server.handle(parse_json(line.decode("utf-8")))
-            except (ValueError, UnicodeError):
-                response = server.error(None, -32700, "Parse error")
+        try:
+            response = server.handle(parse_json(line.decode("utf-8")))
+        except (ValueError, UnicodeError):
+            response = server.error(None, -32700, "Parse error")
         if response is not None:
             sys.stdout.write(json.dumps(response, ensure_ascii=False, allow_nan=False) + "\n")
             sys.stdout.flush()

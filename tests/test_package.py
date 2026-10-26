@@ -61,7 +61,6 @@ class PackageTests(unittest.TestCase):
     def test_skill_supports_implicit_routing_and_has_no_setup_dependency(self):
         skill = (ROOT / 'skills/task-workflow/SKILL.md').read_text()
         self.assertTrue(skill.startswith('---\nname: task-workflow\ndescription: '))
-        self.assertLess(len(skill.encode()), 1024 * 1024)
         self.assertIn('allow_implicit_invocation: true', (ROOT / 'skills/task-workflow/agents/openai.yaml').read_text())
         self.assertIn('.worktrees/<task-id>', skill)
         self.assertIn('.experiments/<experiment-id>', skill)
@@ -181,6 +180,12 @@ class NativeHookDiscoveryTests(unittest.TestCase):
                         source = Path(hook['sourcePath'])
                         self.assertTrue(source.is_relative_to(home))
                         self.assertEqual(source.name, 'hooks.json')
+                        installed = json.loads(source.read_text())['hooks']
+                        self.assertEqual(set(installed), {'SessionStart', 'UserPromptSubmit'})
+                        for entries in installed.values():
+                            for entry in entries:
+                                for command in entry['hooks']:
+                                    self.assertEqual(set(command), {'type', 'command'})
                     print('Native hook discovery: ' + json.dumps([
                         {key: hook[key] for key in ('eventName', 'source', 'pluginId',
                                                    'trustStatus', 'enabled', 'sourcePath')}
@@ -207,7 +212,7 @@ class ContextTests(unittest.TestCase):
                 self.assertIsNone(session_hook.context_for(self.event(path)))
                 self.assertEqual(dispatch.call_count, 1)
 
-    def test_exact_binding_emits_only_bounded_facts(self):
+    def test_exact_binding_emits_only_selected_facts(self):
         with tempfile.TemporaryDirectory() as temporary:
             path = Path(temporary).resolve()
             responses = [{'tasks': [{'task_id': 'example', 'session_id': 'session-1'}]}, {'summary': {
@@ -220,7 +225,6 @@ class ContextTests(unittest.TestCase):
             context = result['hookSpecificOutput']['additionalContext']
             self.assertIn('example', context)
             self.assertNotIn('PRIVATE', context)
-            self.assertLessEqual(len(context), 1600)
             self.assertEqual(dispatch.call_args_list[-1], mock.call('status', {'root': str(path), 'task_id': 'example'}))
 
     def test_ambiguous_binding_and_invalid_identifiers_are_quiet(self):
@@ -280,7 +284,7 @@ class ContextTests(unittest.TestCase):
             self.assertIsNone(session_hook.context_for(self.event(project, 'other-session')))
             self.assertEqual(instructions.read_bytes(), before)
 
-    def test_prompt_context_is_fixed_bounded_and_has_no_enrollment_side_effects(self):
+    def test_prompt_context_is_fixed_and_has_no_enrollment_side_effects(self):
         contexts = []
         with tempfile.TemporaryDirectory() as temporary:
             project = Path(temporary)
@@ -298,21 +302,57 @@ class ContextTests(unittest.TestCase):
         self.assertIn(communication_prompt_hook.ROUTING_GUIDANCE, context)
         self.assertIn(communication_prompt_hook.NAMING_REMINDER, context)
         hooks = json.loads((ROOT / 'hooks/hooks.json').read_text())['hooks']
-        limit = hooks['UserPromptSubmit'][0]['hooks'][0]['additionalContextLimit']
-        self.assertEqual(limit, 500)
-        # English word count catches accidental unbounded prompt inclusion.
-        self.assertLess(len(context.split()), limit // 2)
+        for entries in hooks.values():
+            for entry in entries:
+                for hook in entry['hooks']:
+                    self.assertEqual(set(hook), {'type', 'command'})
         for event in ({}, {'hook_event_name': 'Stop', 'prompt': 'hello'},
                       {'hook_event_name': 'UserPromptSubmit', 'prompt': ' '}):
             self.assertIsNone(communication_prompt_hook.context_for(event))
 
-    def test_hook_rejects_duplicate_or_oversize_input_without_output(self):
+    def test_hook_rejects_duplicate_or_invalid_input_without_output(self):
         for data in (b'{"hook_event_name":"SessionStart","hook_event_name":"UserPromptSubmit"}', b'x' * (1024 * 1024 + 1)):
             result = subprocess.run([sys.executable, str(SCRIPTS / 'session_hook.py')], input=data,
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=10)
             self.assertEqual(result.returncode, 0)
             self.assertEqual(result.stdout, b'')
             self.assertEqual(result.stderr, b'')
+
+    def test_both_hooks_accept_input_larger_than_one_mib(self):
+        payload = "x" * (1024 * 1024 + 1)
+        for name, event in (("communication_prompt_hook.py", {"hook_event_name": "UserPromptSubmit", "prompt": payload}),
+                            ("session_hook.py", {"hook_event_name": "SessionStart", "source": "startup", "session_id": "s", "cwd": "/tmp", "extra": payload})):
+            with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
+                folder = Path(temporary)
+                (folder / name).write_bytes((SCRIPTS / name).read_bytes())
+                (folder / "workflow.py").write_text("from pathlib import Path\ndef find_registered_root(path): return path\ndef dispatch(op, args):\n    return {'tasks': [{'task_id': 't', 'session_id': 's'}]} if op == 'list' else {'summary': {'task_id': 't', 'session_id': 's'}}\n")
+                result = subprocess.run([sys.executable, str(folder / name)], input=json.dumps(event), text=True,
+                                        capture_output=True, timeout=10)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertIn('additionalContext', json.loads(result.stdout)['hookSpecificOutput'])
+
+    def test_session_context_preserves_long_identifiers_paths_and_counts(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary)
+            for _ in range(9):
+                path = path / ("long-directory-" + "x" * 80)
+            path.mkdir(parents=True)
+            session_id, task_id = "session-" + "s" * 1000, "task-" + "t" * 1000
+            count = 10**20
+            responses = [{"tasks": [{"task_id": task_id, "session_id": session_id}]},
+                         {"summary": {"task_id": task_id, "session_id": session_id, "version": count,
+                                      "active_runs": count, "counts": {"complete": count}}}]
+            with mock.patch.object(session_hook.workflow, 'find_registered_root', return_value=path), \
+                    mock.patch.object(session_hook.workflow, 'dispatch', side_effect=responses):
+                result = session_hook.context_for(self.event(path, session_id))
+            context = result['hookSpecificOutput']['additionalContext']
+            self.assertGreater(len(context), 1600)
+            facts = json.loads(context.removeprefix('Registered Task Workflow context: '))
+            self.assertEqual(facts['root'], str(path.resolve()))
+            self.assertEqual(facts['session_id'], session_id)
+            self.assertEqual(facts['task']['task_id'], task_id)
+            self.assertEqual(facts['task']['active_runs'], count)
+            self.assertEqual(facts['task']['counts']['complete'], count)
 
 
 if __name__ == '__main__':

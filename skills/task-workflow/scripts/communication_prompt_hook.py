@@ -4,7 +4,6 @@ import json
 import math
 import sys
 
-MAX_INPUT = 1024 * 1024
 ROUTING_GUIDANCE = (
     "Task Workflow routing guidance: The main agent judges the current request "
     "using conversation context; the user's explicit routing choice wins. "
@@ -61,9 +60,7 @@ def finite_float(value):
 
 def main():
     try:
-        data = sys.stdin.buffer.read(MAX_INPUT + 1)
-        if len(data) > MAX_INPUT:
-            return
+        data = sys.stdin.buffer.read()
         event = json.loads(data.decode("utf-8"), object_pairs_hook=unique_pairs,
                            parse_constant=reject_constant, parse_float=finite_float)
         result = context_for(event)

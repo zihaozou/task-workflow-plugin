@@ -52,7 +52,7 @@ In Codex, use `/hooks`. Copying files does not grant hook trust. Describe the
 work from your project, or invoke `$task-workflow` explicitly. The main agent
 uses conversation context to route substantive development and experiment
 action requests into exploration and design. Ordinary chat, advice, read-only
-status, and simple bounded requests are handled directly. Your explicit routing
+status, and simple requests are handled directly. Your explicit routing
 choice wins. Unclear intent or task identity requires clarification before
 enrollment or mutation.
 
@@ -148,8 +148,9 @@ An experiment has one research goal and can have several frozen runs. Changed
 code or arguments for the same goal creates a new run. Changed goals create new
 experiments. Execution evidence and artifact acceptance are required before
 accepting a result. Task, experiment, and run closure remain separate operations.
-Runs have no default execution time limit. An explicit positive timeout has no
-maximum. Command checks retain separate bounded timeouts. Use `run-execute`
+Runs and commands have no default execution time limit. A timeout is optional
+and applies only when the user supplies one; the plugin does not set a maximum.
+Use `run-execute`
 with `detached: true` for a local launch that returns immediately, or
 `run-dispatch` to save an external execution intent and obtain its exact pinned
 runner argument array. Dispatch records `queued`; the actual runner checks
@@ -162,6 +163,12 @@ ownership, run references, and release permission. Your
 private conventions determine concrete provisioning and execution choices; the
 agent passes explicit parameters. A completed run does not authorize resource
 release. The public workflow does not supply a provider-specific resource policy.
+
+The plugin does not impose size, file-count, JSON, label, or output-length caps.
+It preserves snapshot contents and provenance. Commands have no default deadlines.
+Timeouts are optional and have no plugin-set maximum. Resource admission follows
+actual provider availability and scheduling. Host, framework, and machine capacity
+remain environmental constraints.
 
 ## Verify and recover
 
@@ -185,7 +192,7 @@ discovery, a harmless call, hook trust, and the Workflow tab in the target clien
 Tests do not prove client rendering or installation. Reconnect the MCP process
 after an update because an existing process can retain old source.
 
-SessionStart restores safe, bounded facts for an existing task in the current
+SessionStart restores safe facts for an existing task in the current
 project and session. Unenrolled sessions remain quiet. UserPromptSubmit provides
 fixed routing and naming guidance for the main agent. It does not classify
 requests, call a separate model or API, parse transcripts, echo prompts, read

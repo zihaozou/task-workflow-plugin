@@ -158,6 +158,7 @@ class LifecycleTests(Fixture):
             receipt = runner.execute(str(self.root), 'task', 'run', current['token'])
         self.assertEqual(receipt['returncode'], 0)
         self.assertEqual(process.wait.call_args_list[0], mock.call(timeout=None))
+        self.assertEqual(process.wait.call_args_list[1], mock.call())
         self.refresh()
         self.op('run-observe', run_id='run', receipt_path=str(Path(current['directory']) / 'execution-receipt.json'), evidence=['Actual fixture runner receipt'])
         self.assertEqual(self.state['runs']['run']['status'], 'awaiting_artifacts')
@@ -167,7 +168,8 @@ class LifecycleTests(Fixture):
         result = self.op('run-execute', run_id='run', timeout=7200)['run']
         self.assertEqual(result['execution']['returncode'], 0)
         self.assertEqual(result['execution_intent']['timeout'], 7200)
-        self.error('invalid_arguments', lambda: self.op('verify', item_id='overall', argv=[sys.executable, '-c', 'pass'], timeout=7200))
+        verified = self.op('integration-verify', argv=[sys.executable, '-c', 'pass'], timeout=7200)
+        self.assertTrue(verified['verification']['passed'])
         self.error('invalid_arguments', lambda: self.op('run-dispatch', run_id='run', timeout=0))
 
     def test_external_dispatch_is_durable_and_at_most_once(self):

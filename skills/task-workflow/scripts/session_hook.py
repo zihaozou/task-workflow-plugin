@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Restore bounded facts for an existing task bound to this project and session."""
+"""Restore selected facts for an existing task bound to this project and session."""
 import json
 from pathlib import Path
 import re
@@ -7,8 +7,7 @@ import sys
 
 import workflow
 
-MAX_INPUT = 1024 * 1024
-SAFE_ID = re.compile(r'[A-Za-z0-9_-]{1,128}\Z')
+SAFE_ID = re.compile(r'[A-Za-z0-9_-]+\Z')
 ITEM_STATES = ('pending', 'implementing', 'reviewing', 'complete')
 RUN_STATES = ('planned', 'prepared', 'running', 'awaiting_artifacts', 'complete',
               'failed', 'cancelled', 'unknown')
@@ -22,7 +21,7 @@ def safe_counts(value, allowed):
     if not isinstance(value, dict):
         return {}
     return {key: number for key, number in value.items()
-            if key in allowed and type(number) is int and 0 <= number <= 10**9}
+            if key in allowed and type(number) is int and 0 <= number}
 
 
 def context_for(event):
@@ -40,7 +39,7 @@ def context_for(event):
     if root is None:
         return None
     root = Path(root).resolve()
-    if not root.is_absolute() or len(str(root)) > 800 or any(ord(c) < 32 for c in str(root)):
+    if not root.is_absolute() or any(ord(c) < 32 for c in str(root)):
         return None
     listing = workflow.dispatch('list', {'root': str(root)})
     tasks = listing.get('tasks', [])
@@ -58,7 +57,7 @@ def context_for(event):
     facts = {'task_id': task_id}
     for key in ('version', 'active_runs', 'open_experiments'):
         number = status.get(key)
-        if type(number) is int and 0 <= number <= 10**9:
+        if type(number) is int and 0 <= number:
             facts[key] = number
     if status.get('task_status') in ('open', 'complete', 'unrecorded'):
         facts['task_status'] = status['task_status']
@@ -70,8 +69,6 @@ def context_for(event):
     context = 'Registered Task Workflow context: ' + json.dumps(
         {'root': str(root), 'session_id': session_id, 'status_tool': 'status', 'task': facts},
         separators=(',', ':'), ensure_ascii=True)
-    if len(context) > 1600:
-        return None
     return {'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}
 
 
@@ -86,9 +83,7 @@ def unique_pairs(items):
 
 def main():
     try:
-        data = sys.stdin.buffer.read(MAX_INPUT + 1)
-        if len(data) > MAX_INPUT:
-            return
+        data = sys.stdin.buffer.read()
         event = json.loads(data.decode('utf-8'), object_pairs_hook=unique_pairs,
                            parse_constant=lambda value: (_ for _ in ()).throw(ValueError('Invalid JSON number')))
         result = context_for(event)
