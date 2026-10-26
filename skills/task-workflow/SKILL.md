@@ -1,16 +1,26 @@
 ---
 name: task-workflow
-description: Coordinate explicitly enrolled development and experiment tasks through approved design, delegated implementation, evidence review, Git integration, and frozen runs. Use only when the user invokes this skill, explicitly enrolls a task, or continues an enrolled task under still-applicable authorization.
+description: Automatically route substantive development and experiment action requests into exploration and design, then coordinate approved implementation, evidence review, Git integration, and frozen runs. Use for explicit invocation, clear substantive action requests, or authorized task continuation. Handle ordinary chat, advice, read-only status, and simple bounded requests directly.
 ---
 
 # Task Workflow
 
 ## Enrollment and context
 
-Ordinary chat, advice, and exploration do not enroll a task. Start only after
-explicit `$task-workflow` invocation, explicit enrollment, or authorized
-continuation of an enrolled task. Installation, hooks, status views, and old
-state do not grant authorization.
+The main agent chooses the route from the current request and conversation
+context. The user's explicit routing choice wins. Handle ordinary chat, advice,
+read-only status, and simple bounded requests directly. Automatically use this
+skill for substantive development or experiment action requests, starting with
+exploration and design. A clear action request authorizes enrollment for that
+purpose; record the request as the authorization source. If intent or task
+identity is unclear, clarify before enrollment or mutation.
+
+For an existing task, reuse its correct identity and still-applicable
+authorization. Perform only the current requested action. A progress question
+does not authorize restarting experiments or releasing resources. Confirm the
+design before implementation. Implementation and experiment execution require
+applicable user authorization. Installation, hook delivery, status views, and
+old state do not grant authorization.
 
 This skill, the bundled hooks, and the workflow program supply workflow context.
 Use the user's instructions already loaded by the host to resolve optional
@@ -63,8 +73,9 @@ is `OP --root <project> --json-args '<JSON>'`; `--json-args -` accepts stdin JSO
 The current schema defines operation names, arguments, versions, and guards.
 Treat those schemas as the authority rather than inventing fields.
 
-Register the current project and task through explicit enrollment. Pass the
-host-provided session identifier when available. Preserve that binding during
+Register the current project and task after explicit invocation, enrollment, or a
+clear substantive action request. Pass the host-provided session identifier
+when available. Preserve that binding during
 recovery; do not choose an unrelated task because it was most recently used.
 Use the program's worktree preparation operation before implementation. Do not
 implement in a base placeholder or create a substitute worktree path.

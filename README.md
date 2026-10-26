@@ -1,8 +1,9 @@
 # Task Workflow
 
-Task Workflow coordinates explicitly enrolled development tasks and frozen
-experiments. It combines a skill, recovery and communication hooks, a Python
-workflow program, and an optional Workflow tab in the current chat.
+Task Workflow routes substantive development and experiment action requests
+into exploration and design, then coordinates approved work and frozen runs.
+It combines a skill, recovery and communication hooks, a Python workflow program,
+and an optional Workflow tab in the current chat.
 
 ## Install and enroll
 
@@ -33,16 +34,33 @@ if the installed plugin is not yet visible. The repository marketplace lives at
 `.agents/plugins/marketplace.json`. This follows the [official local marketplace
 guidance](https://developers.openai.com/plugins/build/plugins#add-a-marketplace-from-the-cli).
 
-The portable package uses `plugin.json`, `mcp.json`, and `skills/`. The
-`.codex-plugin/plugin.json` and `.mcp.json` files provide a compatibility overlay.
-The client resolves `${PLUGIN_ROOT}` in server and hook commands. When exporting
-a plugin archive, include one plugin root and omit the repository's marketplace
-catalog and development files.
+The Codex package uses `.codex-plugin/plugin.json`, `.mcp.json`, `skills/`,
+and `hooks/hooks.json`. The manifest explicitly declares the hook file. The
+client resolves `${PLUGIN_ROOT}` in server and hook commands. `mcp.json` is a
+matching portable MCP declaration for other consumers.
+
+Native discovery was checked with Codex CLI `0.164.0-alpha.11.1`. With root
+`plugin.json` present, this client returned no bundled hooks, including when its
+OpenAI extension explicitly declared the hook path. The selected Codex manifest
+layout discovers both bundled hooks as plugin hooks. The package therefore uses
+one Codex manifest and omits root `plugin.json`.
+When exporting a plugin archive, include one plugin root and omit the
+repository's marketplace catalog and development files.
 
 Review and trust the bundled hooks through the host's normal hook review flow.
-In Codex, use `/hooks`. Copying files does not grant hook trust. Then invoke
-`$task-workflow` from your project and describe the task you want to enroll.
-Ordinary chat, advice, and exploration remain outside the workflow.
+In Codex, use `/hooks`. Copying files does not grant hook trust. Describe the
+work from your project, or invoke `$task-workflow` explicitly. The main agent
+uses conversation context to route substantive development and experiment
+action requests into exploration and design. Ordinary chat, advice, read-only
+status, and simple bounded requests are handled directly. Your explicit routing
+choice wins. Unclear intent or task identity requires clarification before
+enrollment or mutation.
+
+A clear substantive action request authorizes enrollment for exploration and
+design. Design confirmation and applicable authorization are required before
+implementation or experiment execution. Followups reuse the correct task and
+perform only the current requested action. A progress question does not restart
+experiments or release resources.
 
 There is no setup wizard, user configuration file, execution profile, or global
 task registry. Your existing instructions can supply private conventions. The
@@ -154,14 +172,24 @@ python3 -m unittest discover -s tests -v
 ```
 
 Tests cover the program, frozen runner, adapters, read-only view, hooks, and
-package layout. After an actual installation, also verify startup, tool
+package layout. To run the optional native installation and discovery check:
+
+```sh
+CODEX_PLUGIN_TEST_CLI=/absolute/path/to/codex python3 -m unittest discover -s tests -p test_package.py -v
+```
+
+The check stages tracked package files, installs through a local marketplace in
+a temporary client home, and verifies two enabled plugin hooks with untrusted
+status. It grants no hook trust and leaves the active client unchanged. After an actual installation, also verify startup, tool
 discovery, a harmless call, hook trust, and the Workflow tab in the target client.
 Tests do not prove client rendering or installation. Reconnect the MCP process
 after an update because an existing process can retain old source.
 
 SessionStart restores safe, bounded facts for an existing task in the current
 project and session. Unenrolled sessions remain quiet. UserPromptSubmit provides
-fixed communication guidance without reading private instruction files.
+fixed routing and naming guidance for the main agent. It does not classify
+requests, call a separate model or API, parse transcripts, echo prompts, read
+private instructions, or enroll tasks.
 
 After interruption, reconcile the task record with actual Git refs, worktrees,
 resource ownership, execution receipts, and artifacts before retrying an action.

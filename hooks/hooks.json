@@ -1,5 +1,5 @@
 {
-  "description": "Task Workflow recovery and fixed communication guidance. Review and trust hooks in the client.",
+  "description": "Task Workflow recovery, request routing, and communication guidance. Review and trust hooks in the client.",
   "hooks": {
     "SessionStart": [
       {

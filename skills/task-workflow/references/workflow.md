@@ -2,9 +2,21 @@
 
 ## 1. Enroll and discover
 
-Start only from explicit user enrollment or authorized continuation. The current
-Git project owns state under `.task-workflow`. Plugin installation, hook events,
-status views, and old state do not authorize enrollment.
+The main agent uses the current request and conversation context to choose the
+route. The user's explicit routing choice wins. Handle ordinary chat, advice,
+read-only status, and simple bounded requests directly. Use this skill
+automatically for substantive development or experiment action requests,
+starting with exploration and design. A clear action request authorizes
+enrollment for that purpose; record the request as the authorization source.
+Clarify unclear intent or task identity before enrollment or mutation.
+
+Reuse the correct existing task and still-applicable authorization for followups.
+Perform only the current requested action. A progress question does not authorize
+restarting experiments or releasing resources. Confirm design before
+implementation and obtain applicable authorization before implementation or
+experiment execution. The current Git project owns state under `.task-workflow`.
+Plugin installation, hook delivery, status views, and old state grant no action
+authorization.
 
 Discover the program's `schema` operation before mutations. Use its actual
 arguments, operation names, versions, and guards. Record task identity,
@@ -172,9 +184,14 @@ SessionStart restores bounded facts only for existing tasks in the current
 project. Validate `cwd` and `session_id`, then use exact recorded session
 bindings. Unenrolled sessions remain quiet. Do not put prompts, arbitrary logs,
 private instruction files, or task prose into recovery context. The
-UserPromptSubmit hook adds fixed self-contained naming guidance. It does not
-read private instructions or enroll work.
+UserPromptSubmit hook adds fixed routing and naming guidance for the main
+agent. It does not classify requests, call a separate model or API, read
+transcripts or private instructions, echo prompts, or enroll work. The main
+agent chooses the route using the conversation it already has.
 
+The selected Codex manifest at `.codex-plugin/plugin.json` explicitly declares
+`./hooks/hooks.json`. The package omits root `plugin.json` because the tested
+native client does not discover bundled hooks with that portable root present.
 Review and trust hooks through the host's supported flow. A hook does not
 authorize an action, complete a task, or prove execution success. After an
 interruption, compare the canonical record with actual files, Git refs,

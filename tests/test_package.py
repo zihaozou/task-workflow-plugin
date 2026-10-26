@@ -1,6 +1,10 @@
-"""Check portable packaging and project-scoped hook context."""
+"""Check Codex packaging and project-scoped hook context."""
 import hashlib
 import json
+import os
+import queue
+import shutil
+import threading
 from pathlib import Path
 import shlex
 import subprocess
@@ -17,25 +21,19 @@ import session_hook
 
 
 class PackageTests(unittest.TestCase):
-    def test_manifests_match_published_field_constraints(self):
-        manifest = json.loads((ROOT / 'plugin.json').read_text())
-        compatibility = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
-        self.assertEqual(manifest['$schema'], 'https://agent-plugins.org/schemas/1.0.0/plugin.schema.json')
-        self.assertFalse(set(manifest) - {'$schema', 'name', 'version', 'description', 'author',
-                                         'homepage', 'repository', 'license', 'keywords', 'extensions'})
-        self.assertRegex(manifest['name'], r'^(?!.*(?:--|\.\.))[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$')
-        self.assertLessEqual(len(manifest['name']), 64)
+    def test_selected_codex_manifest_declares_shipped_components(self):
+        self.assertFalse((ROOT / 'plugin.json').exists())
+        manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
+        self.assertEqual(manifest['name'], 'task-workflow')
         self.assertRegex(manifest['version'], r'^\d+\.\d+\.\d+$')
         self.assertNotIn('license', manifest)
-        interface = manifest['extensions']['com.openai']['interface']
+        self.assertEqual(manifest['hooks'], './hooks/hooks.json')
+        interface = manifest['interface']
         self.assertEqual(interface['category'], 'Productivity')
         self.assertLessEqual(len(interface['shortDescription']), 30)
         self.assertIsInstance(interface['capabilities'], list)
-        self.assertEqual(interface, compatibility['interface'])
-        for key in ('name', 'version', 'description', 'author'):
-            self.assertEqual(manifest[key], compatibility[key])
         for key in ('skills', 'mcpServers', 'hooks'):
-            self.assertTrue((ROOT / compatibility[key]).exists())
+            self.assertTrue((ROOT / manifest[key]).exists())
 
     def test_repository_marketplace_exposes_exactly_this_plugin(self):
         marketplace = json.loads((ROOT / '.agents/plugins/marketplace.json').read_text())
@@ -60,11 +58,11 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(server['cwd'], '${PLUGIN_ROOT}')
             self.assertTrue(Path(server['args'][0].replace('${PLUGIN_ROOT}', str(ROOT))).is_file())
 
-    def test_skill_is_explicit_and_has_no_setup_dependency(self):
+    def test_skill_supports_implicit_routing_and_has_no_setup_dependency(self):
         skill = (ROOT / 'skills/task-workflow/SKILL.md').read_text()
         self.assertTrue(skill.startswith('---\nname: task-workflow\ndescription: '))
         self.assertLess(len(skill.encode()), 1024 * 1024)
-        self.assertIn('allow_implicit_invocation: false', (ROOT / 'skills/task-workflow/agents/openai.yaml').read_text())
+        self.assertIn('allow_implicit_invocation: true', (ROOT / 'skills/task-workflow/agents/openai.yaml').read_text())
         self.assertIn('.worktrees/<task-id>', skill)
         self.assertIn('.experiments/<experiment-id>', skill)
         self.assertFalse((ROOT / 'scripts/configure.py').exists())
@@ -100,6 +98,96 @@ class PackageTests(unittest.TestCase):
                     self.assertEqual(json.loads(result.stdout)['hookSpecificOutput']['hookEventName'], event)
                 else:
                     self.assertEqual(result.stdout, '')
+
+
+@unittest.skipUnless(os.environ.get('CODEX_PLUGIN_TEST_CLI'),
+                     'Set CODEX_PLUGIN_TEST_CLI to run native isolated hook discovery')
+class NativeHookDiscoveryTests(unittest.TestCase):
+    def test_clean_install_discovers_plugin_hooks_without_trusting_them(self):
+        cli = os.environ['CODEX_PLUGIN_TEST_CLI']
+        with tempfile.TemporaryDirectory(prefix='task-workflow-native-') as temporary:
+            base = Path(temporary).resolve()
+            staged = base / 'package'
+            staged.mkdir()
+            tracked = subprocess.check_output(
+                ['git', 'ls-files', '-z'], cwd=ROOT).decode().split('\0')
+            for relative in filter(None, tracked):
+                path = Path(relative)
+                self.assertFalse(set(path.parts) & {'.git', '.task-workflow', '.worktrees'})
+                source = ROOT / path
+                if source.is_file():
+                    target = staged / path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, target)
+            home = base / 'client-home'
+            home.mkdir()
+            env = dict(os.environ, CODEX_HOME=str(home))
+            for args in (['plugin', 'marketplace', 'add', str(staged), '--json'],
+                         ['plugin', 'add', 'task-workflow@task-workflow-plugins', '--json']):
+                result = subprocess.run([cli] + args, env=env, cwd=staged,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertTrue(json.loads(result.stdout))
+            messages = queue.Queue()
+            with subprocess.Popen([cli, 'app-server'], env=env, cwd=staged,
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                  stderr=subprocess.DEVNULL, text=True) as process:
+                def read_messages():
+                    for line in process.stdout:
+                        try:
+                            messages.put(json.loads(line))
+                        except ValueError:
+                            continue
+                threading.Thread(target=read_messages, daemon=True).start()
+
+                def send(message):
+                    process.stdin.write(json.dumps(message) + '\n')
+                    process.stdin.flush()
+
+                def response(identifier):
+                    while True:
+                        message = messages.get(timeout=30)
+                        if message.get('id') == identifier:
+                            self.assertNotIn('error', message, message)
+                            return message['result']
+                try:
+                    send({'id': 1, 'method': 'initialize', 'params': {
+                        'clientInfo': {'name': 'task-workflow-package-test', 'version': '1'},
+                        'capabilities': {'experimentalApi': True}}})
+                    response(1)
+                    send({'method': 'initialized', 'params': {}})
+                    send({'id': 3, 'method': 'plugin/read', 'params': {
+                        'marketplacePath': str(staged / '.agents/plugins/marketplace.json'),
+                        'pluginName': 'task-workflow'}})
+                    detail = response(3)['plugin']
+                    self.assertTrue(detail['summary']['installed'])
+                    self.assertTrue(detail['summary']['enabled'])
+                    self.assertEqual(len(detail['hooks']), 2)
+                    send({'id': 2, 'method': 'hooks/list', 'params': {'cwds': [str(staged)]}})
+                    result = response(2)
+                    entry = result['data'][0]
+                    self.assertEqual(entry['errors'], [])
+                    self.assertEqual(entry['warnings'], [])
+                    discovered = entry['hooks']
+                    self.assertEqual(len(discovered), 2)
+                    self.assertEqual({hook['eventName'] for hook in discovered},
+                                     {'sessionStart', 'userPromptSubmit'})
+                    for hook in discovered:
+                        self.assertEqual(hook['source'], 'plugin')
+                        self.assertEqual(hook['pluginId'], 'task-workflow@task-workflow-plugins')
+                        self.assertEqual(hook['trustStatus'], 'untrusted')
+                        self.assertTrue(hook['enabled'])
+                        self.assertFalse(hook['isManaged'])
+                        source = Path(hook['sourcePath'])
+                        self.assertTrue(source.is_relative_to(home))
+                        self.assertEqual(source.name, 'hooks.json')
+                    print('Native hook discovery: ' + json.dumps([
+                        {key: hook[key] for key in ('eventName', 'source', 'pluginId',
+                                                   'trustStatus', 'enabled', 'sourcePath')}
+                        for hook in discovered], sort_keys=True))
+                finally:
+                    process.terminate()
+                    process.wait(timeout=10)
 
 
 class ContextTests(unittest.TestCase):
@@ -191,6 +279,32 @@ class ContextTests(unittest.TestCase):
             self.assertIn('"task_id":"example"', context)
             self.assertIsNone(session_hook.context_for(self.event(project, 'other-session')))
             self.assertEqual(instructions.read_bytes(), before)
+
+    def test_prompt_context_is_fixed_bounded_and_has_no_enrollment_side_effects(self):
+        contexts = []
+        with tempfile.TemporaryDirectory() as temporary:
+            project = Path(temporary)
+            for prompt in ('PRIVATE_PROMPT_SENTINEL', 'Implement the project', 'Show progress'):
+                event = {'hook_event_name': 'UserPromptSubmit', 'prompt': prompt,
+                         'cwd': temporary, 'transcript_path': '/unreadable/transcript'}
+                with mock.patch.object(Path, 'read_text', side_effect=AssertionError('Unexpected read')), \
+                        mock.patch.object(Path, 'write_text', side_effect=AssertionError('Unexpected write')):
+                    context = communication_prompt_hook.context_for(event)['hookSpecificOutput']['additionalContext']
+                contexts.append(context)
+            self.assertEqual(list(project.iterdir()), [])
+        self.assertEqual(len(set(contexts)), 1)
+        context = contexts[0]
+        self.assertNotIn('PRIVATE_PROMPT_SENTINEL', context)
+        self.assertIn(communication_prompt_hook.ROUTING_GUIDANCE, context)
+        self.assertIn(communication_prompt_hook.NAMING_REMINDER, context)
+        hooks = json.loads((ROOT / 'hooks/hooks.json').read_text())['hooks']
+        limit = hooks['UserPromptSubmit'][0]['hooks'][0]['additionalContextLimit']
+        self.assertEqual(limit, 500)
+        # English word count catches accidental unbounded prompt inclusion.
+        self.assertLess(len(context.split()), limit // 2)
+        for event in ({}, {'hook_event_name': 'Stop', 'prompt': 'hello'},
+                      {'hook_event_name': 'UserPromptSubmit', 'prompt': ' '}):
+            self.assertIsNone(communication_prompt_hook.context_for(event))
 
     def test_hook_rejects_duplicate_or_oversize_input_without_output(self):
         for data in (b'{"hook_event_name":"SessionStart","hook_event_name":"UserPromptSubmit"}', b'x' * (1024 * 1024 + 1)):

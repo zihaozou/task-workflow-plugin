@@ -1,7 +1,7 @@
 {
   "name": "task-workflow",
-  "version": "0.1.1",
-  "description": "An opt-in workflow for approved development tasks, resources, and frozen experiments.",
+  "version": "0.1.2",
+  "description": "A workflow for development tasks, resources, and frozen experiments.",
   "author": {
     "name": "Task Workflow contributors"
   },
@@ -11,7 +11,7 @@
   "interface": {
     "displayName": "Task Workflow",
     "shortDescription": "Review tasks and frozen runs",
-    "longDescription": "Coordinate explicitly enrolled development and experiment tasks, review evidence, and inspect persisted workflow status in this chat.",
+    "longDescription": "Route substantive development and experiment requests into design, review evidence, and inspect persisted workflow status in this chat.",
     "developerName": "Task Workflow contributors",
     "category": "Productivity",
     "capabilities": [
