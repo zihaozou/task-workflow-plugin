@@ -77,7 +77,7 @@ class ResourceTests(Fixture):
 
     def test_cross_task_references_are_project_scoped(self):
         self.approved(); self.register()
-        second = w.dispatch('init', {'root': str(self.root), 'project': str(self.repo), 'task_id': 'second', 'title': 'Second task', 'actor': 'owner', 'authorization_source': 'Fixture second task'})['state']
+        second = self.enroll({'root': str(self.root), 'project': str(self.repo), 'task_id': 'second', 'title': 'Second task', 'actor': 'owner', 'authorization_source': 'Fixture second task'})['state']
         for operation, fields in [('design', {'content':'Second scope'}), ('approve', {'design_digest':w.digest('Second scope'), 'authorization_source':'Approved'}), ('run-plan', {'run_id':'shared', 'resource_id':'resource'})]:
             second = w.dispatch(operation, {'root':str(self.root), 'task_id':'second', 'actor':'owner', 'expected_version':second['version'], **fields})['state']
         self.close()

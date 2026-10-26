@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import threading
 from pathlib import Path
@@ -25,7 +26,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertRegex(manifest['version'], r'^\d+\.\d+\.\d+$')
+        self.assertEqual(manifest['version'], '0.1.4')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -68,6 +69,52 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'examples').exists())
         self.assertFalse((SCRIPTS / 'install.py').exists())
         self.assertTrue((ROOT / 'skills/task-workflow/references/workflow.md').is_file())
+
+    def test_structured_templates_are_shipped_and_linked(self):
+        base = ROOT / 'skills/task-workflow'
+        assets = ('README.md', 'phases.md', 'conversation.md', 'record.md',
+                  'worker-briefs.md', 'worker-reports.md')
+        for name in assets:
+            path = base / 'templates' / name
+            with self.subTest(name=name):
+                self.assertTrue(path.is_file())
+                content = path.read_text()
+                self.assertTrue(content.startswith('# '))
+                self.assertTrue(content.isascii(), 'Authored templates must be English ASCII')
+                for link in re.findall(r'\]\(([^)]+\.md)\)', content):
+                    self.assertTrue((path.parent / link).is_file(), link)
+        for path in (base / 'SKILL.md', base / 'references/workflow.md', ROOT / 'README.md'):
+            content = path.read_text()
+            for link in re.findall(r'\]\(([^)]+\.md)\)', content):
+                if link.startswith('http'):
+                    continue
+                self.assertTrue((path.parent / link).is_file(), f'{path}: {link}')
+
+    def test_phase_contract_and_record_sections(self):
+        base = ROOT / 'skills/task-workflow/templates'
+        phases = (base / 'phases.md').read_text()
+        for name in ('Intent', 'Exploration', 'Multi-round discussion',
+                     'Design draft and independent gap review', 'User design approval',
+                     'Implementation plan and user plan approval',
+                     'Delegated implementation and item review',
+                     'Overall review and integration', 'Optional experiments and delivery'):
+            section = phases.split('## ' + name + '\n', 1)[1].split('\n## ', 1)[0]
+            for field in ('INPUT:', 'CONVERSATION:', 'WRITE:', 'EXIT:', 'RETURN:'):
+                self.assertIn(field, section, f'{name}: {field}')
+        record = (base / 'record.md').read_text()
+        headings = re.findall(r'^## (.+)$', record, re.MULTILINE)
+        self.assertEqual(headings, ['Current state', 'Intent', 'Exploration',
+                                    'Confirmed requirements', 'Sourced decisions',
+                                    'Design', 'Implementation plan',
+                                    'Execution and review', 'Experiments and runs',
+                                    'Delivery', 'Decision history'])
+        brief = (base / 'worker-briefs.md').read_text()
+        for role in ('Coordinator', 'Explorer', 'Design reviewer', 'Implementer',
+                     'Task reviewer', 'Overall reviewer'):
+            self.assertIn('## ' + role + '\n\n```text', brief)
+        reports = (base / 'worker-reports.md').read_text()
+        self.assertIn('Requirements verdict:', reports)
+        self.assertIn('Quality verdict:', reports)
 
     def test_runtime_assets_and_python_syntax(self):
         for name in ('workflow.py', 'runner.py', 'mcp_server.py', 'status_view.py',

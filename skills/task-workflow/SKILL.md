@@ -37,11 +37,39 @@ root can come from the user's already loaded conventions. Preserve existing
 registered paths and frozen run inputs. Let the program maintain its project
 local `.git/info/exclude` block for generated task directories.
 
-Maintain one readable `record.md` per task for the approved design, plan,
-decisions, progress, and evidence. Keep all authored deliverables in English.
+Maintain one program-generated `record.md` per task for intent, exploration,
+requirements, sourced decisions, design, plan, progress, and evidence. Use the
+fixed sections in [templates/record.md](templates/record.md). Keep all authored
+deliverables in English.
 Summarize decisions from other conversation languages in English and reference
 the original source. Preserve externally supplied raw data and behavior-critical
 literal values.
+
+## Structured dialogue and authority
+
+Use process protocol 2 for new tasks. An existing task without that protocol
+remains a legacy task until a guarded `process-upgrade` with real authorization.
+Do not fabricate prior questions, confirmations, or approvals. Use the current
+program schema and state version for every mutation.
+
+Explore the actual project, then discuss important unknowns through one useful
+open or multiple-choice question at a time. Explain the consequence of each
+question. Build on the answer; return to exploration when it reveals a missing
+fact. Make no fixed number of questions or alternative designs mandatory. Real
+alternatives may emerge when they affect the task. Play back confirmed user
+requirements and choices separately from agent proposals and delegated choices.
+Each important choice needs an actual source reference, status, rationale, and
+scope. A broad “go ahead” does not approve unseen details.
+
+Draft a design from confirmed requirements and decisions. Obtain an independent
+design-gap review. Present the reviewed design revision to the user and record
+approval for that exact revision. Build a plan from the approved design, then
+record the user's approval of that plan revision. If the next consequential
+action exceeds what the confirmed design and explicit delegation settle, ask
+the user and return to discussion. Routine work within approved scope proceeds.
+Use [templates/phases.md](templates/phases.md) for phase contracts and
+[templates/conversation.md](templates/conversation.md) for speaking structures.
+The program owns the record and phase guards.
 
 ## Roles and review
 
@@ -56,9 +84,15 @@ coordinator inspects actual diffs and evidence, and avoids repeated review
 cycles or agent turns that add no evidence.
 
 Each item follows `pending -> implementing -> reviewing -> complete`. Failed
-review returns it to `implementing`. Keep blocked reasons and next actions
-separate. Complete an independent overall review after implementation items
-pass. Approved design, item state, and worker claims do not prove success.
+review returns it to `implementing`. Give implementers bounded ownership. Have
+a task reviewer return separate requirements and quality verdicts against the
+actual diff and evidence.
+Keep blocked reasons and next actions separate. Complete an independent overall
+review after implementation items pass. Approved design, item state, and worker
+claims do not prove success. Use
+[templates/worker-briefs.md](templates/worker-briefs.md) and
+[templates/worker-reports.md](templates/worker-reports.md) for delegation and
+return formats. Store their references and verdicts in the one task record.
 
 Discuss unresolved design effects, file scope, verification, and recovery before
 approval. After approval, continue routine implementation. Revisit material
@@ -75,17 +109,30 @@ Treat those schemas as the authority rather than inventing fields.
 
 Register the current project and task after explicit invocation, enrollment, or a
 clear substantive action request. Pass the host-provided session identifier
-when available. Preserve that binding during
-recovery; do not choose an unrelated task because it was most recently used.
+when available. Preserve that binding during recovery; do not choose an
+unrelated task because it was most recently used. After CLI enrollment or
+recovery, invoke MCP `status` or `workflow.status_view`
+with explicit root and task context to establish the view. A CLI call does not
+open a native UI panel.
 Use the program's worktree preparation operation before implementation. Do not
 implement in a base placeholder or create a substitute worktree path.
 
-After enrollment, invoke the model-only `workflow.status_view` tool with the
-known project and task context. It supplies the view binding for this task.
-The user selects the current chat's right-hand **Workflow** tab manually. Its
-thread entrypoint alone may open without verified chat context; an unbound tab
-must explain that state. Do not claim automatic chat identification, global
-navigation, or a native task badge. The view refreshes persisted evidence and
+Native `init`, `status`, `bind-session`, and `recover` results supply the UI
+resource and a safe view projection. The user selects the current chat's
+right-hand **Workflow** tab manually. Only `workflow.status_view` has a thread
+entrypoint. Its empty invocation can reuse a verified context when the host
+supplies the same optional `openai/session` correlation metadata. Missing or
+unknown metadata leaves it unbound. Supply explicit root, task, and matching
+session context when available; host correlation does not authorize work.
+
+The project keeps an explicit selected task for each session. `bind-session`
+can select an existing task for the same session or associate an unbound task.
+It preserves historical associations and rejects changing a task's session.
+Selecting a closed task preserves its closure. Recovery preserves the selected
+task. After a process restart, supply explicit context again to recreate the
+view reference and optional host correlation. An unbound tab explains its state.
+Do not claim automatic native tab opening, host metadata availability, or tested
+client rendering without evidence. The view refreshes persisted evidence and
 does not inspect an external execution service.
 
 ## Integration, resources, and experiments

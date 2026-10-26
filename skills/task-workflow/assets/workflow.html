@@ -50,12 +50,15 @@
   const readable=value=>{const result=String(value||'unknown');return result.charAt(0).toUpperCase()+result.slice(1).replace(/_/g,' ');};
   function phaseState(task) {
     if(task.closure?.status==='complete')return {phase:{completed:'Completed',stopped:'Stopped',abandoned:'Abandoned'}[task.closure.outcome]||'Closed',detail:''};
+    const processPhases={exploration:'Exploration',discussion:'Discussion',design:'Design',design_review:'Design review',design_confirmation:'Design confirmation',plan:'Plan',plan_confirmation:'Plan confirmation',delivery:'Delivery'};
+    if(task.process_protocol===2&&processPhases[task.stage]&&task.stage!=='delivery')return {phase:processPhases[task.stage],detail:task.phase_detail||''};
     const runs=task.runs||[],running=runs.filter(run=>run.status==='running');
     const stage=task.stage,combined=['implementation','review'].includes(stage)?readable(stage)+' · ':'';
     if(running.length)return {phase:combined+'Running',detail:running[0].run_id+' · Running'+(running.length>1?' · +'+(running.length-1):'')};
     for(const [state,phase] of [['queued','Queued'],['awaiting_artifacts','Awaiting artifacts'],['preparing','Preparing run'],['prepared','Run ready'],['planned','Run planned'],['unknown','Run state unknown']]) {
       const run=runs.find(value=>value.status===state);if(run)return {phase,detail:run.run_id};
     }
+    if(task.process_protocol===2&&task.stage==='delivery')return {phase:'Delivery',detail:task.phase_detail||''};
     const phases={enrolled:'Design','design recorded':'Design',approved:'Ready',implementation:'Implementation',review:'Review','verification complete':'Verification complete',integration:'Integration',integrated:'Integrated'};
     const phase=phases[stage]||'State unknown';
     const items=(task.items||[]).filter(item=>item.status===(stage==='review'?'reviewing':'implementing'));

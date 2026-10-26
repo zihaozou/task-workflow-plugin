@@ -15,6 +15,7 @@ from unittest import mock
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/task-workflow/scripts"
 sys.path.insert(0, str(SCRIPTS))
 import status_view
+import session_hook
 
 
 def record():
@@ -72,6 +73,45 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(store.open({"root": "/private/root", "task_id": "task-1", "session_id": "other"})["reason"], "context_mismatch")
         core.dispatch.return_value["state"]["task_id"] = "other"
         self.assertEqual(store.open({"root": "/private/root", "task_id": "task-1"})["reason"], "unavailable")
+
+    def test_exact_session_and_project_selection_are_required_when_supplied(self):
+        state = record()
+        core = self.core(state)
+        store = status_view.ViewStore(core)
+        context = {"root": "/private/root", "task_id": "task-1", "session_id": "session-1"}
+        state["session_id"] = None
+        self.assertEqual(store.open(context)["reason"], "context_mismatch")
+        state["session_id"] = "session-1"
+        state["root"] = "/other/project"
+        self.assertEqual(store.open(context)["reason"], "context_mismatch")
+        state["root"] = "/private/root"
+        core.dispatch.return_value["session_bindings"] = {"session-1": "task-other"}
+        self.assertEqual(store.open(context)["reason"], "context_mismatch")
+        core.dispatch.return_value["session_bindings"] = {"session-1": "task-1"}
+        opened = store.open(context)
+        self.assertEqual(opened["status"], "bound")
+        core.dispatch.return_value["session_bindings"]["session-1"] = "task-other"
+        self.assertEqual(store.refresh(opened["view_ref"])["reason"], "context_mismatch")
+
+    def test_structured_phases_preserve_execution_review_and_run_progress(self):
+        state = record()
+        state["process"] = {"protocol_version": 2, "stage": "discussion", "questions": [{"status": "pending", "question": "PRIVATE"}, {"status": "resolved"}]}
+        projected = status_view.project_task(state)
+        self.assertEqual((projected["stage"], projected["process_protocol"], projected["phase_detail"]), ("discussion", 2, "1 open question"))
+        self.assertNotIn("PRIVATE", json.dumps(projected))
+        for stage in ("exploration", "design", "design_review", "design_confirmation", "plan", "plan_confirmation"):
+            state["process"]["stage"] = stage
+            self.assertEqual(status_view.project_task(state)["stage"], stage)
+        state["process"]["stage"] = "implementation"
+        self.assertEqual(status_view.project_task(state)["stage"], "review")
+        state["items"]["overall"]["status"] = "complete"
+        self.assertEqual(status_view.project_task(state)["stage"], "verification complete")
+        state["process"]["stage"] = "delivery"
+        self.assertEqual(status_view.project_task(state)["stage"], "delivery")
+        state["integration"] = {"status": "integrating"}
+        self.assertEqual(status_view.project_task(state)["stage"], "integration")
+        state["integration"] = {"status": "complete"}
+        self.assertEqual(status_view.project_task(state)["stage"], "integrated")
 
     def test_references_survive_more_than_128_views_and_an_hour(self):
         core = self.core()
@@ -171,6 +211,9 @@ class WireTests(unittest.TestCase):
             enrollment = {"root": str(base), "task_id": "sample", "title": "Sample task", "actor": "test", "authorization_source": "fixture", "project": str(base)}
             enrolled = self.exchange([init, self.request(2, "tools/call", {"name": "init", "arguments": enrollment})], env)
             self.assertFalse(enrolled[-1]["result"]["isError"], enrolled)
+            self.assertEqual(enrolled[-1]["result"]["structuredContent"]["status"], "bound")
+            self.assertEqual(enrolled[-1]["result"]["_meta"]["ui"]["resourceUri"], status_view.RESOURCE_URI)
+            self.assertTrue(json.loads(enrolled[-1]["result"]["content"][0]["text"])["ok"])
             def files():
                 return {str(path.relative_to(base)): (path.stat().st_mtime_ns, path.read_bytes()) for path in base.rglob("*") if path.is_file()}
             before = files()
@@ -189,6 +232,143 @@ class WireTests(unittest.TestCase):
             finally:
                 process.stdin.close(); process.wait(timeout=5)
                 process.stdout.close(); process.stderr.close()
+
+
+class SessionBindingTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        subprocess.run(['git', 'init', '-q', str(self.root)], check=True, capture_output=True)
+        subprocess.run(['git', '-C', str(self.root), '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                        'commit', '--allow-empty', '-qm', 'Initial fixture'], check=True, capture_output=True)
+        self.core = status_view.workflow
+
+    def enroll(self, task_id, session_id=None):
+        arguments = {'root': str(self.root), 'project': str(self.root), 'task_id': task_id, 'actor': 'owner',
+                     'title': 'Fixture task', 'authorization_source': 'Explicit fixture enrollment'}
+        if session_id is not None:
+            arguments['session_id'] = session_id
+        return self.core.dispatch('init', arguments)['state']
+
+    def bind(self, task_id, session_id='session-1', actor='owner'):
+        state = self.core.dispatch('status', {'root': str(self.root), 'task_id': task_id})['state']
+        return self.core.dispatch('bind-session', {'root': str(self.root), 'task_id': task_id, 'session_id': session_id,
+                                                  'actor': actor, 'expected_version': state['version']})
+
+    def restored_context(self):
+        result = session_hook.context_for({'hook_event_name': 'SessionStart', 'source': 'resume',
+                                           'cwd': str(self.root), 'session_id': 'session-1'})
+        if result is None:
+            return None
+        return json.loads(result['hookSpecificOutput']['additionalContext'].split(': ', 1)[1])
+
+    def test_explicit_binding_is_guarded_idempotent_and_restores_phase_templates(self):
+        original = self.enroll('first')
+        self.assertIsNone(self.restored_context())
+        with self.assertRaises(self.core.WorkflowError) as denied:
+            self.bind('first', actor='other')
+        self.assertEqual(denied.exception.code, 'coordinator_required')
+        bound = self.bind('first')['state']
+        self.assertEqual(bound['version'], original['version'] + 1)
+        same = self.bind('first')
+        self.assertTrue(same['already_bound'])
+        self.assertEqual(same['state']['version'], bound['version'])
+        context = self.restored_context()
+        self.assertEqual(context['task']['task_id'], 'first')
+        self.assertEqual(context['task']['stage'], 'exploration')
+        self.assertEqual(context['templates'], ['templates/conversation.md', 'templates/record.md'])
+        self.assertEqual(context['view_tool']['arguments'], {'root': str(self.root), 'task_id': 'first', 'session_id': 'session-1'})
+        with self.assertRaises(self.core.WorkflowError) as conflict:
+            self.bind('first', 'different-session')
+        self.assertEqual(conflict.exception.code, 'session_conflict')
+
+    def test_explicit_session_switch_preserves_tasks_and_reconnects_matching_context(self):
+        self.enroll('first', 'session-1')
+        second = self.enroll('second', 'session-1')
+        self.assertEqual(self.restored_context()['task']['task_id'], 'second')
+        first = self.bind('first')['state']
+        self.assertEqual(self.restored_context()['task']['task_id'], 'first')
+        self.assertEqual(self.core.dispatch('status', {'root': str(self.root), 'task_id': 'second'})['state'], second)
+        views = status_view.ViewStore(self.core)
+        arguments = {'root': str(self.root), 'task_id': 'first', 'session_id': 'session-1'}
+        opened = views.open(arguments)
+        self.assertEqual(opened['status'], 'bound')
+        self.assertEqual(views.open(dict(arguments, task_id='second'))['reason'], 'context_mismatch')
+        # A new process uses explicit known context and never guesses an old ref.
+        replacement = status_view.ViewStore(self.core)
+        self.assertEqual(replacement.refresh(opened['view_ref'])['reason'], 'unavailable')
+        self.assertEqual(replacement.open(arguments)['tasks'], opened['tasks'])
+        recovered = self.core.dispatch('recover', {'root': str(self.root), 'task_id': 'second', 'actor': 'owner',
+                                                  'expected_version': second['version']})
+        self.assertTrue(recovered['recovered'])
+        self.assertEqual(self.restored_context()['task']['task_id'], 'first')
+        self.assertEqual(self.core.dispatch('status', {'root': str(self.root), 'task_id': 'first'})['state'], first)
+
+    def test_stale_explicit_selection_never_falls_back_and_legacy_ambiguity_is_quiet(self):
+        self.enroll('first', 'session-1')
+        self.enroll('second', 'session-1')
+        registry_path = self.root / '.task-workflow/registry.json'
+        registry = self.core.read_json(registry_path)
+        registry['session_bindings']['session-1'] = 'missing-task'
+        self.core.atomic_json(registry_path, registry)
+        self.assertIsNone(self.restored_context())
+        del registry['session_bindings']
+        self.core.atomic_json(registry_path, registry)
+        self.assertIsNone(self.restored_context())
+        self.bind('first')
+        self.assertEqual(self.restored_context()['task']['task_id'], 'first')
+
+    def test_interrupted_selection_can_be_repaired_by_explicit_bind(self):
+        self.enroll('first', 'session-1')
+        self.enroll('second', 'session-1')
+        register_root = self.core.register_root
+        with mock.patch.object(self.core, 'register_root', side_effect=OSError('Simulated selection write failure')):
+            with self.assertRaises(OSError):
+                self.bind('first')
+        self.assertEqual(self.restored_context()['task']['task_id'], 'second')
+        repaired = self.bind('first')
+        self.assertTrue(repaired['ok'])
+        self.assertEqual(self.restored_context()['task']['task_id'], 'first')
+        self.assertIs(self.core.register_root, register_root)
+
+    def test_failed_initial_event_preserves_previous_selected_task(self):
+        self.enroll('first', 'session-1')
+        with mock.patch.object(self.core, 'commit_event', side_effect=OSError('Simulated event failure')):
+            with self.assertRaises(OSError):
+                self.enroll('second', 'session-1')
+        self.assertEqual(self.restored_context()['task']['task_id'], 'first')
+        self.assertFalse((self.root / '.task-workflow/tasks/second').exists())
+        self.enroll('second', 'session-1')
+        self.assertEqual(self.restored_context()['task']['task_id'], 'second')
+
+    def test_first_registry_failure_preserves_committed_task_for_explicit_recovery(self):
+        with mock.patch.object(self.core, 'register_root', side_effect=OSError('Simulated first registry failure')):
+            with self.assertRaises(OSError):
+                self.enroll('first', 'session-1')
+        state = self.core.dispatch('status', {'root': str(self.root), 'task_id': 'first'})['state']
+        self.assertEqual(state['session_id'], 'session-1')
+        result = self.core.dispatch('recover', {'root': str(self.root), 'task_id': 'first', 'actor': 'owner',
+                                               'expected_version': state['version']})
+        self.assertTrue(result['recovered'])
+        self.bind('first')
+        self.assertEqual(self.restored_context()['task']['task_id'], 'first')
+
+    def test_binding_a_closed_task_preserves_its_closed_lifecycle(self):
+        with mock.patch.object(self.core, 'new_process', return_value=None):
+            state = self.enroll('closed')
+        def operation(name, **fields):
+            nonlocal state
+            result = self.core.dispatch(name, {'root': str(self.root), 'task_id': 'closed', 'actor': 'owner',
+                                               'expected_version': state['version'], **fields})
+            state = result['state']
+        operation('design', content='Preserve this stopped fixture.')
+        operation('approve', design_digest=state['design']['digest'], authorization_source='Fixture approval')
+        operation('task-complete', outcome='stopped', notes='Fixture intentionally stopped.', evidence=['Fixture receipt'])
+        closed = copy.deepcopy(state['task_lifecycle'])
+        selected = self.bind('closed')['state']
+        self.assertEqual(selected['task_lifecycle'], closed)
+        self.assertEqual(self.restored_context()['task']['task_status'], 'complete')
 
 
 class BrowserTests(unittest.TestCase):
@@ -250,8 +430,8 @@ await page.evaluate(()=>document.querySelector('iframe').contentWindow.postMessa
 await page.waitForTimeout(30);
 assert.equal(await child.evaluate(()=>document.documentElement.dataset.theme),'dark');
 assert.equal(await child.evaluate(()=>document.documentElement.style.getPropertyValue('--safe-left')),'20px');
-async function fixture(stage,closure,runs,expected,detail='') {
-  await page.evaluate(({stage,closure,runs})=>{const task=window.data.tasks[0];task.title='Example task';task.items[0].title='Implementation review';task.stage=stage;task.closure=closure;task.runs=runs;document.querySelector('iframe').contentWindow.postMessage({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{structuredContent:window.data}},'*');},{stage,closure,runs});
+async function fixture(stage,closure,runs,expected,detail='',protocol=1,phaseDetail='') {
+  await page.evaluate(({stage,closure,runs,protocol,phaseDetail})=>{const task=window.data.tasks[0];task.title='Example task';task.items[0].title='Implementation review';task.stage=stage;task.closure=closure;task.runs=runs;task.process_protocol=protocol;task.phase_detail=phaseDetail;document.querySelector('iframe').contentWindow.postMessage({jsonrpc:'2.0',method:'ui/notifications/tool-result',params:{structuredContent:window.data}},'*');},{stage,closure,runs,protocol,phaseDetail});
   await page.waitForTimeout(15);
   assert.equal(await frame.locator('#phase').textContent(),expected);
   if(detail)assert((await frame.locator('#details').textContent()).includes(detail));
@@ -265,6 +445,9 @@ await fixture('review',{status:'open'},[],'Review','Implementation review');
 await fixture('integrated',{status:'open'},[{run_id:'run-1',status:'queued'}],'Queued','run-1');
 await fixture('integrated',{status:'open'},[{run_id:'run-1',status:'running'}],'Running','run-1');
 await fixture('implementation',{status:'open'},[{run_id:'run-1',status:'running'}],'Implementation · Running');
+for(const [stage,expected] of [['exploration','Exploration'],['discussion','Discussion'],['design','Design'],['design_review','Design review'],['design_confirmation','Design confirmation'],['plan','Plan'],['plan_confirmation','Plan confirmation']])await fixture(stage,{status:'open'},[],expected,'Current phase detail',2,'Current phase detail');
+await fixture('delivery',{status:'open'},[],'Delivery','Review the result',2,'Review the result');
+await fixture('delivery',{status:'open'},[{run_id:'run-1',status:'running'}],'Running','run-1',2,'Review the result');
 for(const [outcome,expected] of [['completed','Completed'],['stopped','Stopped'],['abandoned','Abandoned']])await fixture('integrated',{status:'complete',outcome},[{run_id:'run-1',status:'running'}],expected);
 await fixture('integrated',{status:'open'},[{run_id:'run-1',status:'running'}],'Running','run-1');
 assert.equal(await child.evaluate(()=>window.testIntervals.has(10000)),true);

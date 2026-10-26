@@ -2,6 +2,7 @@
 """Supply fixed routing and naming guidance for each nonempty user prompt."""
 import json
 import math
+import re
 import sys
 
 ROUTING_GUIDANCE = (
@@ -16,6 +17,12 @@ ROUTING_GUIDANCE = (
     "enrollment or mutation. Confirm the design before implementation; actual "
     "implementation, experiment execution, integration, and release require "
     "applicable authorization. Hook delivery itself grants none. "
+    "For enrollment use the native init MCP tool with the known project/task "
+    "and host session identifier when available. For a legacy CLI enrollment "
+    "or recovery, explicitly invoke a lifecycle MCP tool or workflow.status_view "
+    "with that same context so the current chat receives its UI binding. "
+    "Use bind-session to select an existing task for its known session; "
+    "reuse the recorded phase and templates after recovery. "
 )
 NAMING_REMINDER = (
     "Task Workflow communication guidance: Before sending a normal reply or progress "
@@ -34,8 +41,12 @@ def context_for(event):
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return None
+    guidance = ROUTING_GUIDANCE + NAMING_REMINDER
+    session_id = event.get("session_id")
+    if isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
+        guidance += " Host-provided session context for an authorized enrollment or recovery: " + json.dumps({"session_id": session_id}, ensure_ascii=True) + "."
     return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
-                                   "additionalContext": ROUTING_GUIDANCE + NAMING_REMINDER}}
+                                   "additionalContext": guidance}}
 
 
 def unique_pairs(items):

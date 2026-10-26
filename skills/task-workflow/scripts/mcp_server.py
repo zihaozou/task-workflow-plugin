@@ -55,10 +55,18 @@ def parse_json(data):
                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid JSON number")))
 
 
+def conversation_context(params):
+    """Read only the documented optional host correlation field, never guesses."""
+    metadata = params.get("_meta")
+    value = metadata.get("openai/session") if isinstance(metadata, dict) else None
+    return value if isinstance(value, str) and value.strip() and all(character.isprintable() for character in value) else None
+
+
 class Server:
     def __init__(self):
         self.initialized = False
-        self.tools = [{**tool, "_meta": {**tool.get("_meta", {}), "ui": {"visibility": ["model"]}}}
+        self.tools = [status_view.lifecycle_schema(tool) if tool["name"] in status_view.LIFECYCLE_TOOLS
+                      else {**tool, "_meta": {**tool.get("_meta", {}), "ui": {"visibility": ["model"]}}}
                       for tool in workflow.command_schemas()] + [status_view.tool_schema(), status_view.refresh_schema()]
         self.by_name = {tool["name"]: tool for tool in self.tools}
         self.views = status_view.ViewStore(workflow)
@@ -110,15 +118,16 @@ class Server:
             if not isinstance(name, str) or name not in self.by_name:
                 return self.error(request_id, -32602, "Unknown tool")
             arguments = params.get("arguments", {})
+            host_session = conversation_context(params)
             try:
                 validate(arguments, self.by_name[name]["inputSchema"])
             except ValueError as exc:
                 return self.error(request_id, -32602, str(exc))
             try:
                 if name == status_view.TOOL_NAME:
-                    output = self.views.open(arguments)
+                    output = self.views.open(arguments, host_session=host_session)
                 elif name == status_view.REFRESH_TOOL:
-                    output = self.views.refresh(arguments["view_ref"])
+                    output = self.views.refresh(arguments["view_ref"], host_session=host_session)
                 else:
                     output = workflow.dispatch(name, arguments)
                 failed = output.get("ok") is False
@@ -130,6 +139,19 @@ class Server:
             result = {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}], "isError": failed}
             if name in (status_view.TOOL_NAME, status_view.REFRESH_TOOL):
                 result["structuredContent"] = output
+            elif name in status_view.LIFECYCLE_TOOLS:
+                # Native UI linkage is part of the operation the agent already
+                # calls. A forgotten second tool call cannot suppress enrollment
+                # data. The complete core result remains in model-visible text.
+                try:
+                    result["structuredContent"] = (self.views.open(arguments, host_session=host_session) if not failed
+                                                    else status_view.unbound("unavailable"))
+                except Exception:
+                    # A completed enrollment must remain successful even when
+                    # its optional projection or local view binding is unavailable.
+                    result["structuredContent"] = status_view.unbound("unavailable")
+            if "structuredContent" in result:
+                result["_meta"] = {"ui": {"resourceUri": status_view.RESOURCE_URI}}
         else:
             return self.error(request_id, -32601, "Method not found")
         return {"jsonrpc": "2.0", "id": request_id, "result": result}

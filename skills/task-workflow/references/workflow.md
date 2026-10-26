@@ -28,21 +28,56 @@ concrete environment, storage, execution, and resource values as explicit
 arguments. The plugin does not open or update private instruction files, require
 an `AGENTS.md` entry, or maintain a user configuration file or global registry.
 
-Keep one readable task `record.md` for design, plan, decisions, progress, and
-evidence. Structured state and event files support recovery; they do not prove
-external actions. Write English summaries with references to original source
-requirements. Preserve external raw data and behavior-critical literal values.
+Keep one program-generated task `record.md` with the sections in
+[../templates/record.md](../templates/record.md). Structured state and event
+files support recovery; they do not prove external actions. Write English
+summaries with references to actual original source messages and revisions.
+Preserve external raw data and behavior-critical literal values.
 
-## 2. Design, delegate, and review
+## 2. Discuss, design, plan, delegate, and review
 
-Explore relevant source, existing implementations, tests, and actual execution
-facts. Explain unresolved effects, file scope, verification, and recovery before
-approval. After approval, continue routine implementation. Discuss new unknowns
-and material scope or behavior changes.
+New tasks use process protocol 2. The supported process mutations are
+`process-intent`, `process-exploration`, `process-question`, `process-answer`,
+`process-playback`, `process-requirements`, `process-decision`, `process-design`,
+`process-design-review`, `process-design-approve`, `process-plan`,
+`process-plan-approve`, and `process-reenter`. `process-upgrade` is a guarded
+legacy migration. Discover the live schema before calling any mutation. Pass
+the current state version and actor. Design and plan versions have digests;
+their review and approval operations refer to the exact digest shown.
+
+Start with intent and exploration. Record actual behavior and evidence before
+turning assumptions into requirements. Ask one important open or multiple-choice
+question at a time, with its rationale and scope. An answer can lead to another
+question or more exploration. There is no required number of questions or
+alternative paths. Record source references for requirements, decisions,
+answers, and approvals. The source must identify an actual user-visible message
+or revision. Play back confirmed user content separately from agent proposals
+and explicitly delegated choices. A user confirmation only covers the content
+shown in that playback.
+
+Draft a design with behavior, components, interfaces, mapped requirements and
+decisions, assumptions, verification, and unresolved choices. Ask an independent
+reviewer to find design gaps. Revise as needed. Ask the user to approve the
+reviewed design digest. Then write a plan with item ownership, dependencies,
+deliverables, acceptance, verification, and review focus. Ask the user to
+approve that plan digest before implementation. The approved design and plan
+are separate, versioned authority sources. An approval of a broad request does
+not approve later details that the user did not see.
+
+At every phase, check whether the next consequential action is settled by the
+confirmed design and delegated choice scope. If not, record the new question
+and return to discussion through `process-reenter`. Continue routine work
+within approved scope. Use [../templates/phases.md](../templates/phases.md)
+for each phase's inputs, writes, exit checks, and handoff. Use
+[../templates/conversation.md](../templates/conversation.md) for concise
+question and playback structures.
 
 The coordinator delegates focused implementation with owned paths, expected
 behavior, verification, and evidence requirements. Workers implement, fix, and
-test without recursive delegation. Choose a model for every focused delegation:
+test without recursive delegation. Use
+[../templates/worker-briefs.md](../templates/worker-briefs.md) and
+[../templates/worker-reports.md](../templates/worker-reports.md). Put brief and
+report references in the one task record. Choose a model for every focused delegation:
 Luna for simple lookup, documentation, and mechanical checks; Sol by default for
 implementation and review. Astra requires explicit user approval. If a lighter
 model is unavailable, choose an available Sol model. Never escalate automatically
@@ -52,7 +87,8 @@ Review actual evidence and avoid agent turns or review cycles that add none.
 Do not claim a capability or parallel execution that did not occur.
 
 Each item follows `pending -> implementing -> reviewing -> complete`. Failed
-review returns it to `implementing`. Keep blocked reasons and next actions
+review returns it to `implementing`. A task reviewer returns separate
+requirements and quality verdicts from actual diffs and evidence. Keep blocked reasons and next actions
 separate. The coordinator inspects actual diffs and evidence. After the items
 pass, independently review the full deliverable as an overall item. Reuse valid
 evidence only when the approved design and relevant code remain unchanged.
@@ -169,18 +205,47 @@ MCP tools use the same program and persistence. Reconnect the process after an
 update and rediscover schemas. Replacing source does not reload an existing
 process. Use one current interface for mutations in a task.
 
-After enrollment, call the model-only `workflow.status_view` tool with known
-project and task context. It returns an opaque view reference. The app-only
-refresh tool accepts that reference and returns persisted status. The bridge
-cannot request arbitrary paths or issue mutations.
+After CLI enrollment or recovery, invoke MCP `status` or
+the model-only `workflow.status_view` tool with explicit project and task
+context. CLI mutation alone does not open native UI. The lifecycle MCP results
+include safe view projections; `workflow.status_view` creates an opaque view
+reference. The app-only refresh tool accepts that reference and returns
+persisted status. The bridge cannot request arbitrary paths or issue mutations.
+The rendered fields use only the structured projection. Lifecycle tools retain
+their full core text for the agent, and the MCP Apps host can also forward that
+text to the bundled app. The projection and rendered fields omit private paths
+and task prose; they are not a redaction of the entire lifecycle result. The
+app's content policy blocks external network access.
 
-The official thread entrypoint opens the current chat's right-hand Workflow
-tab. The user selects the tab manually. The entrypoint alone does not provide a
-verified current-chat identifier. An unbound view explains its state; the model
-binds the known task through the view tool. Do not guess another chat's task,
-scan the home directory, or add global navigation. Refresh does not query an
-external execution service. The plugin adds no view count, row, or expiration
-caps and no UI refresh deadline. The view refresh cadence remains 10 seconds.
+Only `workflow.status_view` has a thread entrypoint for the current chat's
+right-hand Workflow tab. The user selects the tab manually. The
+[entrypoint contract](https://github.com/openai/mcp-extensions/blob/main/docs/spec.md#thread-entrypoint)
+passes empty arguments. The host may also supply the documented optional
+[`_meta["openai/session"]`](https://developers.openai.com/plugins/reference)
+conversation correlation value. After a verified explicit lifecycle or view
+call, the current server process can use that value to recover the same context
+for an empty entrypoint. It never supplies authorization. Missing, unknown, or
+invalid correlation leaves the empty view unbound. A refresh carrying different
+conversation metadata is rejected. The value is correlation, not authentication.
+
+The project-local registry stores explicit session-to-task selections.
+Enrollment and `bind-session` can select another task for the same session.
+Historical task associations remain intact; an already associated task cannot
+change its session. A closed task remains closed when selected. SessionStart
+uses the explicit selection and exact recorded session match. A stale or
+invalid selection does not fall back to another task. Legacy records without a
+selection restore only a unique exact session match. Ordinary recovery preserves
+the existing selection; an interrupted selection write can be repaired by an
+explicit `bind-session` call with the current task version.
+
+Opaque refresh references and host correlations last for the server process.
+After a restart, recreate them through MCP `status` or `workflow.status_view`
+with the same explicit project, task, and session context when available. Do
+not repeat enrollment to repair UI context. Check optional metadata availability
+and actual rendering in the target client. Do not guess another chat's task,
+scan the home directory, or add global navigation. Refresh reads recorded state.
+The plugin adds no view count, row, or expiration caps and no UI refresh deadline.
+The view refresh cadence remains 10 seconds while visible.
 
 The plugin imposes no transport or hook input-size, file-count, JSON, label, or
 context caps, and no fixed hook deadline. Preserve complete snapshots and their

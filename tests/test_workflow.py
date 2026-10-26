@@ -31,9 +31,16 @@ class Fixture(unittest.TestCase):
         (self.repo / 'uv.lock').write_text('version = 1\n')
         self.git(self.repo, 'add', '.')
         self.git(self.repo, 'commit', '-m', 'Initial fixture')
-        self.state = w.dispatch('init', {'root': str(self.root), 'project': str(self.repo), 'task_id': 'task',
+        self.state = self.enroll({'root': str(self.root), 'project': str(self.repo), 'task_id': 'task',
             'title': 'Fixture task', 'actor': 'owner', 'session_id': 'session-fixture',
             'authorization_source': 'Fixture enrollment', 'environment_registry': {'runtime': str(self.environment)}})['state']
+
+    def enroll(self, arguments):
+        if getattr(self, 'structured', False):
+            return w.dispatch('init', arguments)
+        # Represent existing event streams without exposing a legacy-init bypass.
+        with mock.patch.object(w, 'new_process', return_value=None):
+            return w.dispatch('init', arguments)
 
     def git(self, path, *args):
         return subprocess.check_output(['git', '-C', str(path), *args], stderr=subprocess.DEVNULL).decode().strip()
@@ -63,7 +70,8 @@ class Fixture(unittest.TestCase):
         self.op('item-start', item_id=item, actor='implementer')
         self.op('item-submit', item_id=item, actor='implementer')
         self.op('verify', item_id=item, argv=[sys.executable, '-c', 'print("verified")'])
-        self.op('item-review', item_id=item, actor='reviewer', verdict='accept', notes='Actual source reviewed.')
+        dimensions = {'requirements_verdict': 'accept', 'quality_verdict': 'accept'} if self.state.get('process') else {}
+        self.op('item-review', item_id=item, actor='reviewer', verdict='accept', notes='Actual source reviewed.', **dimensions)
         self.op('item-accept', item_id=item, notes='Accepted evidence.')
 
     def integrated(self):

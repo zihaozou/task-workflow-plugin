@@ -1,7 +1,8 @@
 # Task Workflow
 
 Task Workflow routes substantive development and experiment action requests
-into exploration and design, then coordinates approved work and frozen runs.
+through exploration, a focused design discussion, reviewed design and plan
+approvals, delegated work, evidence review, and optional frozen runs.
 It combines a skill, recovery and communication hooks, a Python workflow program,
 and an optional Workflow tab in the current chat.
 
@@ -57,8 +58,14 @@ choice wins. Unclear intent or task identity requires clarification before
 enrollment or mutation.
 
 A clear substantive action request authorizes enrollment for exploration and
-design. Design confirmation and applicable authorization are required before
-implementation or experiment execution. Followups reuse the correct task and
+discussion. New tasks use process protocol 2. The agent asks one meaningful
+design question at a time, plays back confirmed requirements separately from
+its proposals, and records the source and scope of important choices. An
+independent gap review precedes user approval of the design revision. The user
+then approves a linked implementation plan revision before implementation.
+When a new important choice exceeds confirmed design or delegated scope, the
+agent returns to discussion. Existing legacy tasks keep their recorded state
+until a guarded, authorized upgrade. Followups reuse the correct task and
 perform only the current requested action. A progress question does not restart
 experiments or release resources.
 
@@ -98,22 +105,40 @@ own project-local `.git/info/exclude` block for generated directories. It does
 not update global settings. Existing registered paths and frozen execution
 references remain preserved during recovery.
 
-Each task has one readable `record.md` for design, decisions, progress, and
-evidence. The agent uses the program's operation schema to enroll the task,
-prepare its worktree, review changes, and record acceptance.
+Each task has one program-generated readable `record.md` with fixed sections
+for intent, exploration, confirmed requirements, sourced decisions, design,
+plan, execution reviews, experiments, delivery, and decision history. Worker
+briefs and reports become record sections or evidence references. The reusable
+phase, conversation, record, and worker structures are in
+[skills/task-workflow/templates](skills/task-workflow/templates/README.md).
+The agent uses the program's operation schema to enroll the task, prepare its
+worktree, review changes, and record acceptance.
 
 ## Workflow tab
 
-After enrollment, the agent opens the known task with the model-only
-`workflow.status_view` tool. It provides explicit project and task context to
-bind the view without asking you to configure dashboard roots. Select the
-**Workflow** tab on the right side of the current chat manually.
+Native `init`, `status`, `bind-session`, and `recover` MCP results provide a safe
+view projection and its UI resource. After CLI enrollment or recovery, the agent
+calls MCP `status` or the model-only `workflow.status_view` with the same known
+project and task. CLI calls do not invoke native UI. Select the **Workflow** tab
+on the right side of the current chat manually. The host controls presentation.
 
-The official `thread` entrypoint can also open the tab. That entrypoint alone
-does not provide a verified current-chat identifier. A tab without a task
-binding explains its unbound state; the agent can bind the known task through
-the view tool. The plugin does not guess another chat's task or expose global
-sidebar navigation or a native task badge.
+Only `workflow.status_view` has a `thread` entrypoint. The host invokes it with
+empty arguments. When the host supplies the documented optional
+[`openai/session` metadata](https://developers.openai.com/plugins/reference),
+the server can reuse a context previously verified for that same conversation
+in its current process. Missing or unknown metadata leaves an empty entrypoint
+unbound. The agent then calls `workflow.status_view` with explicit root, task,
+and session context when available. This correlation does not authorize work.
+
+The project records an explicit selected task for each known session.
+Enrollment and `bind-session` can select another task in the same chat while
+preserving historical task associations. An already associated task cannot
+change its session. Selecting a closed task preserves its closure. Recovery
+preserves the existing selection. After a server restart, the agent supplies
+the same explicit context to recreate the view reference and host correlation.
+The plugin does not guess another chat's task or expose global sidebar navigation
+or a native task badge. Availability of host metadata and actual rendering must
+be checked in the target client.
 
 The view shows the current workflow phase and one relevant detail from persisted
 evidence. It refreshes every 10 seconds while visible. It does not query an
@@ -121,10 +146,17 @@ external execution service. The app bridge can only refresh an opaque view
 reference; mutations stay with the normal workflow tools and their authorization
 guards.
 
+The structured view data and rendered fields omit private paths and task prose.
+Lifecycle calls also retain their full core text result for the agent. MCP Apps
+hosts can forward that text to the bundled app along with the view projection.
+The app renders the projection and keeps external network access disabled.
+
 ## Review, integrate, and freeze
 
-The coordinator explores and records an approved design, delegates implementation,
-reviews actual changes and evidence, and accepts the complete deliverable.
+The coordinator explores and records an approved design and plan, delegates
+implementation, reviews actual changes and evidence, and accepts the complete
+deliverable. A task reviewer returns separate requirements and quality verdicts
+for each item; an overall reviewer checks the complete result.
 Each item follows `pending -> implementing -> reviewing -> complete`. Failed
 review returns the item to `implementing`.
 
