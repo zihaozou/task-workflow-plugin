@@ -26,13 +26,13 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.4')
+        self.assertEqual(manifest['version'], '0.1.5')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
         self.assertEqual(interface['category'], 'Productivity')
         self.assertLessEqual(len(interface['shortDescription']), 30)
-        self.assertIsInstance(interface['capabilities'], list)
+        self.assertEqual(interface['capabilities'], [])
         for key in ('skills', 'mcpServers', 'hooks'):
             self.assertTrue((ROOT / manifest[key]).exists())
 
@@ -117,12 +117,25 @@ class PackageTests(unittest.TestCase):
         self.assertIn('Quality verdict:', reports)
 
     def test_runtime_assets_and_python_syntax(self):
-        for name in ('workflow.py', 'runner.py', 'mcp_server.py', 'status_view.py',
+        for name in ('workflow.py', 'runner.py', 'mcp_server.py',
                      'session_hook.py', 'communication_prompt_hook.py'):
             self.assertTrue((SCRIPTS / name).is_file(), name)
-        self.assertTrue((ROOT / 'skills/task-workflow/assets/workflow.html').is_file())
+        self.assertFalse((SCRIPTS / 'status_view.py').exists())
+        self.assertFalse((ROOT / 'skills/task-workflow/assets/workflow.html').exists())
         for path in ROOT.rglob('*.py'):
             compile(path.read_text(), str(path), 'exec')
+
+    def test_shipped_guidance_uses_persisted_status_and_session_recovery(self):
+        paths = (ROOT / 'README.md', ROOT / 'skills/task-workflow/SKILL.md',
+                 ROOT / 'skills/task-workflow/references/workflow.md',
+                 SCRIPTS / 'session_hook.py', SCRIPTS / 'communication_prompt_hook.py')
+        for path in paths:
+            with self.subTest(path=path):
+                content = path.read_text()
+                for removed in ('workflow.status_view', 'workflow.refresh_view', 'view_required',
+                                'Workflow tab', 'openai/session'):
+                    self.assertNotIn(removed, content)
+                self.assertIn('session', content)
 
     def test_hook_command_supports_plugin_paths_with_spaces(self):
         hooks = json.loads((ROOT / 'hooks/hooks.json').read_text())['hooks']

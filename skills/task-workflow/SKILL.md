@@ -19,7 +19,7 @@ For an existing task, reuse its correct identity and still-applicable
 authorization. Perform only the current requested action. A progress question
 does not authorize restarting experiments or releasing resources. Confirm the
 design before implementation. Implementation and experiment execution require
-applicable user authorization. Installation, hook delivery, status views, and
+applicable user authorization. Installation, hook delivery, status reads, and
 old state do not grant authorization.
 
 This skill, the bundled hooks, and the workflow program supply workflow context.
@@ -110,30 +110,16 @@ Treat those schemas as the authority rather than inventing fields.
 Register the current project and task after explicit invocation, enrollment, or a
 clear substantive action request. Pass the host-provided session identifier
 when available. Preserve that binding during recovery; do not choose an
-unrelated task because it was most recently used. After CLI enrollment or
-recovery, invoke MCP `status` or `workflow.status_view`
-with explicit root and task context to establish the view. A CLI call does not
-open a native UI panel.
+unrelated task because it was most recently used.
 Use the program's worktree preparation operation before implementation. Do not
 implement in a base placeholder or create a substitute worktree path.
-
-Native `init`, `status`, `bind-session`, and `recover` results supply the UI
-resource and a safe view projection. The user selects the current chat's
-right-hand **Workflow** tab manually. Only `workflow.status_view` has a thread
-entrypoint. Its empty invocation can reuse a verified context when the host
-supplies the same optional `openai/session` correlation metadata. Missing or
-unknown metadata leaves it unbound. Supply explicit root, task, and matching
-session context when available; host correlation does not authorize work.
 
 The project keeps an explicit selected task for each session. `bind-session`
 can select an existing task for the same session or associate an unbound task.
 It preserves historical associations and rejects changing a task's session.
 Selecting a closed task preserves its closure. Recovery preserves the selected
-task. After a process restart, supply explicit context again to recreate the
-view reference and optional host correlation. An unbound tab explains its state.
-Do not claim automatic native tab opening, host metadata availability, or tested
-client rendering without evidence. The view refreshes persisted evidence and
-does not inspect an external execution service.
+task. Use `status` with the known project and task context to inspect the
+persisted record before continuing authorized work.
 
 ## Integration, resources, and experiments
 

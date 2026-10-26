@@ -1589,13 +1589,6 @@ def main(argv=None):
             fail("invalid_arguments", "JSON must be an object with no conflicting root.")
         args["root"] = options.root or str(find_registered_root(os.getcwd()) or Path(git(os.getcwd(), "rev-parse", "--show-toplevel")))
         result = dispatch(options.operation, args)
-        if options.operation in ("init", "status", "bind-session", "recover") and args.get("task_id"):
-            context = {"root": args["root"], "task_id": args["task_id"]}
-            session_id = args.get("session_id") or result.get("state", {}).get("session_id")
-            if session_id:
-                context["session_id"] = session_id
-            result["view_required"] = {"tool": "workflow.status_view", "arguments": context,
-                "notice": "Invoke this tool with the known task context to attach the native Workflow tab. The CLI call did not invoke the native view."}
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except WorkflowError as error:

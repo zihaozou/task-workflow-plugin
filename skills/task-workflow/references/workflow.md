@@ -15,7 +15,7 @@ Perform only the current requested action. A progress question does not authoriz
 restarting experiments or releasing resources. Confirm design before
 implementation and obtain applicable authorization before implementation or
 experiment execution. The current Git project owns state under `.task-workflow`.
-Plugin installation, hook delivery, status views, and old state grant no action
+Plugin installation, hook delivery, status reads, and old state grant no action
 authorization.
 
 Discover the program's `schema` operation before mutations. Use its actual
@@ -199,34 +199,11 @@ requires resolved planned work and accepted analysis. Task closure requires the
 complete deliverable, reviews, integration contract, experiments, runs, and
 required cleanup. Keep earlier closure history when reopening work.
 
-## 5. View, hooks, and recovery
+## 5. Tools, hooks, and recovery
 
 MCP tools use the same program and persistence. Reconnect the process after an
 update and rediscover schemas. Replacing source does not reload an existing
 process. Use one current interface for mutations in a task.
-
-After CLI enrollment or recovery, invoke MCP `status` or
-the model-only `workflow.status_view` tool with explicit project and task
-context. CLI mutation alone does not open native UI. The lifecycle MCP results
-include safe view projections; `workflow.status_view` creates an opaque view
-reference. The app-only refresh tool accepts that reference and returns
-persisted status. The bridge cannot request arbitrary paths or issue mutations.
-The rendered fields use only the structured projection. Lifecycle tools retain
-their full core text for the agent, and the MCP Apps host can also forward that
-text to the bundled app. The projection and rendered fields omit private paths
-and task prose; they are not a redaction of the entire lifecycle result. The
-app's content policy blocks external network access.
-
-Only `workflow.status_view` has a thread entrypoint for the current chat's
-right-hand Workflow tab. The user selects the tab manually. The
-[entrypoint contract](https://github.com/openai/mcp-extensions/blob/main/docs/spec.md#thread-entrypoint)
-passes empty arguments. The host may also supply the documented optional
-[`_meta["openai/session"]`](https://developers.openai.com/plugins/reference)
-conversation correlation value. After a verified explicit lifecycle or view
-call, the current server process can use that value to recover the same context
-for an empty entrypoint. It never supplies authorization. Missing, unknown, or
-invalid correlation leaves the empty view unbound. A refresh carrying different
-conversation metadata is rejected. The value is correlation, not authentication.
 
 The project-local registry stores explicit session-to-task selections.
 Enrollment and `bind-session` can select another task for the same session.
@@ -238,14 +215,8 @@ selection restore only a unique exact session match. Ordinary recovery preserves
 the existing selection; an interrupted selection write can be repaired by an
 explicit `bind-session` call with the current task version.
 
-Opaque refresh references and host correlations last for the server process.
-After a restart, recreate them through MCP `status` or `workflow.status_view`
-with the same explicit project, task, and session context when available. Do
-not repeat enrollment to repair UI context. Check optional metadata availability
-and actual rendering in the target client. Do not guess another chat's task,
-scan the home directory, or add global navigation. Refresh reads recorded state.
-The plugin adds no view count, row, or expiration caps and no UI refresh deadline.
-The view refresh cadence remains 10 seconds while visible.
+Use `status` with explicit project and task context to inspect persisted
+records. Preserve the recorded session association during recovery.
 
 The plugin imposes no transport or hook input-size, file-count, JSON, label, or
 context caps, and no fixed hook deadline. Preserve complete snapshots and their

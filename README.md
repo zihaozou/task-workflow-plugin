@@ -3,14 +3,13 @@
 Task Workflow routes substantive development and experiment action requests
 through exploration, a focused design discussion, reviewed design and plan
 approvals, delegated work, evidence review, and optional frozen runs.
-It combines a skill, recovery and communication hooks, a Python workflow program,
-and an optional Workflow tab in the current chat.
+It combines a skill, recovery and communication hooks, and a Python workflow
+program exposed through command-line and MCP tools.
 
 ## Install and enroll
 
 Use Python 3.9 or later. The runtime uses the Python standard library. Git is
-required for development worktrees and integration. The optional view requires
-a client with MCP Apps and thread entrypoint support.
+required for development worktrees and integration.
 
 ```sh
 git clone https://github.com/zihaozou/task-workflow-plugin.git
@@ -114,42 +113,14 @@ phase, conversation, record, and worker structures are in
 The agent uses the program's operation schema to enroll the task, prepare its
 worktree, review changes, and record acceptance.
 
-## Workflow tab
-
-Native `init`, `status`, `bind-session`, and `recover` MCP results provide a safe
-view projection and its UI resource. After CLI enrollment or recovery, the agent
-calls MCP `status` or the model-only `workflow.status_view` with the same known
-project and task. CLI calls do not invoke native UI. Select the **Workflow** tab
-on the right side of the current chat manually. The host controls presentation.
-
-Only `workflow.status_view` has a `thread` entrypoint. The host invokes it with
-empty arguments. When the host supplies the documented optional
-[`openai/session` metadata](https://developers.openai.com/plugins/reference),
-the server can reuse a context previously verified for that same conversation
-in its current process. Missing or unknown metadata leaves an empty entrypoint
-unbound. The agent then calls `workflow.status_view` with explicit root, task,
-and session context when available. This correlation does not authorize work.
+## Session selection and recovery
 
 The project records an explicit selected task for each known session.
 Enrollment and `bind-session` can select another task in the same chat while
 preserving historical task associations. An already associated task cannot
 change its session. Selecting a closed task preserves its closure. Recovery
-preserves the existing selection. After a server restart, the agent supplies
-the same explicit context to recreate the view reference and host correlation.
-The plugin does not guess another chat's task or expose global sidebar navigation
-or a native task badge. Availability of host metadata and actual rendering must
-be checked in the target client.
-
-The view shows the current workflow phase and one relevant detail from persisted
-evidence. It refreshes every 10 seconds while visible. It does not query an
-external execution service. The app bridge can only refresh an opaque view
-reference; mutations stay with the normal workflow tools and their authorization
-guards.
-
-The structured view data and rendered fields omit private paths and task prose.
-Lifecycle calls also retain their full core text result for the agent. MCP Apps
-hosts can forward that text to the bundled app along with the view projection.
-The app renders the projection and keeps external network access disabled.
+preserves the existing selection. Use `status` to inspect the persisted task
+record with the known project and task context.
 
 ## Review, integrate, and freeze
 
@@ -210,7 +181,7 @@ Run checks from the repository root:
 python3 -m unittest discover -s tests -v
 ```
 
-Tests cover the program, frozen runner, adapters, read-only view, hooks, and
+Tests cover the program, frozen runner, adapters, session bindings, hooks, and
 package layout. To run the optional native installation and discovery check:
 
 ```sh
@@ -220,8 +191,8 @@ CODEX_PLUGIN_TEST_CLI=/absolute/path/to/codex python3 -m unittest discover -s te
 The check stages tracked package files, installs through a local marketplace in
 a temporary client home, and verifies two enabled plugin hooks with untrusted
 status. It grants no hook trust and leaves the active client unchanged. After an actual installation, also verify startup, tool
-discovery, a harmless call, hook trust, and the Workflow tab in the target client.
-Tests do not prove client rendering or installation. Reconnect the MCP process
+discovery, a harmless call, and hook trust in the target client.
+Tests do not prove installation in the active client. Reconnect the MCP process
 after an update because an existing process can retain old source.
 
 SessionStart restores safe facts for an existing task in the current

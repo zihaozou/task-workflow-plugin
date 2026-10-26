@@ -88,8 +88,7 @@ def context_for(event):
     context = 'Registered Task Workflow context: ' + json.dumps(
         {'root': str(root), 'session_id': session_id, 'status_tool': 'status', 'task': facts,
          'templates': templates,
-         'view_tool': {'name': 'workflow.status_view', 'arguments': {'root': str(root), 'task_id': task_id, 'session_id': session_id}},
-         'recovery_guidance': 'Restore the recorded phase and its template. Call a lifecycle MCP tool or workflow.status_view to supply this chat view binding. CLI calls and hook delivery do not invoke native UI or authorize work.'},
+         'recovery_guidance': 'Restore the recorded phase and its template. Read current task status before continuing authorized work. Hook delivery does not authorize work.'},
         separators=(',', ':'), ensure_ascii=True)
     return {'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}
 

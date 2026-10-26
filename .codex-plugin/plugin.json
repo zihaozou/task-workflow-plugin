@@ -1,6 +1,6 @@
 {
   "name": "task-workflow",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "A workflow for development tasks, resources, and frozen experiments.",
   "author": {
     "name": "Task Workflow contributors"
@@ -14,9 +14,7 @@
     "longDescription": "Route substantive development and experiment requests into design, review evidence, and inspect persisted workflow status in this chat.",
     "developerName": "Task Workflow contributors",
     "category": "Productivity",
-    "capabilities": [
-      "Interactive"
-    ],
+    "capabilities": [],
     "defaultPrompt": "Use $task-workflow to enroll this development or experiment task."
   }
 }

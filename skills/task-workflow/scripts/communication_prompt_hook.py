@@ -18,9 +18,7 @@ ROUTING_GUIDANCE = (
     "implementation, experiment execution, integration, and release require "
     "applicable authorization. Hook delivery itself grants none. "
     "For enrollment use the native init MCP tool with the known project/task "
-    "and host session identifier when available. For a legacy CLI enrollment "
-    "or recovery, explicitly invoke a lifecycle MCP tool or workflow.status_view "
-    "with that same context so the current chat receives its UI binding. "
+    "and host session identifier when available. "
     "Use bind-session to select an existing task for its known session; "
     "reuse the recorded phase and templates after recovery. "
 )

@@ -8,7 +8,6 @@ import math
 import sys
 
 import workflow
-import status_view
 
 VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
 
@@ -55,21 +54,16 @@ def parse_json(data):
                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid JSON number")))
 
 
-def conversation_context(params):
-    """Read only the documented optional host correlation field, never guesses."""
-    metadata = params.get("_meta")
-    value = metadata.get("openai/session") if isinstance(metadata, dict) else None
-    return value if isinstance(value, str) and value.strip() and all(character.isprintable() for character in value) else None
-
-
 class Server:
     def __init__(self):
         self.initialized = False
-        self.tools = [status_view.lifecycle_schema(tool) if tool["name"] in status_view.LIFECYCLE_TOOLS
-                      else {**tool, "_meta": {**tool.get("_meta", {}), "ui": {"visibility": ["model"]}}}
-                      for tool in workflow.command_schemas()] + [status_view.tool_schema(), status_view.refresh_schema()]
+        self.tools = []
+        for tool in workflow.command_schemas():
+            if tool["name"] in ("init", "status", "bind-session", "recover"):
+                tool = {**tool, "annotations": {"readOnlyHint": tool["name"] == "status",
+                        "destructiveHint": False, "openWorldHint": False, **tool.get("annotations", {})}}
+            self.tools.append(tool)
         self.by_name = {tool["name"]: tool for tool in self.tools}
-        self.views = status_view.ViewStore(workflow)
 
     @staticmethod
     def error(request_id, code, message):
@@ -94,9 +88,7 @@ class Server:
             requested = params.get("protocolVersion")
             selected = requested if requested in VERSIONS else VERSIONS[-1]
             self.initialized = True
-            result = {"protocolVersion": selected, "capabilities": {"tools": {"listChanged": False},
-                      "resources": {"subscribe": False, "listChanged": False},
-                      "extensions": {"io.modelcontextprotocol/ui": {"mimeTypes": [status_view.MIME_TYPE]}}},
+            result = {"protocolVersion": selected, "capabilities": {"tools": {"listChanged": False}},
                       "serverInfo": {"name": "task-workflow", "version": "1.0.0"}}
         elif method == "ping":
             result = {}
@@ -104,32 +96,17 @@ class Server:
             return self.error(request_id, -32002, "Server is not initialized")
         elif method == "tools/list":
             result = {"tools": self.tools}
-        elif method == "resources/list":
-            result = {"resources": [status_view.resource()]}
-        elif method == "resources/read":
-            if params.get("uri") != status_view.RESOURCE_URI:
-                return self.error(request_id, -32602, "Unknown resource")
-            try:
-                result = {"contents": [status_view.read_resource()]}
-            except (OSError, UnicodeError):
-                return self.error(request_id, -32603, "Workflow view is unavailable")
         elif method == "tools/call":
             name = params.get("name")
             if not isinstance(name, str) or name not in self.by_name:
                 return self.error(request_id, -32602, "Unknown tool")
             arguments = params.get("arguments", {})
-            host_session = conversation_context(params)
             try:
                 validate(arguments, self.by_name[name]["inputSchema"])
             except ValueError as exc:
                 return self.error(request_id, -32602, str(exc))
             try:
-                if name == status_view.TOOL_NAME:
-                    output = self.views.open(arguments, host_session=host_session)
-                elif name == status_view.REFRESH_TOOL:
-                    output = self.views.refresh(arguments["view_ref"], host_session=host_session)
-                else:
-                    output = workflow.dispatch(name, arguments)
+                output = workflow.dispatch(name, arguments)
                 failed = output.get("ok") is False
             except workflow.WorkflowError as exc:
                 output = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
@@ -137,21 +114,6 @@ class Server:
             except Exception:
                 return self.error(request_id, -32603, "Internal workflow error")
             result = {"content": [{"type": "text", "text": json.dumps(output, ensure_ascii=False)}], "isError": failed}
-            if name in (status_view.TOOL_NAME, status_view.REFRESH_TOOL):
-                result["structuredContent"] = output
-            elif name in status_view.LIFECYCLE_TOOLS:
-                # Native UI linkage is part of the operation the agent already
-                # calls. A forgotten second tool call cannot suppress enrollment
-                # data. The complete core result remains in model-visible text.
-                try:
-                    result["structuredContent"] = (self.views.open(arguments, host_session=host_session) if not failed
-                                                    else status_view.unbound("unavailable"))
-                except Exception:
-                    # A completed enrollment must remain successful even when
-                    # its optional projection or local view binding is unavailable.
-                    result["structuredContent"] = status_view.unbound("unavailable")
-            if "structuredContent" in result:
-                result["_meta"] = {"ui": {"resourceUri": status_view.RESOURCE_URI}}
         else:
             return self.error(request_id, -32601, "Method not found")
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
