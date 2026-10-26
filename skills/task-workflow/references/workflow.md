@@ -87,7 +87,10 @@ state is `available`, `in_use`, `releasable`, `released`, or `unknown`.
 
 Register resources with actual identity and ownership evidence. Reuse them only
 after checking actual availability, compatibility, and all run references. A
-started run establishes a resource reference. Finishing a run records its
+planned reservation establishes a resource reference. Planning and preparation
+can reference pending capacity after identity, ownership, release seal, and
+capability checks. Actual start requires a fresh available observation and no
+active or uncertain conflicting execution. Finishing a run records its
 execution outcome; it does not grant release permission. Release requires
 explicit permission, verified ownership, and resolved active references.
 Reconcile uncertain release results before retrying. A status read has no
@@ -108,6 +111,38 @@ Record purpose, parent run, checkpoint reference when relevant, frozen snapshot,
 resource identity, execution receipt, and artifact acceptance. The program pins
 the workflow and runner runtime. Preserve referenced runtime files and stable
 environments for existing execution. Later changes create a new run.
+
+New frozen runtimes record execution protocol 2 in their metadata and both
+hashed runtime files. Unstarted runs with an earlier runtime are rejected before
+dispatch or launch. Preserve their frozen files and records, then create a new
+Run identity with the same approved inputs. Existing actual execution receipts
+remain available for reconciliation through their original runtime.
+
+Runs have no default execution time limit. An explicit positive `timeout` on
+`run-execute` or `run-dispatch` sets the workload limit in seconds without a
+maximum. Verification, integration, and release commands retain their separate
+bounded command timeouts. `run-execute` waits for a receipt by default;
+`detached: true` returns after launching the pinned runner.
+
+For an external executor, call `run-dispatch` with `root`, `task_id`, `actor`,
+`expected_version`, and `run_id`. Its optional `timeout` becomes immutable.
+The operation saves `execution_intent` and returns `runner_argv`; it launches
+nothing. Execute that exact argument array on the resource through the private
+controller. The root, frozen runtime, environment, and output paths must be
+accessible there. The run stays `queued` until its pinned runner checks current
+ownership, availability, capabilities, and conflicting execution under locks.
+The runner makes a permanent claim, starts the actual workload, and records its
+process identity before releasing those locks. A queue receipt alone cannot
+mark a run `running`. Repeated dispatch returns the original argument array and
+intent without another launch. An unclaimed queued run can be cancelled; a
+later runner then fails admission. A claimed execution requires reconciliation. If a local runner fails admission
+before claiming or starting, its run remains queued and can be cancelled.
+
+Reread task status after the runner starts to obtain the current version. Use
+`run-observe` with `run_id`, `receipt_path`, and `evidence`, or use
+`run-reconcile` for the canonical receipt. Both ingest actual execution evidence
+without launching or repeating the workload. Preserve the frozen inputs,
+execution token, log identity, and claim after interruption.
 
 Submission does not prove execution. A zero exit does not prove artifact
 quality. Accept actual artifacts with verification evidence. Experiment closure

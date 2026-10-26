@@ -1,6 +1,6 @@
 {
   "name": "task-workflow",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "An opt-in workflow for approved development tasks, resources, and frozen experiments.",
   "author": {
     "name": "Task Workflow contributors"

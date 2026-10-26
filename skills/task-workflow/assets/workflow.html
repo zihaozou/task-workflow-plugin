@@ -54,7 +54,7 @@
     const runs=task.runs||[],running=runs.filter(run=>run.status==='running');
     const stage=task.stage,combined=['implementation','review'].includes(stage)?readable(stage)+' · ':'';
     if(running.length)return {phase:combined+'Running',detail:running[0].run_id+' · Running'+(running.length>1?' · +'+(running.length-1):'')};
-    for(const [state,phase] of [['awaiting_artifacts','Awaiting artifacts'],['preparing','Preparing run'],['prepared','Run ready'],['planned','Run planned'],['unknown','Run state unknown']]) {
+    for(const [state,phase] of [['queued','Queued'],['awaiting_artifacts','Awaiting artifacts'],['preparing','Preparing run'],['prepared','Run ready'],['planned','Run planned'],['unknown','Run state unknown']]) {
       const run=runs.find(value=>value.status===state);if(run)return {phase,detail:run.run_id};
     }
     const phases={enrolled:'Design','design recorded':'Design',approved:'Ready',implementation:'Implementation',review:'Review','verification complete':'Verification complete',integration:'Integration',integrated:'Integrated'};

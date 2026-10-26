@@ -22,6 +22,7 @@ import uuid
 
 VERSION = 1
 PORTABLE_FORMAT = 2
+EXECUTION_PROTOCOL = 2
 STATES = ("pending", "implementing", "reviewing", "complete")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 MAX_JSON = 4 * 1024 * 1024
@@ -348,6 +349,12 @@ def record_text(state):
             continue
         lines += [f"- `{run_id}`: {experiment['status']}; resource {experiment.get('resource_id') or 'none'}.",
                   f"  Frozen commit `{experiment['commit']}`, design `{experiment['design_digest']}`; snapshot `{experiment['code']}`; environment `{experiment['environment']['path']}`."]
+        if experiment.get("execution_intent") and not experiment.get("start_validated"):
+            lines.append("  Execution dispatched; waiting for actual runner admission.")
+        if experiment.get("start_validated") and experiment["start_validated"].get("pid") is None and "pid" in experiment["start_validated"]:
+            lines.append("  Runner admitted; workload launch failed.")
+        elif experiment.get("start_validated"):
+            lines.append(f"  Actual workload started at {experiment['started']}; process {experiment['start_validated'].get('pid', 'unrecorded')}.")
         if experiment.get("execution"):
             lines.append(f"  Actual exit {experiment['execution']['returncode']}; log `{experiment['execution']['log']}`.")
         if experiment.get("artifact_acceptance"):
@@ -417,7 +424,7 @@ def summary(state):
             "active_runs": sum(r["status"] not in TERMINAL_RUNS for r in state["runs"].values()),
             "task_status": state.get("task_lifecycle", {}).get("status", "unrecorded"),
             "open_experiments": sum(e["status"] != "complete" for e in state.get("experiments", {}).values()),
-            "run_counts": {key: sum(r["status"] == key for r in state["runs"].values()) for key in ("planned", "preparing", "prepared", "running", "awaiting_artifacts", "complete", "failed", "cancelled", "unknown")}}
+            "run_counts": {key: sum(r["status"] == key for r in state["runs"].values()) for key in ("planned", "preparing", "prepared", "queued", "running", "awaiting_artifacts", "complete", "failed", "cancelled", "unknown")}}
 
 def spec(description, required=None, optional=None):
     return {"description": description, "required": {"root": "string", **(required or {})}, "optional": optional or {}}
@@ -463,8 +470,9 @@ def validate(operation, args):
     for duration_key in ("expected_duration_seconds", "recovery_margin_seconds"):
         if duration_key in args and not 1 <= args[duration_key] <= 365 * 86400:
             fail("invalid_duration", "Expected duration and recovery margin must be positive seconds, bounded to one year.")
-    if "timeout" in args and not 1 <= args["timeout"] <= 3600:
-        fail("invalid_arguments", "Verification timeout must be between 1 and 3600 seconds.")
+    if "timeout" in args:
+        if args["timeout"] < 1 or (operation not in ("run-execute", "run-dispatch") and args["timeout"] > 3600):
+            fail("invalid_arguments", "Run timeout must be positive; command checks are bounded to 3600 seconds.")
 
 def require_approved(state):
     if not summary(state)["approved"]:
@@ -1048,7 +1056,7 @@ def close_scope(args, state, experiment_id=None):
         fail("acceptance_required", "Closure needs an explicit completed, stopped or abandoned outcome and evidence references.")
     runs = [r for r in state["runs"].values() if not experiment_id or r.get("experiment_id") == experiment_id]
     if any(r["status"] not in TERMINAL_RUNS for r in runs):
-        fail("runs_incomplete", "Resolve all planned, prepared, running and uncertain runs before closing the aggregate scope.")
+        fail("runs_incomplete", "Resolve all planned, prepared, queued, running and uncertain runs before closing the aggregate scope.")
     if args['outcome'] == 'completed' and any(current['status'] == 'complete' and not accepted_run_proof(state, current) for current in runs):
         fail('accepted_evidence_changed', 'Accepted output, snapshot or execution evidence changed; preserve it and resolve the aggregate outcome honestly.')
     if experiment_id:
@@ -1334,16 +1342,37 @@ def check_run(state, experiment):
     if experiment.get("frozen_approval", {}).get("digest") != experiment["design_digest"]:
         fail("approval_required", "The frozen experiment has no approval for its own design.")
     if experiment.get("runtime"):
-        runtime = experiment["runtime"]
-        location = Path(runtime["directory"])
-        expected = Path(state["root"]) / ".task-workflow/runtimes" / runtime["digest"]
-        if location != expected or runtime.get("digest") != digest(runtime.get("files")):
-            fail("runtime_changed", "The frozen execution runtime identity changed.")
-        for name, expected_hash in runtime["files"].items():
-            target = location / str(safe_relative(name))
-            no_symlinks(target, Path(state["root"]))
-            if not target.is_file() or sha_file(target) != expected_hash:
-                fail("runtime_changed", "The frozen execution runtime bytes changed before execution.")
+        check_runtime(state, experiment)
+
+
+def check_runtime(state, current):
+    runtime = current['runtime']
+    location = Path(runtime['directory'])
+    expected = Path(state['root']) / '.task-workflow/runtimes' / runtime['digest']
+    if location != expected or runtime.get('digest') != digest(runtime.get('files')):
+        fail('runtime_changed', 'The frozen execution runtime identity changed.')
+    for name, expected_hash in runtime['files'].items():
+        target = location / str(safe_relative(name))
+        no_symlinks(target, Path(state['root']))
+        if not target.is_file() or sha_file(target) != expected_hash:
+            fail('runtime_changed', 'The frozen execution runtime bytes changed before execution.')
+    return runtime
+
+
+def require_execution_protocol(state, current):
+    runtime = current.get('runtime')
+    message = ('This frozen runtime uses a legacy execution protocol. Preserve it and create a new Run '
+               'identity with the same approved inputs before execution or dispatch.')
+    if not runtime:
+        fail('legacy_runtime', message)
+    runtime = check_runtime(state, current)
+    if runtime.get('execution_protocol') != EXECUTION_PROTOCOL or set(runtime['files']) != {'workflow.py', 'runner.py'}:
+        fail('legacy_runtime', message)
+    for name in runtime['files']:
+        content = (Path(runtime['directory']) / name).read_bytes()
+        if not re.search(rb'(?m)^EXECUTION_PROTOCOL = ' + str(EXECUTION_PROTOCOL).encode() + rb'$', content):
+            fail('legacy_runtime', message)
+
 
 def pin_runtime(state):
     source = Path(__file__).resolve().parent
@@ -1379,7 +1408,7 @@ def pin_runtime(state):
         no_symlinks(target / name, store)
         if not (target / name).is_file() or sha_file(target / name) != hashes[name]:
             fail("runtime_changed", "A shared frozen runtime differs from its recorded content identity; it cannot be overwritten.")
-    return {"protocol_version": 1, "digest": runtime_digest, "directory": str(target), "files": hashes}
+    return {"protocol_version": 1, "execution_protocol": EXECUTION_PROTOCOL, "digest": runtime_digest, "directory": str(target), "files": hashes}
 
 def cleanup_integration_proof(state, head):
     integration = state["integration"]
@@ -1759,7 +1788,7 @@ def resource_status(root, resource_id):
     resource, _ = read_resource(store, resource_id)
     return {'ok': True, 'resource': resource_projection(store, resource)}
 
-def validate_resource_reference(store, state, association):
+def validate_resource_reference(store, state, association, require_available=False):
     resource_id = association.get('resource_id')
     if not resource_id:
         if association.get('requirements'):
@@ -1767,9 +1796,9 @@ def validate_resource_reference(store, state, association):
         return
     resource, _ = read_resource(store, resource_id)
     resource_owner(resource, state['coordinator'])
-    if resource.get('release'):
+    if resource.get('release') or resource['observed_state'] == 'released':
         fail('resource_unavailable', 'A release intent seals admission; reconcile it instead of reusing the resource.')
-    if resource['observed_state'] != 'available' or not observation_current(resource):
+    if require_available and (resource['observed_state'] != 'available' or not observation_current(resource)):
         fail('resource_unavailable', 'A current available resource observation is required before reuse.')
     for key, needed in association.get('requirements', {}).items():
         offered = resource['capabilities'].get(key)
@@ -1778,7 +1807,9 @@ def validate_resource_reference(store, state, association):
     for other, run_id, current in resource_associations(store, resource_id):
         if other['task_id'] == state['task_id'] and run_id == association.get('run_id'):
             continue
-        if current['status'] in ('running', 'unknown'):
+        claimed_queue = (current['status'] == 'queued' and
+                         (Path(current['directory']) / 'execution.claim').exists())
+        if require_available and (current['status'] in ('running', 'unknown') or claimed_queue):
             fail('resource_in_use', 'Resolve the active or uncertain execution before reusing this resource.')
 
 def register_resource(args, state, store):
@@ -1902,8 +1933,8 @@ def dispatch(operation, arguments):
         return init(args, root, store)
     if operation == "resource-status":
         return resource_status(str(root), args["resource_id"])
-    if operation in ("run-execute", "run-observe"):
-        return execute_run(args, root, store, observe=operation == "run-observe")
+    if operation in ("run-execute", "run-dispatch"):
+        return execute_run(args, root, store, external=operation == "run-dispatch")
     if operation == "resource-release":
         return release_resource(args, root, store)
     if operation == "run-prepare":
@@ -1954,11 +1985,13 @@ def dispatch(operation, arguments):
         elif operation == "run-cancel":
             require_coordinator(args, state)
             current = get_run(state, args["run_id"])
-            if current["status"] not in ("planned", "preparing", "prepared") and not (current["status"] == "awaiting_artifacts" and current.get("execution")):
-                fail("cancellation_denied", "Cancel only an unsubmitted reservation or explicitly dispose an exited workload's unaccepted artifacts; running and uncertain executions require reconciliation.")
+            if current["status"] == "queued" and (Path(current["directory"]) / "execution.claim").exists():
+                fail("cancellation_denied", "A claimed execution requires reconciliation before cancellation.")
+            if current["status"] not in ("planned", "preparing", "prepared", "queued") and not (current["status"] == "awaiting_artifacts" and current.get("execution")):
+                fail("cancellation_denied", "Cancel only an unclaimed reservation or explicitly dispose an exited workload's unaccepted artifacts; running and uncertain executions require reconciliation.")
             current.update(status="cancelled", cancellation={"reason": args["reason"], "actor": args["actor"], "time": now()})
             result = {"run": current}
-        elif operation == "run-reconcile":
+        elif operation in ("run-reconcile", "run-observe"):
             result = reconcile_execution(args, state)
         elif operation == "run-accept":
             result = accept_run(args, state)
@@ -2076,6 +2109,7 @@ COMMANDS.update({
     "experiment-create": mutation("Reserve an experiment goal and output directory.", {"experiment_id": "string", "goal": "string"}, {"experiment_root": "string"}),
     "run-plan": mutation("Reserve an immutable run intent and optional resource reference.", {"run_id": "string"}, ASSOCIATION_FIELDS),
     "run-prepare": mutation("Freeze integrated code, environment, argv and runtime.", {"run_id": "string", "environment_id": "string", "lockfiles": "array", "argv": "array", "artifacts": "array"}, {**ASSOCIATION_FIELDS, "dependency_declaration": "string", "output_dir": "string"}),
+    "run-dispatch": mutation("Reserve external execution and return the pinned runner argv without launching it.", {"run_id": "string"}, {"timeout": "integer"}),
     "run-execute": mutation("Execute frozen argv once and preserve an actual process receipt.", {"run_id": "string"}, {"timeout": "integer", "detached": "boolean"}),
     "run-observe": mutation("Observe an externally provided matching actual execution receipt.", {"run_id": "string", "receipt_path": "string", "evidence": "array"}),
     "run-reconcile": mutation("Reconcile a matching execution receipt without repeating execution.", {"run_id": "string"}, {"receipt_path": "string", "evidence": "array"}),
@@ -2127,7 +2161,7 @@ def reconcile_execution(args, state):
     return {'run': current}
 
 
-def execute_run(args, root, store, observe=False):
+def execute_run(args, root, store, external=False):
     path = task_dir(store, args['task_id'])
     with lifecycle_lock(store), lock(path / 'write.lock'):
         state, previous = load_events(path)
@@ -2136,31 +2170,48 @@ def execute_run(args, root, store, observe=False):
         if state['version'] != args['expected_version']:
             fail('revision_conflict', 'The task changed before execution.')
         current = get_run(state, args['run_id'])
+        require_execution_protocol(state, current)
+        intent = current.get('execution_intent')
+        if external and intent:
+            if intent['mode'] != 'external' or ('timeout' in args and args['timeout'] != intent['timeout']):
+                fail('execution_denied', 'The durable execution intent cannot be replaced.')
+            return {'ok': True, 'state': state, 'summary': summary(state), 'run': current,
+                    'runner_argv': intent['runner_argv'], 'already_dispatched': True, 'reconciliation_required': True}
         if current['status'] != 'prepared':
             fail('execution_denied', 'Only an unstarted prepared run can execute.')
-        validate_resource_reference(store, state, {**current, 'run_id': args['run_id']})
+        validate_resource_reference(store, state, {**current, 'run_id': args['run_id']}, require_available=not external)
         check_run(state, current)
-        current.update(status='running', started=now(), start_validated={'time': now(), 'manifest_digest': current['manifest_digest']})
-        commit_event(path, state, previous, 'run-execution-intent', args['actor'])
         runner = Path(current['runtime']['directory']) / 'runner.py'
-        command = [sys.executable, str(runner), '--root', str(root), '--task-id', args['task_id'], '--run-id', args['run_id'], '--token', current['token'], '--timeout', str(args.get('timeout', 3600))]
-    # The pinned process writes its own durable result before this caller updates state.
+        command = [sys.executable, str(runner), '--root', str(root), '--task-id', args['task_id'], '--run-id', args['run_id'], '--token', current['token']]
+        if 'timeout' in args:
+            command += ['--timeout', str(args['timeout'])]
+        current.update(status='queued', execution_intent={'runner_argv': command, 'timeout': args.get('timeout'),
+                       'mode': 'external' if external else 'local', 'actor': args['actor'], 'time': now()})
+        commit_event(path, state, previous, 'run-dispatch-intent', args['actor'])
+    if external:
+        return {'ok': True, 'state': state, 'summary': summary(state), 'run': current,
+                'runner_argv': command, 'reconciliation_required': True}
+    # The pinned runner validates actual admission and writes its durable result.
     if args.get('detached'):
         log_path = Path(current['directory']) / 'runner.log'
         with open(log_path, 'xb') as log:
             process = subprocess.Popen(command, cwd=str(root), stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         threading.Thread(target=process.wait, daemon=True).start()
         return {'ok': True, 'state': state, 'summary': summary(state), 'run': current, 'runner_pid': process.pid, 'reconciliation_required': True}
-    result = {'observation': True} if observe else run(command, cwd=str(root), timeout=args.get('timeout', 3600) + 15)
+    # The runner owns the optional workload timeout and process-group cleanup.
+    result = run(command, cwd=str(root), timeout=None)
     with lifecycle_lock(store), lock(path / 'write.lock'):
         state, previous = load_events(path)
         try:
             response = reconcile_execution(args, state)
         except WorkflowError:
             current = get_run(state, args['run_id'])
-            current['status'] = 'unknown'
+            claimed = (Path(current['directory']) / 'execution.claim').exists()
+            uncertain = claimed or bool(current.get('start_validated'))
+            if uncertain:
+                current['status'] = 'unknown'
             current['runner_result'] = result
-            commit_event(path, state, previous, 'run-execution-unknown', args['actor'])
+            commit_event(path, state, previous, 'run-execution-unknown' if uncertain else 'run-admission-deferred', args['actor'])
             raise
         commit_event(path, state, previous, 'run-execution-result', args['actor'])
         return {'ok': True, 'state': state, 'summary': summary(state), **response}

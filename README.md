@@ -130,6 +130,13 @@ An experiment has one research goal and can have several frozen runs. Changed
 code or arguments for the same goal creates a new run. Changed goals create new
 experiments. Execution evidence and artifact acceptance are required before
 accepting a result. Task, experiment, and run closure remain separate operations.
+Runs have no default execution time limit. An explicit positive timeout has no
+maximum. Command checks retain separate bounded timeouts. Use `run-execute`
+with `detached: true` for a local launch that returns immediately, or
+`run-dispatch` to save an external execution intent and obtain its exact pinned
+runner argument array. Dispatch records `queued`; the actual runner checks
+resource admission, makes a permanent claim, and records the workload start.
+Observe or reconcile its receipt after rereading the current task version.
 
 Resources record who provided them and their observed availability. Their derived
 state is `available`, `in_use`, `releasable`, `released`, or `unknown`. Record

@@ -21,7 +21,7 @@ MAX_ROWS = 100
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 TIMESTAMP = re.compile(r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,6})?(?:Z|[+-]\d\d:\d\d)$")
 ITEM_STATES = {"pending", "implementing", "reviewing", "complete"}
-RUN_STATES = {"planned", "preparing", "prepared", "running", "awaiting_artifacts", "complete", "failed", "cancelled", "unknown"}
+RUN_STATES = {"planned", "preparing", "prepared", "queued", "running", "awaiting_artifacts", "complete", "failed", "cancelled", "unknown"}
 
 
 

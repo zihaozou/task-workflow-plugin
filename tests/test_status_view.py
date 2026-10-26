@@ -53,6 +53,15 @@ class ProjectionTests(unittest.TestCase):
         self.assertEqual(core.dispatch.call_count, 2)
         self.assertEqual(len(opened["view_ref"]), 43)
 
+    def test_queued_execution_is_projected_without_claiming_running(self):
+        state = record()
+        state['runs']['run-1']['status'] = 'queued'
+        opened = status_view.ViewStore(self.core(state)).open({'root': '/private/root', 'task_id': 'task-1'})
+        self.assertEqual(opened['tasks'][0]['runs'][0]['status'], 'queued')
+        html = status_view.read_resource()['text']
+        self.assertIn("['queued','Queued']", html)
+        self.assertIn('10000', html)
+
     def test_unbound_context_never_falls_back_to_another_task(self):
         core = self.core()
         store = status_view.ViewStore(core)
@@ -233,6 +242,7 @@ async function fixture(stage,closure,runs,expected,detail='') {
 }
 await fixture('enrolled',{status:'open'},[],'Design');
 await fixture('review',{status:'open'},[],'Review','Implementation review');
+await fixture('integrated',{status:'open'},[{run_id:'run-1',status:'queued'}],'Queued','run-1');
 await fixture('integrated',{status:'open'},[{run_id:'run-1',status:'running'}],'Running','run-1');
 await fixture('implementation',{status:'open'},[{run_id:'run-1',status:'running'}],'Implementation · Running');
 for(const [outcome,expected] of [['completed','Completed'],['stopped','Stopped'],['abandoned','Abandoned']])await fixture('integrated',{status:'complete',outcome},[{run_id:'run-1',status:'running'}],expected);
