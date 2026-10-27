@@ -244,6 +244,134 @@ separate. The coordinator inspects actual diffs and evidence. After the items
 pass, independently review the full deliverable as an overall item. Reuse valid
 evidence only when the approved design and relevant code remain unchanged.
 
+### Complete plan and decision argument examples
+
+These examples demonstrate argument nesting only. They assume an explicitly
+synthetic fixture already contains confirmed `req-report`, an approved `report`
+component owning `src/report.py`, and an answered `q-encoding` with choice `utf8`.
+Replace every illustrative value with current state and actual authority. Never
+copy a synthetic source reference into a real task. Do not submit a plan during
+an outstanding question or decision outside its allowed stage.
+
+`plan` has no top-level `id` or `acceptance`. Item `component_ids` and
+`requirement_ids` name existing approved components and requirements. Step
+`interfaces` use the item's exact declared strings, not shorthand function names.
+Each check maps the requirements it verifies; every item requirement needs a
+check and every declared interface needs an action.
+
+<!-- process-plan-complete-example -->
+```json
+{
+  "root": "/absolute/project",
+  "task_id": "report-task",
+  "actor": "coordinator",
+  "expected_version": 12,
+  "plan": {
+    "shared_requirements": [],
+    "dependencies": [],
+    "review_focus": "Check exact report loading and error behavior.",
+    "items": [
+      {
+        "id": "report-loader",
+        "title": "Load the approved report format",
+        "component_ids": [
+          "report"
+        ],
+        "requirement_ids": [
+          "req-report"
+        ],
+        "deliverables": [
+          "A report loader with the approved input and failure behavior."
+        ],
+        "files": [
+          "src/report.py"
+        ],
+        "file_changes": [
+          {
+            "path": "src/report.py",
+            "action": "modify",
+            "responsibility": "Load the approved UTF-8 JSON report."
+          }
+        ],
+        "interfaces": [
+          "load_report(path: Path) -> dict"
+        ],
+        "dependencies": [],
+        "steps": [
+          {
+            "id": "load",
+            "action": "Read the UTF-8 file and parse JSON while preserving JSONDecodeError.",
+            "files": [
+              "src/report.py"
+            ],
+            "interfaces": [
+              "load_report(path: Path) -> dict"
+            ],
+            "verification_ids": [
+              "loading"
+            ]
+          }
+        ],
+        "verification": [
+          {
+            "id": "loading",
+            "kind": "inspection",
+            "requirement_ids": [
+              "req-report"
+            ],
+            "targets": [
+              "src/report.py"
+            ],
+            "method": "Inspect UTF-8 reading, JSON decoding, and exception propagation.",
+            "expected_result": "The function returns the parsed object and propagates JSONDecodeError."
+          }
+        ],
+        "acceptance": [
+          "Independent review accepts the mapped report behavior."
+        ]
+      }
+    ]
+  }
+}
+```
+
+`confirmation_source` is nested inside `decision`, never beside it. A confirmed
+choice must use the actual persisted question/answer and exact selected choice
+when applicable. Custom answers do not acquire an invented choice ID. For a
+proposed choice, use `status: proposed` and omit confirmation fields; actual
+confirmation remains a separate human event.
+
+<!-- process-decision-complete-example -->
+```json
+{
+  "root": "/absolute/project",
+  "task_id": "report-task",
+  "actor": "coordinator",
+  "expected_version": 8,
+  "decision": {
+    "id": "report-encoding",
+    "title": "Report text encoding",
+    "choice": "Use UTF-8.",
+    "rationale": "The actual recorded answer selected UTF-8.",
+    "scope": [
+      "req-report"
+    ],
+    "status": "confirmed",
+    "source": {
+      "kind": "agent",
+      "reference": "Illustrative agent proposal; replace with actual origin source."
+    },
+    "confirmation_source": {
+      "kind": "user",
+      "reference": "Synthetic documentation fixture answer; never use as real authority."
+    },
+    "question_id": "q-encoding",
+    "choice_id": "utf8"
+  }
+}
+```
+
+
 ## 3. Project paths and Git
 
 ```text
@@ -251,10 +379,12 @@ evidence only when the approved design and relevant code remain unchanged.
   .task-workflow/                    # Task state and records
   .worktrees/<task-id>/              # Fixed development worktree
   .experiments/<experiment-id>/
+    .snapshots/<scope-content-modes-key>/
+      code/                         # Shared immutable selected code
     runs/<run-id>/
-      code/                         # Frozen code
-      snapshot.json
-      ...                           # Run outputs
+      snapshot.json                 # Points to shared code; per-run provenance
+      ...                           # Mutable run outputs
+      code/                         # Retained only for legacy per-run snapshots
 ```
 
 The development worktree path is fixed. Prepare it through the program and
@@ -331,6 +461,138 @@ Freeze code, environment references, entrypoint, arguments, inputs, outputs,
 and resource references before execution. Keep stable environments outside
 removable worktrees. Verify actual imports when dependencies can resolve back
 to development source. Preserve existing symbolic links and referenced targets.
+
+### Selected snapshot and startup contract
+
+New `run-prepare` submissions must provide `snapshot_scope`, `fixed_references`,
+`validation_argv`, and `origin_checks`. Inspect actual entrypoint dependencies
+before writing these values in the existing record. Carry material choices into
+the existing Spec/Plan approval loop. Literal Git file/directory selectors define
+`entrypoints`, `code`, `configs`, and `assets`; entrypoints must be exact selected
+files. Include necessary local imports and runtime inputs. Exclude unrelated
+subprojects explicitly. Selected unsupported Git objects fail; unrelated objects
+outside the selected scope do not expand it. Export uses the selected raw Git
+objects, not archive-attribute transformations.
+
+Fixed references contain `id`, `role`, `path`, `identity`, `evidence`, and optional
+`sha256`. The program freezes their normalized logical and resolved identities. File
+references always capture their actual SHA-256; an optional supplied hash is
+checked against it. Directory/provider identity is an actual project-validator
+observation plus declared origin-file hashes, not automatic proof that every
+directory byte is immutable.
+The registered environment remains identified by `environment_id` and its
+fingerprint. Project-local code belongs in the selected scope; a fixed-reference
+label cannot make a mutable development checkout immutable.
+
+Each `origin_checks` entry has `id`, `reference`, and a relative `path`.
+`reference` is `code`, `environment`, or a fixed-reference ID. Each entrypoint
+adds a required origin ID `entrypoint:<repository-relative-path>`; explicit IDs
+must not collide with these. The combined required origin set must be nonempty.
+
+This complete illustrative `run-prepare` argument envelope selects a report
+command and its inspected inputs. Replace identities, paths, current version,
+registered environment, and behavior with the actual authorized task values.
+It is not authority to create or execute this run:
+
+```json
+{
+  "root": "/absolute/project",
+  "task_id": "report-task",
+  "actor": "coordinator",
+  "expected_version": 12,
+  "run_id": "report-check",
+  "environment_id": "runtime",
+  "lockfiles": ["uv.lock"],
+  "argv": ["python3", "tools/report.py"],
+  "artifacts": ["report.json"],
+  "dependency_declaration": "The inspected reporting imports use the registered environment and selected local modules.",
+  "snapshot_scope": {
+    "entrypoints": ["tools/report.py"],
+    "code": ["src/reporting", "tools/validate_startup.py"],
+    "configs": ["config/report.json", "uv.lock"],
+    "assets": ["templates/report.txt"]
+  },
+  "fixed_references": [],
+  "validation_argv": ["python3", "tools/validate_startup.py"],
+  "origin_checks": [
+    {"id": "reporting-module", "reference": "code", "path": "src/reporting/__init__.py"}
+  ]
+}
+```
+
+The validation argument array follows the main command rules: leading `python`
+or `python3` resolves to the registered environment interpreter. Its working
+directory is the immutable code root; brace placeholders are not supported.
+
+The startup command must inspect the actual loaded imports and required runtime
+configuration/assets, then write JSON to `TASK_WORKFLOW_STARTUP_REPORT`. Read the
+nonce from `TASK_WORKFLOW_STARTUP_TOKEN`. The report shape is
+`{"token":"<provided nonce>","origins":[{"id":"<required ID>","path":"<actual origin>"}],"references":[{"id":"<fixed reference ID>","identity":"<actual identity>"}]}`.
+Report exactly the required origin and reference IDs. Include generated entrypoint
+origin IDs. For the illustrative command above, a structurally complete report
+looks like this; its nonce and observed paths must come from the actual startup:
+
+```json
+{
+  "token": "<TASK_WORKFLOW_STARTUP_TOKEN value>",
+  "origins": [
+    {"id": "entrypoint:tools/report.py", "path": "/actual/frozen/code/tools/report.py"},
+    {"id": "reporting-module", "path": "/actual/frozen/code/src/reporting/__init__.py"}
+  ],
+  "references": []
+}
+```
+
+Do not substitute expected paths for observations. The pinned runner
+validates the actual successful exit and report, nonce, coverage, paths, reference
+identities, and digest before the main command. Validation uses the same environment
+and working directory as the main workload. The runner rechecks code, environment,
+and resource eligibility after startup validation before launching the workload.
+
+Within an experiment, identical scope, file contents, and modes reuse immutable
+code in `.snapshots`; the source commit remains separate per-run provenance.
+Mutable outputs stay in each run directory. Scope or code changes produce a new
+snapshot identity. Preserve existing snapshots and running inputs. Cleanup must
+prove ownership and absence of remaining references; do not delete external or
+uncertain content. Project verification that needs a pre-change baseline must
+use the stable helper below with a recorded baseline revision. Ordinary `verify`
+and `integration-verify` remain revision-bound commands on the live worktree or
+base. Independent copied-baseline verification is the case that requires these
+snapshot helpers. This does not authorize a formal Run integration bypass or
+alter an already running supervisor.
+
+```python
+result = workflow.prepare_verification_snapshot(
+    state, commit=recorded_baseline_commit,
+    directory=Path(state["root"]) / ".experiments" / "verification"
+        / state["task_id"] / "baselines" / baseline_id,
+    environment_id=registered_environment_id, snapshot_scope=inspected_scope,
+    fixed_references=recorded_fixed_references, validation_argv=startup_argv,
+    origin_checks=required_origins, authorization_source=actual_source_reference,
+)
+if result["startup"]["status"] != "passed":
+    raise RuntimeError("Baseline startup validation failed; inspect its receipt.")
+baseline_code = Path(result["baseline"]["code"])
+# Run the authorized numerical comparison from baseline_code only after this check.
+```
+
+The helper signature is `prepare_verification_snapshot(state, *, commit,
+directory, environment_id, snapshot_scope, fixed_references, validation_argv,
+origin_checks, authorization_source)`. The allowed output namespace is
+`<state_root>/.experiments/verification/<task>/baselines/<baseline-id>`. It returns
+`baseline` (including the immutable `code` path) and the actual `startup` receipt.
+The caller must require `startup.status == "passed"` before numerical verification.
+The baseline records purpose `development-verification`; it makes no integration
+or formal Run approval claim. Preserve existing baseline inputs and receipts.
+
+For an existing open task, `environment-register` appends an existing absolute
+logical directory to `environment_registry`. Pass the current task version,
+coordinator actor, `environment_id`, `path`, and actual `authorization_source`.
+It records the actor and source in event history. A repeated ID with the same
+expanded logical path is idempotent; a different path requires a new ID. This
+operation does not install, rebuild, fingerprint, replace an existing reference,
+or change frozen runs or approvals. Frozen-run preparation retains its existing
+environment audit.
 Shared caches are outside task cleanup.
 
 Record purpose, parent run, checkpoint reference when relevant, frozen snapshot,
@@ -338,11 +600,15 @@ resource identity, execution receipt, and artifact acceptance. The program pins
 the workflow and runner runtime. Preserve referenced runtime files and stable
 environments for existing execution. Later changes create a new run.
 
-New frozen runtimes record execution protocol 2 in their metadata and both
-hashed runtime files. Unstarted runs with an earlier runtime are rejected before
-dispatch or launch. Preserve their frozen files and records, then create a new
-Run identity with the same approved inputs. Existing actual execution receipts
-remain available for reconciliation through their original runtime.
+New scoped runs use execution protocol 3 with the startup contract bound to their
+receipts. Preserve protocol 2 runs and their pinned runtime and inputs; use their
+original supported execution contract. Older backends must not execute protocol 3
+runs. Preserve legacy preparation intents and partial files rather than rewriting
+them into the new shape. An unfinished legacy preparation without a complete
+pinned runtime needs its retained original preparation backend. Completed
+snapshot/event recovery preserves its original contract. Existing execution
+receipts remain available through
+their original runtime.
 
 Runs and commands have no default execution time limit. A timeout is optional
 and applies only when the user supplies it; the plugin does not set a maximum.

@@ -38,7 +38,9 @@ approval, implementation, and final review.
 - WAIT: Record the next question before sending it; wait for its answer.
 - EXIT: Enough facts to ask the next useful design question or explain which
   evidence is still needed.
-- RETURN: Fact references, uncertainties, and consequences for discussion.
+- RETURN: Fact references, uncertainties, and consequences for discussion. For
+  executable snapshots, include inspected entrypoint dependencies, required local
+  code/configuration/assets, fixed external references, and unrelated exclusions.
 
 ## Multi-round discussion
 
@@ -132,15 +134,21 @@ approval, implementation, and final review.
 
 ## Optional experiments and delivery
 
-- INPUT: Approved experiment purpose, frozen inputs, integrated revision when
+- INPUT: Recorded and confirmed execution scope, dependency analysis, selected
+  snapshot contract, startup validation and origin checks; approved experiment
+  purpose, frozen inputs, integrated revision when
   required, and explicit execution/resource authority.
 - CONVERSATION: State run scope and stopping conditions. Report actual result,
   artifact acceptance, and material limits.
 - WRITE: Record experiment and immutable run identities, resource ownership,
+  program-selected batch freeze, shared immutable scope identity, per-run source
+  provenance, startup report and successful exit before the main workload,
   execution receipt, artifact evidence, acceptance, and closure in `Experiments
   and runs`; record final outcome and cleanup in `Delivery`.
 - WAIT: Await actual receipts, artifact review, and any missing user authority.
-- EXIT: Required runs and artifacts are accepted, remaining references are
+- EXIT: Startup checks prove required imports/assets and actual origins; code,
+  environment and resources were rechecked after validation. Required runs and
+  artifacts are accepted, remaining references are
   resolved, and the delivery contract is met.
 - RETURN: User-facing result with paths, verification, and material limits.
 

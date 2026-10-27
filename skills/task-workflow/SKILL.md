@@ -381,6 +381,32 @@ or maximum user-supplied timeouts. Let actual provider availability and scheduli
 govern resource admission. Host, framework, and machine capacity remain
 environmental constraints.
 
+Before freezing executable code, inspect the actual entrypoint and its dependency
+closure: imported local code, configuration, runtime assets, and fixed external
+references. Record inclusion paths and their reasons in the existing task record.
+Exclude unrelated subprojects by explicit semantic scope, not a project blacklist.
+Resolve material scope or dependency choices through the existing discussion,
+Spec review, and actual user approval loop before dependent preparation.
+
+The Spec must define the execution boundary. The plan must name the selected
+scope, fixed references, startup validation, actual code-origin checks, immutable
+reuse, and ownership-safe cleanup. Give workers these exact inputs and require
+corresponding evidence. Use the program's selected batch freeze; do not copy the
+whole checkout or construct an unrecorded supervisor snapshot as a substitute.
+Project verification that needs a frozen pre-change baseline must use the same
+scope and validation helpers to export that baseline. A baseline does not bypass
+formal run integration guards.
+
+Before the main workload, execute the frozen startup validation in its actual
+environment and working directory. Check required imports, configuration, assets,
+fixed reference identities, and actual code origins. Require the program-validated
+startup report and successful exit; a successful import alone is insufficient.
+Recheck code, environment, and resource eligibility after long startup validation.
+Reuse identical immutable code and scope across runs, with each run's source
+provenance and mutable outputs recorded separately. Preserve old snapshots and
+running inputs. Cleanup requires ownership proof and no remaining references;
+uncertain or external content stays in place.
+
 An experiment has one research goal and can contain several frozen runs. A
 code or configuration change for the same goal creates a new run. A changed
 goal creates a new experiment. Freeze code, environment references, arguments,

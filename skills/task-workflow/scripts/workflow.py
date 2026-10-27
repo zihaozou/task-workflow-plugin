@@ -27,18 +27,97 @@ import weakref
 
 VERSION = 1
 PORTABLE_FORMAT = 2
-EXECUTION_PROTOCOL = 2
+EXECUTION_PROTOCOL = 3
 STATES = ("pending", "implementing", "reviewing", "complete")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 TERMINAL_RUNS = ("complete", "failed", "cancelled")
 
 class WorkflowError(Exception):
-    def __init__(self, code, message):
+    def __init__(self, code, message, details=None):
         super().__init__(message)
-        self.code, self.message = code, message
+        self.code, self.message, self.details = code, message, details
 
-def fail(code, message):
-    raise WorkflowError(code, message)
+def fail(code, message, details=None):
+    raise WorkflowError(code, message, details)
+
+def error_payload(error):
+    value = {'code': error.code, 'message': error.message}
+    if getattr(error, 'details', None) is not None:
+        value['details'] = error.details
+    return value
+
+
+def observed_base(project):
+    try:
+        return {'current_base': git(project, 'rev-parse', 'HEAD')}
+    except (WorkflowError, OSError):
+        return {'current_base': None, 'current_base_status': 'unavailable'}
+
+
+def diagnostic_value(value):
+    if isinstance(value, dict):
+        return {'actual_type': 'object', 'fields': sorted(value)}
+    if isinstance(value, list):
+        return {'actual_type': 'array', 'length': len(value)}
+    return value
+
+
+def schema_diagnostic(value, schema, path='arguments'):
+    """Explain one actual schema mismatch without interpreting or changing input."""
+    kind = schema.get('type')
+    types = {'object': dict, 'array': list, 'string': str, 'integer': int,
+             'number': (int, float), 'boolean': bool, 'null': type(None)}
+    if kind and (not isinstance(value, types[kind]) or (kind in ('integer', 'number') and isinstance(value, bool))):
+        return {'path': path, 'value': diagnostic_value(value), 'expected_type': kind,
+                'hint': 'Supply the declared JSON type at this field; inspect schema before resubmitting.'}
+    if 'enum' in schema and value not in schema['enum']:
+        return {'path': path, 'value': diagnostic_value(value), 'allowed_values': schema['enum'],
+                'hint': 'Use an actual declared value. Do not infer an authorization or change the intended meaning.'}
+    if isinstance(value, dict):
+        properties = schema.get('properties', {})
+        unknown = sorted(set(value) - set(properties)) if schema.get('additionalProperties') is False else []
+        missing = sorted(set(schema.get('required', [])) - set(value))
+        if unknown or missing:
+            field = unknown[0] if unknown else missing[0]
+            details = {'path': path + '.' + field, 'object_path': path, 'allowed_fields': sorted(properties),
+                       'unknown_fields': unknown, 'missing_fields': missing,
+                       'hint': 'Use the current nested schema. Record supplied authority only in its declared field; never discard or invent its meaning.'}
+            if field in value:
+                details['value'] = diagnostic_value(value[field])
+            return details
+        for key, item in value.items():
+            if key in properties:
+                details = schema_diagnostic(item, properties[key], path + '.' + key)
+                if details:
+                    return details
+    if isinstance(value, list):
+        if schema.get('minItems', 0) > len(value):
+            return {'path': path, 'value': diagnostic_value(value), 'expected_type': 'array', 'minimum_items': schema['minItems'],
+                    'hint': 'Supply the required actual records before resubmitting.'}
+        if schema.get('uniqueItems') and any(item == earlier for index, item in enumerate(value) for earlier in value[:index]):
+            return {'path': path, 'value': diagnostic_value(value), 'unique_items_required': True,
+                    'hint': 'Reference each actual identifier once.'}
+        if 'items' in schema:
+            for index, item in enumerate(value):
+                details = schema_diagnostic(item, schema['items'], path + '[' + str(index) + ']')
+                if details:
+                    return details
+    if isinstance(value, str) and len(value) < schema.get('minLength', 0):
+        return {'path': path, 'value': diagnostic_value(value), 'expected_type': 'nonempty string',
+                'hint': 'Supply meaningful source-backed text for this field.'}
+    return None
+
+
+def reference_diagnostic(path, values, known):
+    return {'path': path, 'value': values, 'allowed_reference_ids': sorted(known),
+            'unknown_references': [value for value in values if value not in known],
+            'hint': 'Inspect the current recorded references and use their exact identifiers or interface text. If the intended design changed, record that change through the existing discussion and approval flow.'}
+
+
+def coverage_diagnostic(path, values, missing, **extra):
+    return {'path': path, 'value': values, 'missing_coverage': sorted(missing), **extra,
+            'hint': 'Provide concrete coverage for each listed recorded requirement, component, file, interface or check. Preserve the approved scope and actual authority.'}
+
 
 def now():
     return dt.datetime.now(dt.timezone.utc).isoformat()
@@ -599,8 +678,10 @@ def record_text(state):
             lines.append("  Execution dispatched; waiting for actual runner admission.")
         if experiment.get("start_validated") and experiment["start_validated"].get("pid") is None and "pid" in experiment["start_validated"]:
             lines.append("  Runner admitted; workload launch failed.")
+        elif experiment.get('snapshot_contract') == 3 and not experiment.get('workload_started'):
+            lines.append('  Startup validation claimed; the workload has not started.')
         elif experiment.get("start_validated"):
-            lines.append(f"  Actual workload started at {experiment['started']}; process {experiment['start_validated'].get('pid', 'unrecorded')}.")
+            lines.append(f"  Actual workload started at {experiment.get('started', experiment['start_validated'].get('time', 'unrecorded'))}; process {experiment['start_validated'].get('pid', 'unrecorded')}.")
         if experiment.get("execution"):
             lines.append(f"  Actual exit {experiment['execution']['returncode']}; log `{experiment['execution']['log']}`.")
         if experiment.get("artifact_acceptance"):
@@ -671,7 +752,7 @@ def summary(state):
             "active_runs": sum(r["status"] not in TERMINAL_RUNS for r in state["runs"].values()),
             "task_status": state.get("task_lifecycle", {}).get("status", "unrecorded"),
             "open_experiments": sum(e["status"] != "complete" for e in state.get("experiments", {}).values()),
-            "run_counts": {key: sum(r["status"] == key for r in state["runs"].values()) for key in ("planned", "preparing", "prepared", "queued", "running", "awaiting_artifacts", "complete", "failed", "cancelled", "unknown")}}
+            "run_counts": {key: sum(r["status"] == key for r in state["runs"].values()) for key in ("planned", "preparing", "prepared", "queued", "starting", "running", "awaiting_artifacts", "complete", "failed", "cancelled", "unknown")}}
 
 def spec(description, required=None, optional=None):
     return {"description": description, "required": {"root": "string", **(required or {})}, "optional": optional or {}}
@@ -823,7 +904,7 @@ def prepare_worktree(args, state, path, store, previous):
                 if supplied is not None and supplied != association.get(field):
                     fail("worktree_association", "This task already reserves a different worktree path or branch.")
             if args["expected_base"] != association["base"]:
-                fail("revision_conflict", "Retry using the recorded preparation base.")
+                fail("revision_conflict", "Retry using the recorded preparation base.", {"path": "arguments.expected_base", "value": args["expected_base"], "recorded_base": association["base"], **observed_base(project), "hint": "Inspect status and the current base checkout. Preserve the recorded reservation; a different base needs the existing authorized workflow."})
             if association["status"] == "complete":
                 check_identity(state)
                 register_root(Path(state["root"]), state)
@@ -831,7 +912,7 @@ def prepare_worktree(args, state, path, store, previous):
         else:
             base = git(project, "rev-parse", "HEAD")
             if args["expected_base"] != base:
-                fail("revision_conflict", "The expected base commit changed.")
+                fail("revision_conflict", "The expected base commit changed.", {"path": "arguments.expected_base", "value": args["expected_base"], "current_base": base, "hint": "Read the current base commit and task status. Reassess the intended change before explicitly submitting another mutation; this error grants no authority to adopt a new base."})
             if state["worktree"]["path"] != str(project):
                 check_identity(state)
                 if state["worktree"]["branch"] == state["project"]["branch"]:
@@ -1313,6 +1394,462 @@ def exported_snapshot(project, commit):
         yield files, modes
 
 
+SCOPE_ROLES = ('entrypoints', 'code', 'configs', 'assets')
+SCOPED_INPUTS = ('snapshot_scope', 'fixed_references', 'validation_argv', 'origin_checks')
+
+
+def normalize_snapshot_scope(scope):
+    """Normalize literal selectors within each semantic role, without guessing closure."""
+    if not isinstance(scope, dict) or set(scope) != set(SCOPE_ROLES):
+        fail('snapshot_scope_required', 'Record entrypoints, code, configs and assets for every new frozen Run.')
+    result = {}
+    for role in SCOPE_ROLES:
+        values = scope[role]
+        if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+            fail('snapshot_scope_required', 'Each snapshot role requires an array of literal repository paths.')
+        values = sorted(set(value if value == '.' else str(safe_relative(value)) for value in values))
+        result[role] = [value for value in values if not any(parent != value and (parent == '.' or value.startswith(parent + '/')) for parent in values)]
+    if not any(result.values()):
+        fail('snapshot_scope_required', 'Select at least one committed input; whole-tree selection must be explicit.')
+    return result
+
+
+@contextlib.contextmanager
+def selected_snapshot(project, commit, scope):
+    """Export exact selected Git blobs using two batched Git processes."""
+    scope = normalize_snapshot_scope(scope)
+    selectors = sorted(set(value for values in scope.values() for value in values))
+    with tempfile.TemporaryDirectory(prefix='task-workflow-selected-') as temporary:
+        staging = Path(temporary)
+        objects, files, modes = {}, {}, {}
+        with tempfile.TemporaryFile() as listing, tempfile.TemporaryFile() as errors:
+            result = subprocess.run(['git', '-C', project, '--literal-pathspecs', 'ls-tree', '-r', '-z', '--full-tree', commit, '--', *selectors], stdout=listing, stderr=errors)
+            if result.returncode:
+                fail('archive_failed', 'Git could not inspect the selected committed inputs.')
+            listing.seek(0)
+            for record in inventory_records(listing):
+                try:
+                    header, raw_name = record.split(b'\t', 1)
+                    mode, kind, object_id = header.decode('ascii').split()
+                    name = raw_name.decode('utf-8')
+                    safe_relative(name)
+                except (ValueError, UnicodeError):
+                    fail('archive_failed', 'Git returned an invalid selected object inventory.')
+                if mode not in ('100644', '100755') or kind != 'blob':
+                    fail('unsupported_dependency', 'Selected symlinks, submodules and special Git objects need a supported export strategy.')
+                objects[name] = object_id
+                modes[name] = mode
+        for selector in selectors:
+            if not any(selector == '.' or name == selector or name.startswith(selector + '/') for name in objects):
+                fail('snapshot_path_missing', 'A declared input is absent from the approved commit: ' + selector)
+        if any(name not in objects for name in scope['entrypoints']):
+            fail('snapshot_path_missing', 'Each declared entrypoint must be one selected committed file.')
+        by_object = {}
+        for name, object_id in objects.items():
+            by_object.setdefault(object_id, []).append(name)
+        with tempfile.TemporaryFile() as requests, tempfile.TemporaryFile() as blobs, tempfile.TemporaryFile() as errors:
+            for object_id in by_object:
+                requests.write(object_id.encode('ascii') + b'\n')
+            requests.seek(0)
+            result = subprocess.run(['git', '-C', project, 'cat-file', '--batch'], stdin=requests, stdout=blobs, stderr=errors)
+            if result.returncode:
+                fail('archive_failed', 'Git could not read the selected immutable objects.')
+            blobs.seek(0)
+            for object_id, names in by_object.items():
+                try:
+                    found, kind, size = blobs.readline().decode('ascii').strip().split()
+                    size = int(size)
+                    if found != object_id or kind != 'blob' or size < 0:
+                        raise ValueError
+                except ValueError:
+                    fail('archive_failed', 'Git returned an invalid selected blob.')
+                source = staging / names[0]
+                source.parent.mkdir(parents=True, exist_ok=True)
+                with source.open('xb') as destination:
+                    remaining = size
+                    while remaining:
+                        chunk = blobs.read(min(1024 * 1024, remaining))
+                        if not chunk:
+                            fail('archive_failed', 'Git returned an incomplete selected blob.')
+                        destination.write(chunk)
+                        remaining -= len(chunk)
+                if blobs.read(1) != b'\n':
+                    fail('archive_failed', 'Git returned an invalid blob boundary.')
+                with source.open('rb') as stream:
+                    if stream.read(50).startswith(b'version https://git-lfs.github.com/spec/'):
+                        fail('unsupported_dependency', 'A selected LFS pointer is not the actual runtime input.')
+                files[names[0]] = source
+                for name in names[1:]:
+                    target = staging / name
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source, target)
+                    files[name] = target
+        yield files, modes, objects
+
+
+def immutable_code_store(container, scope, files, modes):
+    identity = {'format': 1, 'snapshot_scope': scope,
+                'files': {name: {'sha256': sha_file(source), 'mode': modes[name]} for name, source in files.items()}}
+    no_symlinks(container, Path(container.anchor))
+    container.mkdir(parents=True, exist_ok=True)
+    # Supported publishers serialize the existence check and directory rename.
+    # Existing empty/corrupt winners are validated, never replaced.
+    with lock(container / (digest(identity) + '.publish.lock')):
+        return _publish_code_store(container, scope, files, modes)
+
+
+def _publish_code_store(container, scope, files, modes):
+    """Publish output-free content once; never repair or overwrite an existing winner."""
+    entries = {name: {'sha256': sha_file(source), 'mode': modes[name]} for name, source in files.items()}
+    identity = {'format': 1, 'snapshot_scope': scope, 'files': entries}
+    key = digest(identity)
+    no_symlinks(container, Path(container.anchor))
+    container.mkdir(parents=True, exist_ok=True)
+    target = container / key
+    no_symlinks(target, container)
+    if not target.exists():
+        staging = Path(tempfile.mkdtemp(prefix='.snapshot-', dir=str(container)))
+        try:
+            code = staging / 'code'
+            code.mkdir()
+            for name, source in files.items():
+                destination = code / name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with source.open('rb') as original, destination.open('xb') as stream:
+                    shutil.copyfileobj(original, stream, length=1024 * 1024)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                destination.chmod(0o555 if modes[name] == '100755' else 0o444)
+            atomic_json(staging / 'manifest.json', identity)
+            (staging / 'manifest.json').chmod(0o444)
+            for folder in sorted((entry for entry in code.rglob('*') if entry.is_dir()), key=lambda path: len(path.parts), reverse=True):
+                sync_dir(folder)
+                folder.chmod(0o555)
+            sync_dir(code)
+            code.chmod(0o555)
+            sync_dir(staging)
+            staging.chmod(0o555)
+            try:
+                os.rename(staging, target)
+            except OSError as error:
+                if error.errno not in (errno.EEXIST, errno.ENOTEMPTY) or not target.is_dir():
+                    raise
+            sync_dir(container)
+        finally:
+            if staging.exists():
+                # This is only our unpublished private staging tree, never a winner.
+                for folder in [staging, *[entry for entry in staging.rglob('*') if entry.is_dir()]]:
+                    folder.chmod(0o700)
+                shutil.rmtree(staging)
+    value = {'directory': str(target), 'digest': key, 'identity': identity}
+    check_code_store(value)
+    return value
+
+
+def check_code_store(store):
+    target = Path(store['directory'])
+    no_symlinks(target, Path(target.anchor))
+    if (target.name != store['digest'] or digest(store['identity']) != store['digest'] or not target.is_dir()
+            or {entry.name for entry in target.iterdir()} != {'code', 'manifest.json'}
+            or read_json(target / 'manifest.json') != store['identity']):
+        fail('snapshot_changed', 'The immutable code store identity changed; preserve it for inspection.')
+    expected = store['identity']['files']
+    if manifest(target / 'code') != {name: entry['sha256'] for name, entry in expected.items()}:
+        fail('snapshot_changed', 'The shared frozen code differs from its selected content identity.')
+    for name, entry in expected.items():
+        actual = (target / 'code' / name).stat().st_mode
+        if stat.S_IMODE(actual) != (0o555 if entry['mode'] == '100755' else 0o444):
+            fail('snapshot_changed', 'The shared frozen code executable mode or write protection changed.')
+    allowed = set(expected)
+    for name in expected:
+        allowed.update(str(parent) for parent in PurePosixPath(name).parents if str(parent) != '.')
+    if {str(entry.relative_to(target / 'code')) for entry in (target / 'code').rglob('*')} != allowed:
+        fail('snapshot_changed', 'Unexpected output material appeared inside the immutable code store.')
+    for folder in [target, target / 'code', *[entry for entry in (target / 'code').rglob('*') if entry.is_dir()]]:
+        if stat.S_IMODE(folder.stat().st_mode) != 0o555:
+            fail('snapshot_changed', 'The immutable code store directories must remain output-free and read-only.')
+
+
+def fixed_path(value):
+    path = Path(value).expanduser()
+    if not path.is_absolute() or '..' in path.parts or not path.exists():
+        fail('fixed_reference_invalid', 'A fixed reference requires an existing absolute logical path.')
+    return path
+
+
+def reject_development_origin(state, path, environment):
+    resolved = path.resolve()
+    allowed = (Path(environment['path']), Path(environment.get('logical_path', environment['path'])))
+    for checkout in (state['project']['path'], state['worktree']['path']):
+        checkout = Path(checkout)
+        if within(resolved, checkout.resolve()) and not any(within(resolved, root.resolve()) for root in allowed):
+            fail('development_reference', 'Runtime code origins cannot point into mutable project or task checkout code.')
+
+
+def frozen_argv(arguments, state, environment):
+    """Retain environment semantics while removing removable logical shortcuts."""
+    logical = Path(environment.get('logical_path', environment['path']))
+    physical = Path(environment['path'])
+    result = []
+    for argument in arguments:
+        path = Path(argument)
+        environment_argument = (path.is_absolute() and path.is_file()
+            and any(within(path, anchor) for anchor in (logical, physical)))
+        if environment_argument:
+            reject_development_origin(state, path, environment)
+            if within(path, logical):
+                argument = str(physical / path.relative_to(logical))
+        elif any(checkout in argument for checkout in (state['project']['path'], state['worktree']['path'])):
+            fail('development_reference', 'Frozen commands cannot reference mutable development checkout paths.')
+        result.append(argument)
+    return result
+
+
+def freeze_startup_inputs(args, state, code, environment):
+    references = []
+    known = {'code': code, 'environment': Path(environment['path'])}
+    for value in args['fixed_references']:
+        if not isinstance(value, dict) or set(value) - {'id', 'role', 'path', 'identity', 'evidence', 'sha256'} or not {'id', 'role', 'path', 'identity', 'evidence'}.issubset(value):
+            fail('fixed_reference_invalid', 'Record each fixed reference ID, role, path, identity and evidence.')
+        ref_id = identifier(value['id'])
+        if ref_id in known or value['role'] not in ('library', 'data', 'checkpoint', 'runtime_asset'):
+            fail('fixed_reference_invalid', 'Fixed reference IDs must be unique and roles must describe the actual external input.')
+        text_value(value['identity'])
+        if not isinstance(value['evidence'], list) or not value['evidence'] or any(not isinstance(item, str) or not item.strip() for item in value['evidence']):
+            fail('fixed_reference_invalid', 'Fixed references require actual identity evidence.')
+        path = fixed_path(value['path'])
+        for tree in registered_task_trees(state):
+            if within(path, Path(tree['path'])) or within(path.resolve(), Path(tree['path']).resolve()):
+                fail('development_reference', 'A fixed external input cannot depend on a removable task checkout.')
+        if value['role'] == 'library':
+            reject_development_origin(state, path, environment)
+        item = {**value, 'path': str(path), 'resolved_path': str(path.resolve())}
+        if path.is_file():
+            actual = sha_file(path)
+            if value.get('sha256', actual) != actual:
+                fail('fixed_reference_changed', 'A fixed file reference differs from its declared digest.')
+            item['sha256'] = actual
+        elif value.get('sha256'):
+            fail('fixed_reference_invalid', 'A directory identity must be verified by the declared startup probe, not a file digest.')
+        known[ref_id] = path
+        references.append(item)
+    checks = [{'id': 'entrypoint:' + name, 'reference': 'code', 'path': name} for name in args['snapshot_scope']['entrypoints']]
+    checks += args['origin_checks']
+    if not checks:
+        fail('origin_check_required', 'Declare at least one actual entrypoint, interpreter or dependency origin check.')
+    origins, ids = [], set()
+    for value in checks:
+        if not isinstance(value, dict) or set(value) != {'id', 'reference', 'path'}:
+            fail('origin_check_required', 'An origin check requires ID, reference and relative file path.')
+        text_value(value['id'])
+        if value['id'] in ids or not isinstance(value['reference'], str) or value['reference'] not in known:
+            fail('origin_check_required', 'Origin IDs must be unique and reference declared frozen inputs.')
+        ids.add(value['id'])
+        path = known[value['reference']] / str(safe_relative(value['path']))
+        if not path.is_file():
+            fail('origin_check_required', 'A declared runtime origin file is missing from its frozen reference.')
+        if value['reference'] != 'code':
+            reject_development_origin(state, path, environment)
+        origins.append({**value, 'logical_path': str(path), 'resolved_path': str(path.resolve()), 'sha256': sha_file(path)})
+    return {'origins': origins, 'references': references}
+
+
+def check_startup_inputs(state, current):
+    inputs = current['startup_inputs']
+    for origin in inputs['origins']:
+        path = fixed_path(origin['logical_path'])
+        if origin['reference'] != 'code':
+            reject_development_origin(state, path, current['environment'])
+        if str(path.resolve()) != origin['resolved_path'] or not path.is_file() or sha_file(path) != origin['sha256']:
+            fail('origin_changed', 'A declared runtime origin changed after preparation.')
+    for reference in inputs['references']:
+        path = fixed_path(reference['path'])
+        if str(path.resolve()) != reference['resolved_path'] or ('sha256' in reference and sha_file(path) != reference['sha256']):
+            fail('fixed_reference_changed', 'A fixed external input changed after preparation.')
+
+
+def execution_argv_digest(current):
+    if current.get('snapshot_contract') == 3:
+        return digest({key: current[key] for key in ('snapshot_contract', 'argv', 'validation_argv', 'snapshot_scope', 'code_store', 'startup_inputs', 'environment', 'manifest_digest')})
+    return digest(current['argv'])
+
+
+def validate_startup_report(current, report_path, token):
+    report = read_json(report_path)
+    if not isinstance(report, dict) or set(report) != {'token', 'origins', 'references'} or report['token'] != token:
+        fail('startup_report_invalid', 'The startup report does not match this claimed validation.')
+    for key in ('origins', 'references'):
+        if not isinstance(report[key], list) or any(not isinstance(item, dict) for item in report[key]):
+            fail('startup_report_invalid', 'The startup report must contain structured origin and reference observations.')
+    origins = {item.get('id'): item for item in report['origins'] if isinstance(item.get('id'), str)}
+    expected = {item['id']: item for item in current['startup_inputs']['origins']}
+    if len(origins) != len(report['origins']) or set(origins) != set(expected):
+        fail('startup_report_invalid', 'The startup report must cover every declared origin exactly once.')
+    for origin_id, frozen in expected.items():
+        item = origins[origin_id]
+        if set(item) != {'id', 'path'} or not isinstance(item['path'], str):
+            fail('startup_report_invalid', 'Report each actual runtime origin file path.')
+        actual = fixed_path(item['path'])
+        if str(actual) not in (frozen['logical_path'], frozen['resolved_path']) or str(actual.resolve()) != frozen['resolved_path'] or not actual.is_file() or sha_file(actual) != frozen['sha256']:
+            fail('startup_report_invalid', 'A reported runtime origin differs from the frozen expected file identity.')
+    references = {item.get('id'): item for item in report['references'] if isinstance(item.get('id'), str)}
+    expected_refs = {item['id']: item['identity'] for item in current['startup_inputs']['references']}
+    if len(references) != len(report['references']) or set(references) != set(expected_refs):
+        fail('startup_report_invalid', 'The startup report must cover every fixed external reference exactly once.')
+    for ref_id, identity in expected_refs.items():
+        if references[ref_id] != {'id': ref_id, 'identity': identity}:
+            fail('startup_report_invalid', 'A reported external identity differs from its fixed declaration.')
+    return report
+
+
+def startup_receipt_valid(current, receipt, actual_files=True):
+    """Verify a protocol3 validation result without treating failed startup as main execution."""
+    try:
+        directory = Path(current['directory'])
+        if (receipt.get('protocol') != 3 or receipt.get('token') != current['token']
+                or receipt.get('contract_digest') != execution_argv_digest(current)
+                or receipt.get('status') != 'passed' or type(receipt.get('returncode')) is not int or receipt['returncode'] != 0
+                or receipt.get('report') != str(directory / 'startup-report.json')
+                or receipt.get('log') != str(directory / 'startup.log')
+                or not re.fullmatch('[0-9a-f]{64}', receipt.get('report_sha256', ''))
+                or not re.fullmatch('[0-9a-f]{64}', receipt.get('log_sha256', ''))):
+            return False
+        if actual_files:
+            if read_json(directory / 'startup-receipt.json') != receipt:
+                return False
+            for key in ('report', 'log'):
+                path = Path(receipt[key])
+                no_symlinks(path, directory)
+                if sha_file(path) != receipt[key + '_sha256']:
+                    return False
+            validate_startup_report(current, Path(receipt['report']), current['token'])
+        return True
+    except (WorkflowError, OSError, KeyError, TypeError, ValueError):
+        return False
+
+
+def scoped_execution_proof(current, receipt, actual_files=True):
+    if current.get('snapshot_contract') != 3:
+        return True
+    startup = receipt.get('startup')
+    return bool(receipt.get('protocol') == 3 and receipt.get('workload_started') is True
+                and isinstance(startup, dict) and startup_receipt_valid(current, startup, actual_files)
+                and receipt.get('startup_digest') == digest(startup)
+                and current.get('startup', {}).get('receipt_digest') == digest(startup))
+
+
+def startup_environment(current):
+    environment = dict(os.environ)
+    directory = Path(current['directory'])
+    env_path = Path(current['environment']['path'])
+    environment.update(VIRTUAL_ENV=str(env_path), PATH=str(env_path / 'bin') + os.pathsep + environment.get('PATH', ''),
+        PYTHONDONTWRITEBYTECODE='1', TASK_WORKFLOW_RUN_DIR=str(directory), TASK_WORKFLOW_OUTPUT_DIR=str(directory),
+        TASK_WORKFLOW_STARTUP_REPORT=str(directory / 'startup-report.json'), TASK_WORKFLOW_STARTUP_TOKEN=current['token'])
+    environment.pop('PYTHONPATH', None)
+    environment.pop('PYTHONHOME', None)
+    return environment
+
+
+def perform_startup_validation(current):
+    """Run the same startup gate for frozen Runs and explicit verification baselines."""
+    directory = Path(current['directory'])
+    log_path = directory / 'startup.log'
+    report = directory / 'startup-report.json'
+    if report.exists() or report.is_symlink():
+        fail('startup_report_invalid', 'A startup report must be created by this claimed validation, not supplied in advance.')
+    command = list(current['validation_argv'])
+    if command[0] in ('python', 'python3'):
+        command[0] = str(Path(current['environment']['path']) / 'bin/python')
+    process, code, error = None, 127, None
+    with log_path.open('xb') as log:
+        try:
+            process = subprocess.Popen(command, cwd=current['code'], env=startup_environment(current), stdin=subprocess.DEVNULL,
+                stdout=log, stderr=log, shell=False, start_new_session=True)
+            code = process.wait()
+        except OSError:
+            error = 'startup_spawn_failed'
+        finally:
+            if process is not None:
+                # Only this newly owned process group is signalled, including descendants.
+                import signal
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            log.flush()
+            os.fsync(log.fileno())
+    receipt = {'protocol': 3, 'token': current['token'], 'contract_digest': execution_argv_digest(current),
+        'status': 'failed', 'returncode': code, 'log': str(log_path), 'log_sha256': sha_file(log_path), 'time': now()}
+    try:
+        if code != 0:
+            fail(error or 'startup_failed', 'Startup validation failed before workload admission.')
+        no_symlinks(report, directory)
+        validate_startup_report(current, report, current['token'])
+        with report.open('rb') as stream:
+            os.fsync(stream.fileno())
+        receipt.update(status='passed', report=str(report), report_sha256=sha_file(report))
+    except WorkflowError as failure:
+        receipt['error'] = failure.code
+    atomic_json(directory / 'startup-receipt.json', receipt)
+    return receipt
+
+
+def prepare_verification_snapshot(state, *, commit, directory, environment_id, snapshot_scope,
+                                  fixed_references, validation_argv, origin_checks, authorization_source):
+    """Create and validate one explicitly recorded development baseline, with no integration claim.
+
+    Project verification callers that need an independent code baseline use this
+    helper instead of copying a checkout. Ordinary live-worktree checks stay live.
+    The returned receipt validates startup only; it grants no formal Run approval.
+    """
+    require_task_open(state)
+    text_value(authorization_source)
+    args = {'snapshot_scope': normalize_snapshot_scope(snapshot_scope), 'fixed_references': fixed_references,
+            'origin_checks': origin_checks, 'validation_argv': validation_argv}
+    if not isinstance(validation_argv, list) or not validation_argv or any(not isinstance(value, str) or not value or '\x00' in value for value in validation_argv):
+        fail('startup_validation_required', 'A baseline needs its actual startup validator argv.')
+    if environment_id not in state['environment_registry']:
+        fail('environment_not_registered', 'Reference an explicitly registered environment.')
+    directory = Path(directory).expanduser()
+    base = Path(state['root']) / '.experiments/verification' / state['task_id']
+    if not directory.is_absolute() or not within(directory, base / 'baselines'):
+        fail('unsafe_path', 'Development baseline output must use its task verification baselines namespace.')
+    no_symlinks(directory, Path(directory.anchor))
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        directory.mkdir()
+    except FileExistsError:
+        fail('already_exists', 'Preserve the existing baseline and receipts; use a new baseline identity.')
+    commit = git(state['project']['path'], 'rev-parse', '--verify', commit + '^{commit}')
+    environment = env_fingerprint(state['environment_registry'][environment_id], (state['project']['path'], state['worktree']['path']))
+    with selected_snapshot(state['project']['path'], commit, args['snapshot_scope']) as (files, modes, objects):
+        store = immutable_code_store(base / '.snapshots', args['snapshot_scope'], files, modes)
+    current = {'snapshot_contract': 3, 'purpose': 'development-verification', 'authorization_source': authorization_source,
+        'commit': commit, 'provenance': {'commit': commit, 'objects': objects}, 'directory': str(directory),
+        'snapshot_scope': args['snapshot_scope'], 'code_store': store, 'code': str(Path(store['directory']) / 'code'),
+        'manifest': {name: item['sha256'] for name, item in store['identity']['files'].items()},
+        'environment': environment, 'argv': [], 'validation_argv': frozen_argv(validation_argv, state, environment), 'token': 'baseline-' + uuid.uuid4().hex}
+    current['manifest_digest'] = digest(current['manifest'])
+    current['startup_inputs'] = freeze_startup_inputs(args, state, Path(current['code']), environment)
+    atomic_json(directory / 'baseline.json', current)
+    claim = directory / 'execution.claim'
+    claim.mkdir()
+    atomic_json(claim / 'owner.json', {'token': current['token'], 'pid': os.getpid(), 'host': socket.gethostname(), 'time': now()})
+    receipt = perform_startup_validation(current)
+    # Validation can run for any duration. Recheck all actual input identities afterward.
+    if receipt['status'] == 'passed':
+        try:
+            check_code_store(store)
+            check_startup_inputs(state, current)
+            if environment_identity(env_fingerprint(environment['path'], (state['project']['path'], state['worktree']['path']))) != environment_identity(environment):
+                fail('environment_changed', 'The baseline environment changed during startup validation.')
+        except WorkflowError as failure:
+            receipt.update(status='failed', error=failure.code)
+            atomic_json(directory / 'startup-receipt.json', receipt)
+    return {'baseline': current, 'startup': receipt}
+
+
 def source_has_prefix(source, prefix):
     with source.open('rb') as original, prefix.open('rb') as partial:
         for chunk in iter(lambda: partial.read(1024 * 1024), b''):
@@ -1360,17 +1897,20 @@ def accepted_run_proof(state, current):
     try:
         if current['status'] != 'complete':
             return False
+        if current.get('snapshot_contract') == 3:
+            check_code_store(current['code_store'])
         acceptance = current.get('artifact_acceptance', {})
         execution = current.get('execution', {})
         directory = Path(current['directory'])
         code = Path(current['code'])
         no_symlinks(directory, Path(directory.anchor))
-        no_symlinks(code, directory)
+        no_symlinks(code, Path(state['root']) if not current.get('experiment_id') else Path(get_experiment(state, current['experiment_id'])['directory']))
         expected_log = directory / 'execution.log'
         no_symlinks(expected_log, directory)
         if (not acceptance.get('sha256') or set(acceptance['sha256']) != set(current['artifacts'])
                 or execution.get('returncode') != 0 or execution.get('token') != current['token']
-                or execution.get('argv_digest') != digest(current['argv'])
+                or execution.get('argv_digest') != execution_argv_digest(current)
+                or not scoped_execution_proof(current, execution)
                 or execution.get('manifest_digest') != current['manifest_digest']
                 or execution.get('environment_digest') != digest(environment_identity(current['environment']))
                 or not current.get('start_validated') or execution.get('log') != str(expected_log)
@@ -1461,9 +2001,13 @@ def accept_run(args, state):
         fail("run_execution_unknown", "Accept artifacts only after a recorded successful workload exit.")
     if not current.get("execution") or current["execution"]["returncode"] != 0 or not current.get("start_validated"):
         fail("run_execution_unknown", "Successful validated execution must be recorded before accepting artifacts.")
+    if not scoped_execution_proof(current, current['execution']):
+        fail('execution_receipt_invalid', 'A matching passed startup validation is required before accepting scoped Run artifacts.')
     if not current.get("artifacts"):
         fail("artifact_acceptance_required", "Declared output artifacts and coordinator notes are required.")
     code = Path(current["code"])
+    if current.get("snapshot_contract") == 3:
+        check_code_store(current["code_store"])
     if manifest(code) != current["manifest"]:
         fail("snapshot_changed", "The frozen code changed during execution.")
     accepted = {}
@@ -1485,7 +2029,17 @@ def prepare_run_staged(args, root, store):
         require_task_open(state)
         require_approved(state)
         require_coordinator(args, state)
-        frozen_intent = {key: args.get(key) for key in ('argv', 'artifacts', 'environment_id', 'lockfiles', 'output_dir', 'dependency_declaration')}
+        current = state['runs'].get(args['run_id'])
+        legacy = bool(current and current.get('preparation_intent') and 'snapshot_scope' not in current['preparation_intent'])
+        if legacy and not legacy_snapshot_path(args, state, current, root).is_file():
+            fail('legacy_preparation', 'Preserve this unfinished legacy preparation and resume it with its original retained backend.')
+        if not legacy:
+            if any(key not in args for key in SCOPED_INPUTS):
+                fail('snapshot_scope_required', 'New preparations require snapshot_scope, fixed_references, validation_argv and origin_checks.')
+            args['snapshot_scope'] = normalize_snapshot_scope(args['snapshot_scope'])
+            if not args['validation_argv'] or any(not isinstance(value, str) or not value or '\x00' in value for value in args['validation_argv']):
+                fail('startup_validation_required', 'Record an executable startup validator that produces the structured origin and reference report.')
+        frozen_intent = {key: args.get(key) for key in ('argv', 'artifacts', 'environment_id', 'lockfiles', 'output_dir', 'dependency_declaration') + (() if legacy else SCOPED_INPUTS)}
         frozen_intent.update(commit=state.get('integration', {}).get('commit'), design_digest=state['design']['digest'])
         current = state["runs"].get(args["run_id"])
         if current and current.get('preparation_intent') and current['preparation_intent'] != frozen_intent:
@@ -1512,7 +2066,100 @@ def prepare_run_staged(args, root, store):
         commit_event(path, state, previous, "run-prepare", args["actor"])
         return {"ok": True, "state": state, "summary": summary(state), **result}
 
+def legacy_snapshot_path(args, state, current, root):
+    default = (Path(get_experiment(state, current['experiment_id'])['directory']) / 'runs' if current.get('experiment_id')
+               else root / '.experiments/verification' / state['task_id'])
+    return Path(args.get('output_dir', str(default))).expanduser() / args['run_id'] / 'snapshot.json'
+
+
 def prepare_run(args, state, root):
+    """Freeze new scoped inputs while preserving completed legacy preparation recovery."""
+    planned = state['runs'].get(args['run_id'])
+    if planned and planned.get('preparation_intent') and 'snapshot_scope' not in planned['preparation_intent']:
+        snapshot = legacy_snapshot_path(args, state, planned, root)
+        if snapshot.is_file():
+            return prepare_run_legacy(args, state, root)
+        fail('legacy_preparation', 'Preserve this unfinished legacy preparation and resume it with its original retained backend.')
+    require_approved(state)
+    integration = state['integration']
+    if integration.get('status') != 'complete':
+        fail('integration_required', 'An explicitly integrated task revision is required before experiment snapshots.')
+    check_identity(state)
+    verified = integration.get('verification', {})
+    if not verified.get('passed') or verified.get('commit') != integration['commit'] or verified.get('design_digest') != state['design']['digest']:
+        fail('integration_verification_required', 'The integrated commit requires actual successful integration-verify evidence.')
+    commit = integration['commit']
+    if run(['git', '-C', state['project']['path'], 'merge-base', '--is-ancestor', commit, 'HEAD'])['returncode']:
+        fail('integration_changed', 'The integrated commit is no longer present in the registered base branch.')
+    run_id = args['run_id']
+    if planned and planned['status'] not in ('planned', 'preparing'):
+        fail('already_exists', 'Run identifiers cannot be reused.')
+    association = run_association({**(planned or {}), **args}, state)
+    if planned and any(association[key] != planned.get(key) for key in association):
+        fail('planned_run_changed', 'A planned reservation cannot be replaced; create a new Run.')
+    base = Path(get_experiment(state, association['experiment_id'])['directory']) if association['experiment_id'] else root / '.experiments/verification' / state['task_id']
+    default_output = base / 'runs' if association['experiment_id'] else base
+    output = Path(args.get('output_dir', str(default_output))).expanduser()
+    if not output.is_absolute() or (association['experiment_id'] and output != default_output):
+        fail('unsafe_path', 'Research output must use the experiment recorded runs directory.')
+    if not association['experiment_id'] and (not within(output, root) or within(output, root / '.task-workflow')):
+        fail('unsafe_path', 'Verification output must stay inside its registered root outside workflow storage.')
+    no_symlinks(output, Path(output.anchor))
+    output.mkdir(parents=True, exist_ok=True)
+    destination = output / run_id
+    no_symlinks(destination, output)
+    marker = destination / '.preparation-intent.json'
+    ownership = {'token': planned['preparation_token'], 'intent': planned['preparation_intent']}
+    if destination.exists():
+        if not marker.is_file() or read_json(marker) != ownership:
+            fail('preparation_changed', 'The destination has no matching complete preparation ownership proof.')
+        if (destination / 'snapshot.json').is_file():
+            recovered = read_json(destination / 'snapshot.json')
+            if recovered.get('preparation_intent') != ownership['intent'] or recovered.get('preparation_token') != ownership['token']:
+                fail('preparation_changed', 'The completed snapshot differs from this immutable preparation intent.')
+            check_run(state, recovered)
+            state['runs'][run_id] = recovered
+            return {'run': recovered, 'recovered': True}
+        if {entry.name for entry in destination.iterdir()} != {marker.name}:
+            fail('preparation_changed', 'Unexpected partial preparation material must be preserved for inspection.')
+    else:
+        destination.mkdir()
+        atomic_json(marker, ownership)
+    env_id = args['environment_id']
+    if env_id not in state['environment_registry']:
+        fail('environment_not_registered', 'Reference an explicitly registered environment.')
+    environment = env_fingerprint(state['environment_registry'][env_id], (state['project']['path'], state['worktree']['path']))
+    argv = frozen_argv(args['argv'], state, environment)
+    validation_argv = frozen_argv(args['validation_argv'], state, environment)
+    if not args['lockfiles']:
+        fail('lockfile_required', 'At least one committed dependency lockfile is required.')
+    for name in args['lockfiles'] + args['artifacts']:
+        safe_relative(name)
+    with selected_snapshot(state['project']['path'], commit, args['snapshot_scope']) as (files, modes, objects):
+        for name in args['lockfiles']:
+            if name not in files:
+                fail('lockfile_missing', 'A dependency lockfile is absent from the explicit selected scope.')
+        store = immutable_code_store(base / '.snapshots', args['snapshot_scope'], files, modes)
+    code = Path(store['directory']) / 'code'
+    startup_inputs = freeze_startup_inputs(args, state, code, environment)
+    code_manifest = {name: item['sha256'] for name, item in store['identity']['files'].items()}
+    current = {**association, 'run_id': run_id, 'status': 'prepared', 'commit': commit,
+        'design_digest': state['design']['digest'], 'frozen_approval': copy.deepcopy(state['approval']),
+        'independent_snapshot': True, 'snapshot_contract': 3, 'snapshot_scope': args['snapshot_scope'],
+        'code_store': store, 'provenance': {'commit': commit, 'objects': objects}, 'startup_inputs': startup_inputs,
+        'directory': str(destination), 'code': str(code), 'manifest': code_manifest, 'manifest_digest': digest(code_manifest),
+        'lockfiles': {name: code_manifest[name] for name in args['lockfiles']}, 'environment_id': env_id,
+        'environment': environment, 'argv': argv, 'validation_argv': validation_argv,
+        'origin_checks': args['origin_checks'], 'fixed_references': args['fixed_references'],
+        'artifacts': args['artifacts'], 'token': 'tw-' + uuid.uuid4().hex, 'created': now(),
+        'preparation_token': ownership['token'], 'preparation_intent': ownership['intent']}
+    current['runtime'] = pin_runtime(state)
+    atomic_json(destination / 'snapshot.json', current)
+    state['runs'][run_id] = current
+    return {'run': current}
+
+
+def prepare_run_legacy(args, state, root):
     require_approved(state)
     integration = state["integration"]
     if integration.get("status") != "complete":
@@ -1653,6 +2300,12 @@ def check_run(state, experiment):
         no_symlinks(code, anchor)
     else:
         no_symlinks(code, root)
+    if experiment.get('snapshot_contract') == 3:
+        expected_base = Path(get_experiment(state, experiment['experiment_id'])['directory']) if experiment.get('experiment_id') else root / '.experiments/verification' / state['task_id']
+        if Path(experiment['code_store']['directory']) != expected_base / '.snapshots' / experiment['code_store']['digest'] or code != Path(experiment['code_store']['directory']) / 'code':
+            fail('unsafe_snapshot', 'The scoped code store is outside its recorded experiment namespace.')
+        check_code_store(experiment['code_store'])
+        check_startup_inputs(state, experiment)
     if manifest(code) != experiment["manifest"]:
         fail("snapshot_changed", "The experiment code differs from its recorded manifest.")
     if environment_identity(env_fingerprint(experiment["environment"]["path"], (state["project"]["path"], state["worktree"]["path"]))) != environment_identity(experiment["environment"]):
@@ -1684,11 +2337,13 @@ def require_execution_protocol(state, current):
     if not runtime:
         fail('legacy_runtime', message)
     runtime = check_runtime(state, current)
-    if runtime.get('execution_protocol') != EXECUTION_PROTOCOL or set(runtime['files']) != {'workflow.py', 'runner.py'}:
+    if runtime.get('execution_protocol') not in (2, EXECUTION_PROTOCOL) or set(runtime['files']) != {'workflow.py', 'runner.py'}:
         fail('legacy_runtime', message)
+    if current.get('snapshot_contract') == 3 and runtime['execution_protocol'] != 3:
+        fail('legacy_runtime', 'Scoped Runs require the protocol3 startup gate in their pinned runtime.')
     for name in runtime['files']:
         content = (Path(runtime['directory']) / name).read_bytes()
-        if not re.search(rb'(?m)^EXECUTION_PROTOCOL = ' + str(EXECUTION_PROTOCOL).encode() + rb'$', content):
+        if not re.search(rb'(?m)^EXECUTION_PROTOCOL = ' + str(runtime['execution_protocol']).encode() + rb'$', content):
             fail('legacy_runtime', message)
 
 
@@ -1759,6 +2414,8 @@ def cleanup_task_references(state, store):
             references += [experiment[key] for key in ("code", "directory") if key in experiment]
             if experiment.get("environment"):
                 references.append(experiment["environment"]["path"])
+            references += [reference[key] for reference in experiment.get('startup_inputs', {}).get('references', []) for key in ('path', 'resolved_path')]
+            references += [origin[key] for origin in experiment.get('startup_inputs', {}).get('origins', []) for key in ('logical_path', 'resolved_path')]
         if any(within(Path(reference).absolute(), target) or within(Path(reference).resolve(), target) for reference in references):
             fail("active_reference", "Another enrolled task references an environment, snapshot or run directory in this worktree.")
 
@@ -1828,7 +2485,7 @@ def main(argv=None):
         print(json.dumps(result, ensure_ascii=False))
         return 0
     except WorkflowError as error:
-        print(json.dumps({"ok": False, "error": {"code": error.code, "message": error.message}}))
+        print(json.dumps({"ok": False, "error": error_payload(error)}))
         return 2
     except (ValueError, OSError, KeyError, TypeError):
         print(json.dumps({"ok": False, "error": {"code": "invalid_or_unavailable", "message": "Input or local state is invalid, or a required resource is unavailable."}}))
@@ -2003,6 +2660,31 @@ def registered_task_trees(state):
             result.append(tree)
     return result
 
+def environment_reference(value):
+    """Keep the existing logical path without rebuilding or auditing its contents."""
+    try:
+        logical = Path(value).expanduser()
+        if not logical.is_absolute() or not logical.is_dir():
+            fail('invalid_environment', 'Environment references must be existing absolute directories.')
+        return str(logical)
+    except (OSError, TypeError, ValueError, RuntimeError):
+        fail('invalid_environment', 'Environment references must be existing absolute directories.')
+
+
+def register_environment(args, state):
+    require_coordinator(args, state)
+    name = identifier(args['environment_id'])
+    logical = environment_reference(args['path'])
+    if name in state['environment_registry']:
+        if state['environment_registry'][name] != logical:
+            fail('environment_conflict', 'This environment identifier already names another logical path; use a new identifier.')
+        return {'environment_id': name, 'path': logical, 'already_registered': True}, False
+    state['environment_registry'][name] = logical
+    state.setdefault('environment_registrations', {})[name] = {
+        'path': logical, 'actor': args['actor'], 'authorization_source': args['authorization_source'], 'time': now()}
+    return {'environment_id': name, 'path': logical, 'already_registered': False}, True
+
+
 def init(args, root, store):
     project = init_checkout_identity(args['project'], 'project')
     worktree = init_checkout_identity(args.get('worktree', args['project']), 'worktree')
@@ -2020,10 +2702,7 @@ def init(args, root, store):
     environments = {}
     for name, value in args.get('environment_registry', {}).items():
         identifier(name)
-        logical = Path(value).expanduser()
-        if not logical.is_absolute() or not logical.is_dir():
-            fail('invalid_environment', 'Environment references must be existing absolute directories.')
-        environments[name] = str(logical)
+        environments[name] = environment_reference(value)
     with lifecycle_lock(store), lock(Path(project['common_dir']) / 'task-workflow-integration.lock'), lock(store / 'registry.lock'):
         binding_path = Path(project['common_dir']) / 'task-workflow-root.json'
         if binding_path.exists() and read_json(binding_path) != {'root': str(root), 'common_dir': project['common_dir']}:
@@ -2158,7 +2837,8 @@ def exited_resource_reference(current):
         return bool(current.get('start_validated') and current.get('finished') and isinstance(execution, dict)
             and type(execution.get('returncode')) is int
             and execution.get('token') == current['token']
-            and execution.get('argv_digest') == digest(current['argv'])
+            and execution.get('argv_digest') == execution_argv_digest(current)
+            and scoped_execution_proof(current, execution, actual_files=False)
             and execution.get('manifest_digest') == current['manifest_digest']
             and execution.get('environment_digest') == digest(environment_identity(current['environment']))
             and execution.get('log') == str(Path(current['directory']) / 'execution.log')
@@ -2423,6 +3103,10 @@ def _dispatch(operation, arguments):
             result = {"run": current}
         elif operation in ("run-reconcile", "run-observe"):
             result = reconcile_execution(args, state)
+        elif operation == 'environment-register':
+            result, changed = register_environment(args, state)
+            if not changed:
+                return {'ok': True, 'state': state, 'summary': summary(state), **result}
         elif operation == "run-accept":
             result = accept_run(args, state)
         elif operation == "resource-register":
@@ -2516,7 +3200,20 @@ def _dispatch(operation, arguments):
 
 def dispatch(operation, arguments):
     """Attach the dialogue contract to every successful task-bearing result."""
-    result = _dispatch(operation, arguments)
+    try:
+        result = _dispatch(operation, arguments)
+    except WorkflowError as error:
+        if (error.details is None or error.details.get("path") == "arguments") and error.code in ('invalid_arguments', 'invalid_process', 'invalid_text', 'invalid_identifier', 'source_required'):
+            # Diagnostics must never mask the original rejection or change guards.
+            try:
+                schema = next((entry['inputSchema'] for entry in command_schemas() if entry['name'] == operation), None)
+                if schema is not None:
+                    details = schema_diagnostic(arguments, schema)
+                    if details is not None:
+                        error.details = details
+            except (KeyError, TypeError, ValueError):
+                pass
+        raise
     if result.get("ok") is not True:
         return result
     state = result.get("state")
@@ -2535,6 +3232,7 @@ COMMANDS = {
     "schema": spec("Discover operation schemas."),
     "init": spec("Explicitly enroll an existing task worktree or a base placeholder awaiting worktree-prepare.", {"task_id": "string", "title": "string", "actor": "string", "authorization_source": "string", "project": "string"}, {"worktree": "string", "coordinator": "string", "environment_registry": "object", "owned_worktree": "boolean", "integration_required": "boolean", "session_id": "string"}),
     "worktree-prepare": mutation("Explicitly create or reuse this task's reserved development worktree; path is project/.worktrees/task-id.", {"expected_base": "string", "authorization_source": "string"}, {"branch": "string"}),
+    "environment-register": mutation("Append an existing logical environment path to this open task without installation or fingerprinting; existing identifiers cannot be replaced.", {"environment_id": "string", "path": "string", "authorization_source": "string"}),
     "status": spec("Read authoritative task state without modifying it.", optional={"task_id": "string"}),
     "context": spec("Read the current task dialogue contract and required recording steps without modifying state.", {"task_id": "string"}),
     "list": spec("List task summaries without modifying state."),
@@ -2565,7 +3263,7 @@ ASSOCIATION_FIELDS = {"experiment_id": "string", "purpose": "string", "parent_ru
 COMMANDS.update({
     "experiment-create": mutation("Reserve an experiment goal and output directory.", {"experiment_id": "string", "goal": "string"}, {"experiment_root": "string"}),
     "run-plan": mutation("Reserve an immutable run intent and optional resource reference.", {"run_id": "string"}, ASSOCIATION_FIELDS),
-    "run-prepare": mutation("Freeze integrated code, environment, argv and runtime.", {"run_id": "string", "environment_id": "string", "lockfiles": "array", "argv": "array", "artifacts": "array"}, {**ASSOCIATION_FIELDS, "dependency_declaration": "string", "output_dir": "string"}),
+    "run-prepare": mutation("Freeze integrated code, environment, argv and runtime.", {"run_id": "string", "environment_id": "string", "lockfiles": "array", "argv": "array", "artifacts": "array"}, {**ASSOCIATION_FIELDS, "dependency_declaration": "string", "output_dir": "string", "snapshot_scope": "object", "fixed_references": "array", "validation_argv": "array", "origin_checks": "array"}),
     "run-dispatch": mutation("Reserve external execution and return the pinned runner argv without launching it.", {"run_id": "string"}, {"timeout": "integer"}),
     "run-execute": mutation("Execute frozen argv once and preserve an actual process receipt.", {"run_id": "string"}, {"timeout": "integer", "detached": "boolean"}),
     "run-observe": mutation("Observe an externally provided matching actual execution receipt.", {"run_id": "string", "receipt_path": "string", "evidence": "array"}),
@@ -2829,13 +3527,17 @@ def process_object(value, fields, optional=()):
     return value
 
 
-def process_strings(value, nonempty=False):
+def process_strings(value, nonempty=False, path="arguments"):
     if not isinstance(value, list) or (nonempty and not value):
-        fail("invalid_process", "A structured list is required.")
-    for item in value:
-        text_value(item)
+        fail("invalid_process", "A structured list is required.", {"path": path, "value": diagnostic_value(value), "expected_type": "nonempty array" if nonempty else "array"})
+    for index, item in enumerate(value):
+        try:
+            text_value(item)
+        except WorkflowError as error:
+            error.details = {'path': path + '[' + str(index) + ']', 'value': diagnostic_value(item), 'expected_type': 'nonempty string'}
+            raise
     if len(set(value)) != len(value):
-        fail("invalid_process", "Structured reference lists must not contain duplicates.")
+        fail("invalid_process", "Structured reference lists must not contain duplicates.", {"path": path, "value": diagnostic_value(value), "unique_items_required": True})
     return value
 
 
@@ -2935,10 +3637,10 @@ def process_requirements(process):
     return entries
 
 
-def process_refs(values, known, nonempty=False):
-    process_strings(values, nonempty)
+def process_refs(values, known, nonempty=False, path="arguments"):
+    process_strings(values, nonempty, path)
     if set(values) - set(known):
-        fail("unknown_reference", "A structured reference does not name a recorded entry.")
+        fail("unknown_reference", "A structured reference does not name a recorded entry.", reference_diagnostic(path, values, known))
 
 
 def process_envelope(content, previous, actor, **bindings):
@@ -3020,7 +3722,7 @@ def validate_answer_decision(process, entry):
         return
     question = next((question for question in process["questions"] if question["id"] == entry["question_id"]), None)
     if not question or question["status"] != "resolved" or not question.get("answer"):
-        fail("answer_required", "A linked decision requires the recorded answer to its question.")
+        fail("answer_required", "A linked decision requires the recorded answer to its question.", {"path": "arguments.decision.question_id", "value": entry["question_id"], "allowed_reference_ids": [item["id"] for item in process["questions"] if item["status"] == "resolved" and item.get("answer")], "hint": "Use an actually answered question. Record the real answer first when this question is still pending."})
     answer = question["answer"]
     if entry["status"] == "confirmed":
         authority = entry.get("confirmation_source", entry["source"])
@@ -3037,7 +3739,7 @@ def validate_answer_decision(process, entry):
 def validate_delegated_choice(entry, decisions):
     authority = decisions.get(entry.get("delegation_id"))
     if not authority or authority["id"] == entry["id"] or authority["status"] != "confirmed" or not authority.get("delegates") or not set(entry["scope"]).issubset(authority["scope"]):
-        fail("delegation_required", "A delegated choice needs explicit confirmed authority covering its requirement scope.")
+        fail("delegation_required", "A delegated choice needs explicit confirmed authority covering its requirement scope.", {"path": "arguments.decision.delegation_id", "value": entry.get("delegation_id"), "allowed_reference_ids": sorted(item["id"] for item in decisions.values() if item["id"] != entry["id"] and item["status"] == "confirmed" and item.get("delegates") and set(entry["scope"]).issubset(item["scope"])), "hint": "Reference actual recorded delegation that covers this scope. An empty list grants no authority; obtain and record the required decision through discussion."})
 
 
 def validate_process_design(process, design):
@@ -3054,7 +3756,7 @@ def validate_process_design(process, design):
     for key in ("assumptions", "out_of_scope", "failure_conditions"):
         process_strings(design[key])
     for key in ("decisions", "unresolved", "delegated_scope"):
-        process_refs(design[key], decisions)
+        process_refs(design[key], decisions, path="arguments.design." + key)
     if design["unresolved"] or any(d["status"] == "proposed" for d in decisions.values()) or any(decisions[x]["status"] not in ("confirmed", "delegated") for x in design["decisions"]):
         fail("unresolved_decisions", "Resolve important design choices through discussion or recorded delegation before review.")
     if any(decisions[x]["status"] != "confirmed" or not decisions[x].get("delegates") for x in design["delegated_scope"]):
@@ -3062,13 +3764,13 @@ def validate_process_design(process, design):
     if not isinstance(design["components"], list) or not design["components"]:
         fail("invalid_process", "A design needs structured components.")
     covered, ids = set(), set()
-    for component in design["components"]:
+    for component_index, component in enumerate(design["components"]):
         process_object(component, ("id", "requirement_ids", "behavior", "interfaces", "files"))
         identifier(component["id"]); text_value(component["behavior"])
         if component["id"] in ids:
             fail("invalid_process", "Component identifiers must be unique.")
         ids.add(component["id"])
-        process_refs(component["requirement_ids"], requirements, True)
+        process_refs(component["requirement_ids"], requirements, True, "arguments.design.components[" + str(component_index) + "].requirement_ids")
         covered.update(component["requirement_ids"])
         process_strings(component["interfaces"]); process_strings(component["files"], True)
         for filename in component["files"]:
@@ -3076,39 +3778,40 @@ def validate_process_design(process, design):
     checked = set()
     if not isinstance(design["verification"], list):
         fail("invalid_process", "Design verification must be a structured list.")
-    for check in design["verification"]:
+    for check_index, check in enumerate(design["verification"]):
         process_object(check, ("requirement_id", "method", "expected_result"))
-        process_refs([check["requirement_id"]], requirements)
+        process_refs([check["requirement_id"]], requirements, path="arguments.design.verification[" + str(check_index) + "].requirement_id")
         text_value(check["method"]); text_value(check["expected_result"])
         checked.add(check["requirement_id"])
     if set(requirements) - covered or set(requirements) - checked:
-        fail("requirement_coverage", "Every requirement needs a design component and an expected verification result.")
+        fail("requirement_coverage", "Every requirement needs a design component and an expected verification result.", {"path": "arguments.design", "missing_component_coverage": sorted(set(requirements) - covered), "missing_verification_coverage": sorted(set(requirements) - checked), "allowed_reference_ids": sorted(requirements)})
 
 
 def validate_process_plan(process, plan):
     process_object(plan, ("shared_requirements", "dependencies", "review_focus", "items"))
     requirements = process_requirements(process)
-    process_refs(plan["shared_requirements"], requirements)
-    process_strings(plan["dependencies"]); text_value(plan["review_focus"])
+    process_refs(plan["shared_requirements"], requirements, path="arguments.plan.shared_requirements")
+    process_strings(plan["dependencies"], path="arguments.plan.dependencies"); text_value(plan["review_focus"])
     if not isinstance(plan["items"], list) or not plan["items"]:
         fail("invalid_process", "A plan needs at least one implementation item.")
     components = {component["id"]: component for component in process["design"]["content"]["components"]}
     covered, ids, covered_components = set(), set(), set()
-    for item in plan["items"]:
+    for item_index, item in enumerate(plan["items"]):
+        item_path = "arguments.plan.items[" + str(item_index) + "]"
         process_object(item, ("id", "title", "requirement_ids", "component_ids", "deliverables", "files", "file_changes", "interfaces", "dependencies", "steps", "verification", "acceptance"))
         identifier(item["id"]); text_value(item["title"])
         if item["id"] == "overall" or item["id"] in ids:
             fail("invalid_process", "Plan item identifiers must be unique and cannot use overall.")
         ids.add(item["id"])
-        process_refs(item["requirement_ids"], requirements, True)
+        process_refs(item["requirement_ids"], requirements, True, item_path + ".requirement_ids")
         covered.update(item["requirement_ids"])
-        process_refs(item["component_ids"], components, True)
+        process_refs(item["component_ids"], components, True, item_path + ".component_ids")
         covered_components.update(item["component_ids"])
         component_requirements = {ref for component_id in item["component_ids"] for ref in components[component_id]["requirement_ids"]}
         if set(item["requirement_ids"]) - component_requirements:
-            fail("requirement_coverage", "Each work item must map its requirements to the selected Spec components.")
+            fail("requirement_coverage", "Each work item must map its requirements to the selected Spec components.", coverage_diagnostic(item_path + ".component_ids", item["component_ids"], set(item["requirement_ids"]) - component_requirements, allowed_reference_ids=sorted(components)))
         for key in ("deliverables", "files", "interfaces", "dependencies", "acceptance"):
-            process_strings(item[key], key in ("deliverables", "files", "acceptance"))
+            process_strings(item[key], key in ("deliverables", "files", "acceptance"), item_path + "." + key)
         for filename in item["files"]:
             safe_relative(filename)
         if not isinstance(item["file_changes"], list):
@@ -3121,62 +3824,64 @@ def validate_process_plan(process, plan):
                 fail("invalid_process", "File responsibilities need unique paths and a valid action.")
             mapped.add(change["path"])
         if mapped != set(item["files"]):
-            fail("file_coverage", "File responsibilities must cover the work item's owned files exactly once.")
+            fail("file_coverage", "File responsibilities must cover the work item's owned files exactly once.", coverage_diagnostic(item_path + ".file_changes", sorted(mapped), set(item["files"]) - mapped, unexpected_coverage=sorted(mapped - set(item["files"]))))
         if not isinstance(item["verification"], list) or not item["verification"]:
             fail("invalid_process", "Each plan item needs expected verification results.")
         checks, checked_requirements = set(), set()
-        for check in item["verification"]:
+        for check_index, check in enumerate(item["verification"]):
+            check_path = item_path + ".verification[" + str(check_index) + "]"
             process_object(check, ("id", "kind", "requirement_ids", "targets", "method", "expected_result"), ("argv",))
             identifier(check["id"])
             if check["id"] in checks or check["kind"] not in ("command", "inspection"):
                 fail("invalid_process", "Checks need unique identifiers and command or inspection kind.")
             checks.add(check["id"])
-            process_refs(check["requirement_ids"], set(item["requirement_ids"]) | set(plan["shared_requirements"]), True)
+            process_refs(check["requirement_ids"], set(item["requirement_ids"]) | set(plan["shared_requirements"]), True, check_path + ".requirement_ids")
             checked_requirements.update(check["requirement_ids"])
-            process_strings(check["targets"], check["kind"] == "inspection")
+            process_strings(check["targets"], check["kind"] == "inspection", check_path + ".targets")
             for target in check["targets"]:
                 safe_relative(target)
             if check["kind"] == "command":
                 if not isinstance(check.get("argv"), list) or not check["argv"]:
-                    fail("invalid_process", "Command checks require a nonempty executable argv.")
+                    fail("invalid_process", "Command checks require a nonempty executable argv.", {"path": check_path + ".argv", "value": diagnostic_value(check.get("argv")), "expected_type": "nonempty array of executable command tokens", "hint": "Declare the actual command as ordered tokens. Preserve repeated arguments when required."})
                 for argument in check["argv"]:
                     text_value(argument)
             elif "argv" in check:
-                fail("invalid_process", "Inspection checks declare source targets instead of executable argv.")
+                fail("invalid_process", "Inspection checks declare source targets instead of executable argv.", {"path": check_path + ".argv", "value": diagnostic_value(check["argv"]), "allowed_fields": ["id", "kind", "requirement_ids", "targets", "method", "expected_result"], "hint": "An inspection check uses actual source targets and expected observations. A command check requires an executable argv."})
             text_value(check["method"]); text_value(check["expected_result"])
         if set(item["requirement_ids"]) - checked_requirements:
-            fail("requirement_coverage", "Every work item requirement needs a named check and expected outcome.")
+            fail("requirement_coverage", "Every work item requirement needs a named check and expected outcome.", coverage_diagnostic(item_path + ".verification", sorted(checked_requirements), set(item["requirement_ids"]) - checked_requirements))
         if not isinstance(item["steps"], list) or not item["steps"]:
             fail("invalid_process", "Each work item needs structured actions linked to files and checks.")
         steps, acted_files, acted_interfaces, linked_checks = set(), set(), set(), set()
-        for step in item["steps"]:
+        for step_index, step in enumerate(item["steps"]):
+            step_path = item_path + ".steps[" + str(step_index) + "]"
             process_object(step, ("id", "action", "files", "interfaces", "verification_ids"))
             identifier(step["id"]); text_value(step["action"])
             if step["id"] in steps:
                 fail("invalid_process", "Action identifiers must be unique within their work item.")
             steps.add(step["id"])
-            process_refs(step["files"], set(item["files"]), True)
-            process_refs(step["interfaces"], set(item["interfaces"]))
-            process_refs(step["verification_ids"], checks, True)
+            process_refs(step["files"], set(item["files"]), True, step_path + ".files")
+            process_refs(step["interfaces"], set(item["interfaces"]), False, step_path + ".interfaces")
+            process_refs(step["verification_ids"], checks, True, step_path + ".verification_ids")
             acted_files.update(step["files"]); acted_interfaces.update(step["interfaces"])
             linked_checks.update(step["verification_ids"])
         if acted_files != set(item["files"]):
-            fail("file_coverage", "Every owned file must appear in a concrete work item action.")
+            fail("file_coverage", "Every owned file must appear in a concrete work item action.", coverage_diagnostic(item_path + ".steps", sorted(acted_files), set(item["files"]) - acted_files))
         if linked_checks != checks:
-            fail("check_coverage", "Every planned check must be linked from an action.")
+            fail("check_coverage", "Every planned check must be linked from an action.", coverage_diagnostic(item_path + ".steps", sorted(linked_checks), checks - linked_checks))
         if acted_interfaces != set(item["interfaces"]):
-            fail("interface_coverage", "Every declared work item interface must appear in an action.")
+            fail("interface_coverage", "Every declared work item interface must appear in an action.", coverage_diagnostic(item_path + ".steps", sorted(acted_interfaces), set(item["interfaces"]) - acted_interfaces))
     if set(requirements) - covered:
-        fail("requirement_coverage", "The implementation plan must cover every confirmed requirement.")
+        fail("requirement_coverage", "The implementation plan must cover every confirmed requirement.", coverage_diagnostic("arguments.plan.items", sorted(covered), set(requirements) - covered, allowed_reference_ids=sorted(requirements)))
     if set(components) - covered_components:
-        fail("component_coverage", "The implementation plan must cover every approved Spec component.")
+        fail("component_coverage", "The implementation plan must cover every approved Spec component.", coverage_diagnostic("arguments.plan.items", sorted(covered_components), set(components) - covered_components, allowed_reference_ids=sorted(components)))
     graph = {item["id"]: item["dependencies"] for item in plan["items"]}
     def visit(item_id, ancestors):
         if item_id in ancestors:
             fail("dependency_cycle", "Implementation dependencies must not form a cycle.")
         for dependency in graph[item_id]:
             if dependency not in graph:
-                fail("unknown_reference", "An item dependency does not name a planned item.")
+                fail("unknown_reference", "An item dependency does not name a planned item.", reference_diagnostic("arguments.plan.items[" + str(next(index for index, item in enumerate(plan["items"]) if item["id"] == item_id)) + "].dependencies", graph[item_id], graph))
             visit(dependency, ancestors | {item_id})
     for item_id in graph:
         visit(item_id, set())
@@ -3284,7 +3989,7 @@ def apply_process(operation, args, state):
         identifier(entry["id"])
         for key in ("title", "choice", "rationale"):
             text_value(entry[key])
-        process_refs(entry["scope"], {r["id"] for r in process["requirements"]})
+        process_refs(entry["scope"], {r["id"] for r in process["requirements"]}, path="arguments.decision.scope")
         if entry["status"] not in ("proposed", "confirmed", "delegated", "rejected"):
             fail("invalid_process", "Decision status is invalid.")
         old = next((d for d in process["decisions"] if d["id"] == entry["id"]), None)
@@ -3439,6 +4144,22 @@ PROCESS_SCHEMAS = {
         "items": {"type": "array", "items": _PLAN_ITEM}})},
 }
 
+PROCESS_SCHEMAS['run-prepare'] = {
+    'snapshot_scope': process_schema({role: {'type': 'array', 'items': {'type': 'string'},
+        'description': 'Literal committed repository-relative file/directory selectors; use . only for an explicit whole-tree scope. Entrypoints must be files.'} for role in SCOPE_ROLES}),
+    'fixed_references': {'type': 'array', 'items': {'type': 'object', 'additionalProperties': False,
+        'properties': {'id': _TEXT, 'role': {'type': 'string', 'enum': ['library', 'data', 'checkpoint', 'runtime_asset']},
+            'path': _TEXT, 'identity': _TEXT, 'evidence': _STRINGS, 'sha256': _TEXT},
+        'required': ['id', 'role', 'path', 'identity', 'evidence']}},
+    'validation_argv': {'type': 'array', 'minItems': 1, 'items': {'type': 'string'},
+        'description': 'Required for every new Run. Execute in frozen code with the registered environment. Write {token,origins:[{id,path}],references:[{id,identity}]} to TASK_WORKFLOW_STARTUP_REPORT using TASK_WORKFLOW_STARTUP_TOKEN. Cover every entrypoint:<path> ID, explicit origin ID and fixed reference ID exactly. Exit zero alone does not pass.'},
+    'origin_checks': {'type': 'array', 'items': process_schema({'id': _TEXT, 'reference': _TEXT, 'path': _TEXT}),
+        'description': 'Required for new Runs; may be empty when entrypoints already supply origin checks. reference is code, environment or a fixed reference ID; path is a relative actual file. Inline commands still require at least one explicit origin.'}}
+for _key in SCOPED_INPUTS:
+    PROCESS_SCHEMAS['run-prepare'][_key]['description'] = ('Required for new preparations; only preexisting legacy preparing records may omit this field. '
+        + PROCESS_SCHEMAS['run-prepare'][_key].get('description', ''))
+
+
 
 def process_record_text(state):
     process = state["process"]
@@ -3560,7 +4281,7 @@ def process_record_text(state):
         entry("Change impact", design["impact"])
         group("Required behavior")
         entry("Behavior", design["behavior"]); entry("Rationale", design["rationale"])
-        for component in design["components"]:
+        for component_index, component in enumerate(design["components"]):
             entry("Component " + component["id"], component["behavior"])
             entry("Requirements", ", ".join(component["requirement_ids"]))
             entry("Files", ", ".join(component["files"]))
@@ -3699,7 +4420,7 @@ def project_resources(store):
 def reconcile_execution(args, state):
     require_coordinator(args, state)
     current = get_run(state, args['run_id'])
-    if current['status'] not in ('running', 'unknown', 'awaiting_artifacts', 'failed', 'complete') or not current.get('start_validated'):
+    if current['status'] not in ('starting', 'running', 'unknown', 'awaiting_artifacts', 'failed', 'complete') or not current.get('start_validated'):
         fail('execution_receipt_invalid', 'A matching execution intent is required for reconciliation.')
     receipt_path = Path(current['directory']) / 'execution-receipt.json'
     supplied = args.get('receipt_path')
@@ -3711,19 +4432,31 @@ def reconcile_execution(args, state):
     receipt = read_json(receipt_path)
     log = Path(current['directory']) / 'execution.log'
     no_symlinks(log, Path(current['directory']))
-    if (receipt.get('token') != current['token'] or receipt.get('argv_digest') != digest(current['argv'])
+    if (receipt.get('token') != current['token'] or receipt.get('argv_digest') != execution_argv_digest(current)
             or receipt.get('manifest_digest') != current['manifest_digest']
             or receipt.get('environment_digest') != digest(environment_identity(current['environment']))
             or type(receipt.get('returncode')) is not int or receipt.get('log') != str(log)
             or not log.is_file() or receipt.get('log_sha256') != sha_file(log)):
         fail('execution_receipt_invalid', 'The receipt does not match the frozen inputs and actual execution log.')
+    if current.get('snapshot_contract') == 3:
+        startup = receipt.get('startup', {})
+        if (receipt.get('protocol') != 3 or type(receipt.get('workload_started')) is not bool
+                or receipt.get('startup_digest') != digest(startup)
+                or current.get('startup', {}).get('receipt_digest') != digest(startup)
+                or startup.get('token') != current['token'] or startup.get('contract_digest') != execution_argv_digest(current)):
+            fail('execution_receipt_invalid', 'The scoped receipt does not match its recorded startup result.')
+        if receipt['workload_started']:
+            if not scoped_execution_proof(current, receipt):
+                fail('execution_receipt_invalid', 'The scoped workload requires an unchanged passed startup report.')
+        elif receipt['returncode'] == 0 or (startup.get('status') != 'failed' and not (receipt.get('workload_error') == 'workload_spawn_failed' and startup_receipt_valid(current, startup))):
+            fail('execution_receipt_invalid', 'An unstarted workload cannot have a successful execution receipt.')
     if current.get('execution'):
         if current['execution'].get('receipt_digest') != digest(receipt):
             fail('execution_conflict', 'The supplied execution receipt conflicts with recorded execution.')
         return {'run': current, 'already_recorded': True}
     unchanged = manifest(Path(current['code'])) == current['manifest']
     current.update(execution={**receipt, 'receipt_digest': digest(receipt), 'snapshot_unchanged': unchanged,
-                             'evidence': args.get('evidence', [])}, workload_success=receipt['returncode'] == 0 and unchanged,
+                             'evidence': args.get('evidence', [])}, workload_success=receipt['returncode'] == 0 and unchanged and scoped_execution_proof(current, receipt),
                    status='awaiting_artifacts' if receipt['returncode'] == 0 and unchanged else 'failed', finished=now())
     return {'run': current}
 

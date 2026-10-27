@@ -66,8 +66,11 @@ class Server:
         self.by_name = {tool["name"]: tool for tool in self.tools}
 
     @staticmethod
-    def error(request_id, code, message):
-        return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
+    def error(request_id, code, message, data=None):
+        error = {"code": code, "message": message}
+        if data is not None:
+            error['data'] = data
+        return {"jsonrpc": "2.0", "id": request_id, "error": error}
 
     def handle(self, request):
         if not isinstance(request, dict):
@@ -104,12 +107,12 @@ class Server:
             try:
                 validate(arguments, self.by_name[name]["inputSchema"])
             except ValueError as exc:
-                return self.error(request_id, -32602, str(exc))
+                return self.error(request_id, -32602, str(exc), workflow.schema_diagnostic(arguments, self.by_name[name]["inputSchema"]))
             try:
                 output = workflow.dispatch(name, arguments)
                 failed = output.get("ok") is False
             except workflow.WorkflowError as exc:
-                output = {"ok": False, "error": {"code": exc.code, "message": exc.message}}
+                output = {"ok": False, "error": workflow.error_payload(exc)}
                 failed = True
             except Exception:
                 return self.error(request_id, -32603, "Internal workflow error")

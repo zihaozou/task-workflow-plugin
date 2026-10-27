@@ -18,6 +18,9 @@ def fake_workflow():
     class WorkflowError(Exception):
         def __init__(self, code, message):
             self.code, self.message = code, message
+    from test_workflow import w
+    module.schema_diagnostic = w.schema_diagnostic
+    module.error_payload = w.error_payload
     module.WorkflowError = WorkflowError
     module.command_schemas = lambda: [{"name": "status", "description": "Read status", "inputSchema": {
         "type": "object", "properties": {"root": {"type": "string"}}, "required": ["root"], "additionalProperties": False}}]

@@ -60,6 +60,18 @@ a new human prompt. It reads the actual committed Session working directory
 through `workingDirectory.get(session)` and the exact native Session identity.
 It does not select a task by recency or infer a new session binding.
 
+For currently allowed `process-plan` and `process-decision` operations, current
+stage guidance includes read-only argument drafts bound to the actual selected
+task, coordinator and state version. Plan drafts copy approved component,
+requirement, file and interface references; mechanical action/check links show
+exact reference spelling. Semantic content and confirmation sources remain null
+with explicit `required_fill_paths`. Fill and review them before any submission.
+The draft does not perform an operation, confirm a choice, approve a revision,
+advance a wait, or authorize a status request to change state. Regroup the draft
+when the actual work needs different ownership or checks. Use exact item interface
+strings in steps and keep `confirmation_source` inside `decision`.
+Complete structural examples are in [workflow.md](workflow.md).
+
 The context callback is synchronous. It invokes the Python helper and waits for
 its read before model admission. Numeric stdout/stderr file descriptors carry
 the complete result without a fixed process-output buffer. This adds synchronous
@@ -119,7 +131,7 @@ current selection remains authoritative for that Session. Record route metadata
 without dumping settings or credentials. Do not guess an internal Flash model ID.
 
 Discover the tools currently exposed before choosing a transport. The adapter
-adds three native Task Workflow tools beside the unchanged 53 shared MCP
+adds three native Task Workflow tools beside the shared MCP
 operations. It leaves the host's original subagent tools unchanged.
 
 | Tool | Arguments and result |
@@ -212,7 +224,7 @@ release directory outside experiment outputs. For the standard DSH data home:
 
 ```sh
 dsh_data_home="${DSH_HOME:-$HOME/.dsh}"
-archive_directory="$dsh_data_home/releases/task-workflow/0.1.13"
+archive_directory="$dsh_data_home/releases/task-workflow/0.1.14"
 mkdir -p "$archive_directory"
 npm pack --dry-run --json
 npm pack --pack-destination "$archive_directory" --json

@@ -49,7 +49,19 @@ class Fixture(unittest.TestCase):
         self.state = w.dispatch('status', {'root': str(self.root), 'task_id': 'task'})['state']
         return self.state
 
+    def startup_fields(self):
+        validator = ('import json,os,runpy; from pathlib import Path; '
+            'assert runpy.run_path("code.py")["VALUE"] == 2; '
+            'Path(os.environ["TASK_WORKFLOW_STARTUP_REPORT"]).write_text(json.dumps({'
+            '"token":os.environ["TASK_WORKFLOW_STARTUP_TOKEN"],'
+            '"origins":[{"id":"entrypoint:code.py","path":str(Path("code.py").absolute())}],'
+            '"references":[]}))')
+        return {'snapshot_scope': {'entrypoints': ['code.py'], 'code': [], 'configs': ['uv.lock'], 'assets': []},
+            'fixed_references': [], 'validation_argv': ['python', '-c', validator], 'origin_checks': []}
+
     def op(self, operation, **fields):
+        if operation == 'run-prepare':
+            fields = {**self.startup_fields(), **fields}
         try:
             result = w.dispatch(operation, {'root': str(self.root), 'task_id': 'task', 'actor': 'owner',
                 'expected_version': self.state['version'], **fields})
@@ -89,9 +101,10 @@ class Fixture(unittest.TestCase):
         return result
 
     def prepare(self, run_id='run', **fields):
-        return self.op('run-prepare', run_id=run_id, environment_id='runtime', lockfiles=['uv.lock'],
+        defaults = dict(environment_id='runtime', lockfiles=['uv.lock'],
             argv=['python', '-c', 'import os; from pathlib import Path; Path(os.environ["TASK_WORKFLOW_OUTPUT_DIR"], "result.txt").write_text("ok")'],
-            artifacts=['result.txt'], dependency_declaration='no-external-local-dependencies', **fields)
+            artifacts=['result.txt'], dependency_declaration='no-external-local-dependencies')
+        return self.op('run-prepare', run_id=run_id, **{**defaults, **fields})
 
     def error(self, code, function):
         with self.assertRaises(w.WorkflowError) as caught:

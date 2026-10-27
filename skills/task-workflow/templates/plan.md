@@ -30,6 +30,15 @@ For each task, specify:
 - Verification commands and expected outcomes, acceptance, review focus, and
   evidence the implementer must return.
 
+For executable snapshots, add concrete actions to inspect the entrypoint dependency
+closure, submit the selected code/configuration/asset scope and fixed references,
+freeze through the program, and validate startup before the main workload. Name
+the validation command, expected import and asset checks, required code origins,
+and evidence returned by the startup report. Plan immutable code/scope reuse with
+separate run outputs and provenance. Name ownership and reference checks before
+cleanup. For pre-change project verification, use the same frozen baseline helpers;
+do not create a formal Run integration bypass.
+
 Include applicable integration authority, independent reviews, and recovery.
 Review coverage against every approved requirement and check interface names,
 types, dependencies, and verification references across tasks. Replace vague

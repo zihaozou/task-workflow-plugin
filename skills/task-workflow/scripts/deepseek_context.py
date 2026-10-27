@@ -64,7 +64,89 @@ def stage_guidance(contract, context=None):
             "instruction": "This is a complete structural example, not a question or authorization for this task. Use the actual current root, task_id and expected_version. Replace actor with the actual registered coordinator from current status/context state.coordinator. Replace all illustrative question, scope, choice and source content with the actual current discussion. Record intent and exploration first; use process-reenter only where the current stage requires it. Never copy illustrative source references as evidence or repair malformed JSON by guessing.",
         }
         result["source_paths"].append(str(source))
+    if context is not None:
+        drafts = argument_drafts(context)
+        if drafts:
+            result["argument_drafts"] = drafts
     return result
+
+
+def argument_drafts(context):
+    """Build incomplete, read-only shapes from this exact task revision only."""
+    contract = context["dialogue_contract"]
+    allowed = set(contract["allowed_next_operations"])
+    relevant = allowed.intersection({"process-plan", "process-decision"})
+    if not relevant:
+        return []
+    root, store = workflow.store_dir(context["root"])
+    state, _ = workflow.load_events(workflow.task_dir(store, context["task"]["task_id"]))
+    if (state["version"] != contract["state_version"] or state["root"] != str(root)
+            or state.get("session_id") != context["session_id"]
+            or workflow.session_bindings(store).get(context["session_id"]) != state["task_id"]):
+        raise ValueError("Task changed during draft projection")
+    process = state["process"]
+    base = {"root": str(root), "task_id": state["task_id"], "actor": state["coordinator"],
+            "expected_version": state["version"]}
+    requirement_ids = [entry["id"] for entry in process["requirements"]]
+    instruction = ("READ-ONLY INCOMPLETE DRAFT: never submit nulls. Fill and review every required_fill_path "
+                   "using actual authorized semantics and source evidence. Scaffold file/interface names are suggestions copied from approved components; select actual component and requirement coverage. Mechanical coverage is not a plan, "
+                   "decision, approval or authorization. You may regroup items and add steps/checks; preserve exact "
+                   "declared references and current schema. Ordinary/status requests remain direct and preserve "
+                   "the current wait; tool availability does not authorize progression.")
+    drafts = []
+    if "process-plan" in relevant:
+        design = process.get("design")
+        approval = process.get("design_approval")
+        if design and approval and approval.get("digest") == design["digest"]:
+            items = []
+            for component in design["content"]["components"]:
+                files = list(component["files"])
+                interfaces = list(component["interfaces"])
+                items.append({"id": "item-" + component["id"], "title": None,
+                    "component_ids": [None], "requirement_ids": [None],
+                    "deliverables": [None], "files": files or [None],
+                    "file_changes": [{"path": path, "action": None, "responsibility": None}
+                                     for path in files] or [{"path": None, "action": None, "responsibility": None}],
+                    "interfaces": interfaces, "dependencies": [],
+                    "steps": [{"id": "action-1", "action": None, "files": files or [None],
+                               "interfaces": interfaces, "verification_ids": ["check-1"]}],
+                    "verification": [{"id": "check-1", "kind": None, "requirement_ids": [None],
+                        "targets": files or [None], "method": None, "expected_result": None}],
+                    "acceptance": [None]})
+            arguments = {**base, "plan": {"shared_requirements": [], "dependencies": [],
+                                         "review_focus": None, "items": items}}
+            drafts.append({"operation": "process-plan", "arguments": arguments,
+                "approved_design_digest": design["digest"],
+                "valid_references": {"requirement_ids": requirement_ids,
+                    "components": [{key: component[key] for key in ("id", "requirement_ids", "files", "interfaces")}
+                                   for component in design["content"]["components"]]},
+                "instruction": instruction + " Plan has no id or acceptance field at its top level. "
+                    "Each step.interfaces must use the exact strings declared by its item; verification_ids "
+                    "name that item's checks. Every item requirement needs a check, and every declared interface "
+                    "must occur in an action. Command checks also need a nonempty argv; inspection checks need targets."})
+    if "process-decision" in relevant:
+        arguments = {**base, "decision": {"id": None, "title": None, "choice": None,
+            "rationale": None, "scope": [], "status": None, "source": None,
+            "confirmation_source": None}}
+        drafts.append({"operation": "process-decision", "arguments": arguments,
+            "valid_references": {"scope": requirement_ids,
+                "questions": [{"id": question["id"], "choices": question.get("choices", [])}
+                              for question in process["questions"]]},
+            "instruction": instruction + " confirmation_source belongs inside decision, never at the operation "
+                "top level. Use actual recorded answer/source for confirmed choices; a draft cannot create human "
+                "authority. Add question_id/choice_id only when supported by that exact recorded answer. For a "
+                "proposed choice omit confirmation_source instead of inventing confirmation."})
+    def missing(value, path):
+        if value is None:
+            return [path]
+        if isinstance(value, dict):
+            return [field for key, child in value.items() for field in missing(child, path + "." + key)]
+        if isinstance(value, list):
+            return [field for index, child in enumerate(value) for field in missing(child, path + "[" + str(index) + "]")]
+        return []
+    for draft in drafts:
+        draft["required_fill_paths"] = missing(draft["arguments"], "arguments")
+    return drafts
 
 
 def error_result(code):

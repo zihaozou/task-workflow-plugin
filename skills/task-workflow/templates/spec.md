@@ -25,6 +25,13 @@ approval. The template is a content structure, not a parallel source of authorit
 | Failure conditions | Conditions that make the result unacceptable | Design `failure_conditions`, tied to confirmed scope and acceptance |
 | Open questions | Remaining consequential choices or missing facts | Exploration, unresolved questions, design unresolved entries |
 
+For executable snapshots, Scope must identify the entrypoint, required local code,
+configuration, runtime assets, fixed external references, and unrelated excluded
+subprojects. Explain dependencies from inspected evidence. Acceptance must include
+startup validation and actual code-origin checks. Resolve material inclusion or
+reference choices through the existing user confirmation loop. Store this content
+in the existing Spec and record, not a separate configuration policy.
+
 Include recovery and data compatibility in required behavior or constraints when
 material. Do not fill missing authority with an agent assumption. Label an agent
 proposal and discuss it before treating it as settled. Preserve source data and

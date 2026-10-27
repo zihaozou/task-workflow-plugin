@@ -157,7 +157,7 @@ class LifecycleTests(Fixture):
         process.wait.return_value = 0
         actual_popen = subprocess.Popen
         def popen(argv, **kwargs):
-            return process if kwargs.get('env', {}).get('TASK_WORKFLOW_OUTPUT_DIR') else actual_popen(argv, **kwargs)
+            return process if kwargs.get('env', {}).get('TASK_WORKFLOW_OUTPUT_DIR') and 'result.txt' in argv[-1] else actual_popen(argv, **kwargs)
         with mock.patch.object(runner.subprocess, 'Popen', side_effect=popen), mock.patch.object(runner.os, 'killpg'):
             receipt = runner.execute(str(self.root), 'task', 'run', current['token'])
         self.assertEqual(receipt['returncode'], 0)

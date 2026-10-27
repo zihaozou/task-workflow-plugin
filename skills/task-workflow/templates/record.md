@@ -77,7 +77,13 @@ verdict. Reviewers inspect actual changes and evidence.
 
 Research goal, experiment and frozen run identities, code and environment
 revisions, inputs, resource identity and ownership, execution receipt,
-artifact checks, acceptance, and closure. Keep each run immutable after freeze.
+artifact checks, acceptance, and closure. Include the inspected entrypoint dependency
+closure, inclusion paths for code/configuration/assets, excluded unrelated scope,
+fixed external identities, and their design/plan confirmation sources. Record the
+selected shared snapshot identity, per-run source provenance, startup validation
+command, required origin checks, validated report/exit evidence, mutable output
+location, and ownership/reference checks for cleanup. Keep each run immutable
+after freeze. Preserve old snapshots and active inputs.
 Code-only verification need not create a research experiment.
 
 ## Delivery

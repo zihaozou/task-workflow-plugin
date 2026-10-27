@@ -40,7 +40,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.13')
+        self.assertEqual(manifest['version'], '0.1.14')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -78,7 +78,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(packages), 1)
         package = packages[0]
         self.assertEqual(package['name'], '@local/task-workflow')
-        self.assertEqual(package['version'], '0.1.13')
+        self.assertEqual(package['version'], '0.1.14')
         paths = [entry['path'] for entry in package['files']]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(set(paths), NATIVE_RELEASE_FILES)
@@ -142,8 +142,8 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(replies[0]['result']['serverInfo']['name'], 'task-workflow')
             tools = replies[1]['result']['tools']
             expected = session_hook.workflow.command_schemas()
-            self.assertEqual(len(tools), 53)
-            self.assertEqual(len(expected), 53)
+            self.assertEqual(len(tools), 54)
+            self.assertEqual(len(expected), 54)
             self.assertEqual([{key: tool[key] for key in schema}
                               for tool, schema in zip(tools, expected)], expected)
             self.assertFalse(replies[2]['result']['isError'])

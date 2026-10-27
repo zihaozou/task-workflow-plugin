@@ -33,7 +33,7 @@ class InitGuidanceTests(unittest.TestCase):
 
     def test_schema_adds_guidance_without_changing_operation_fields(self):
         schemas = workflow.command_schemas()
-        self.assertEqual(len(schemas), 53)
+        self.assertEqual(len(schemas), 54)
         self.assertEqual({entry['name'] for entry in schemas}, set(workflow.COMMANDS))
         for entry in schemas:
             command = workflow.COMMANDS[entry['name']]

@@ -80,7 +80,7 @@ class DeepSeekContextTests(unittest.TestCase):
         self.assert_core_context(json.loads(result.stdout)["context"], expected)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.core.command_schemas(), schemas)
-        self.assertEqual(len(schemas), 53)
+        self.assertEqual(len(schemas), 54)
 
     def test_unbound_project_and_other_session_are_successful_null_without_enrollment(self):
         self.assertEqual(self.context(), {"ok": True, "context": None})
@@ -306,3 +306,118 @@ class DeepSeekContextTests(unittest.TestCase):
         self.assertEqual({path.name for path in folder.iterdir() if path.is_file()}, {"workflow.py", "runner.py"})
         # The new helper uses only syntax available to the declared Python floor.
         ast.parse((SCRIPTS / "deepseek_context.py").read_text(), feature_version=(3, 9))
+
+
+class DeepSeekArgumentDraftTests(unittest.TestCase):
+    """Use a real enrolled fixture; no synthetic approval enters actual context."""
+
+    def setUp(self):
+        from test_process import ProcessTests, w
+        self.fixture_core = w
+        self.fixture = ProcessTests(methodName="test_new_protocol_and_exact_structured_schema")
+        self.fixture.setUp()
+        self.addCleanup(self.fixture.doCleanups)
+        self.fixture.discussion()
+
+    def context(self):
+        return deepseek_context.context_for({"cwd": str(self.fixture.repo),
+                                             "session_id": "session-fixture"})["context"]
+
+    def snapshot(self):
+        return {str(path): (path.read_bytes(), path.stat().st_mtime_ns, path.stat().st_mode)
+                for path in (self.fixture.root / ".task-workflow").rglob("*") if path.is_file()}
+
+    def test_current_plan_draft_keeps_semantics_unfilled_and_exact_reference_catalog(self):
+        self.fixture.designed()
+        before = self.snapshot()
+        context = self.context()
+        draft, = context["stage_guidance"]["argument_drafts"]
+        self.assertEqual(draft["operation"], "process-plan")
+        args = draft["arguments"]
+        self.assertEqual((args["root"], args["task_id"], args["actor"], args["expected_version"]),
+                         (str(self.fixture.root), "task", "owner", self.fixture.state["version"]))
+        self.assertEqual(draft["approved_design_digest"], self.fixture.state["design"]["digest"])
+        self.assertEqual(draft["valid_references"]["requirement_ids"], ["R1", "R2"])
+        self.assertEqual(draft["valid_references"]["components"][0]["interfaces"], ["VALUE"])
+        item = args["plan"]["items"][0]
+        self.assertEqual(item["requirement_ids"], [None])
+        self.assertEqual(item["component_ids"], [None])
+        self.assertIsNone(item["steps"][0]["action"])
+        self.assertEqual(item["steps"][0]["interfaces"], item["interfaces"])
+        self.assertEqual(item["steps"][0]["verification_ids"], [item["verification"][0]["id"]])
+        self.assertIn("arguments.plan.items[0].verification[0].expected_result", draft["required_fill_paths"])
+        self.assertEqual(self.snapshot(), before)
+        # The draft cannot silently pass the real dispatcher as a plan.
+        with self.assertRaises(workflow.WorkflowError):
+            workflow.dispatch("process-plan", args)
+        self.assertEqual(self.snapshot(), before)
+        stale = json.loads(json.dumps(context))
+        stale["dialogue_contract"]["state_version"] -= 1
+        with self.assertRaises(ValueError):
+            deepseek_context.argument_drafts(stale)
+        self.assertEqual(self.snapshot(), before)
+        self.fixture.planned()
+        self.assertNotIn("argument_drafts", self.context()["stage_guidance"])
+
+    def test_decision_draft_has_no_human_authority_and_keeps_pending_wait(self):
+        question = {"id": "q-current", "text": "Which behavior?", "rationale": "Actual fixture choice.",
+                    "scope": ["R1"], "important": True}
+        self.fixture.op("process-question", question=question)
+        before = self.snapshot()
+        context = self.context()
+        draft, = context["stage_guidance"]["argument_drafts"]
+        args = draft["arguments"]
+        self.assertNotIn("confirmation_source", args)
+        for field in ("source", "status", "choice", "confirmation_source"):
+            self.assertIsNone(args["decision"][field])
+        self.assertEqual(draft["valid_references"]["scope"], ["R1", "R2"])
+        self.assertEqual(context["dialogue_contract"]["pending_questions"][0]["id"], "q-current")
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(self.context()["dialogue_contract"], context["dialogue_contract"])
+        self.assertEqual(self.snapshot(), before)
+
+    def test_nested_decision_example_records_only_actual_fixture_answer(self):
+        text = (SCRIPTS.parent / "references/workflow.md").read_text()
+        match = re.search(r"<!-- process-decision-complete-example -->\s*```json\s*(.*?)```", text, re.S)
+        decision = json.loads(match.group(1))["decision"]
+        source = {"kind": "user", "reference": "Synthetic fixture answer to q-encoding"}
+        self.fixture.op("process-question", question={"id": "q-encoding", "text": "Which encoding?",
+            "rationale": "The fixture needs an explicit text encoding.", "scope": ["R1"], "important": True,
+            "choices": [{"id": "utf8", "text": "Use UTF-8.", "consequence": "Read UTF-8 input.",
+                         "source": decision["source"]}]})
+        self.fixture.op("process-answer", question_id="q-encoding", answer="Use UTF-8.",
+                        choice_id="utf8", source=source)
+        decision.update(scope=["R1"], confirmation_source=source)
+        before = self.snapshot()
+        with self.assertRaises(self.fixture_core.WorkflowError):
+            self.fixture.op("process-decision", decision=decision, confirmation_source=source)
+        self.assertEqual(self.snapshot(), before)
+        self.fixture.op("process-decision", decision=decision)
+        recorded = self.fixture.state["process"]["decisions"][0]
+        self.assertEqual(recorded["confirmation_source"], source)
+        self.assertEqual(recorded["question_id"], "q-encoding")
+        self.assertEqual(recorded["choice_id"], "utf8")
+
+    def test_documented_plan_and_decision_shapes_use_real_dispatch_guards(self):
+        text = (SCRIPTS.parent / "references/workflow.md").read_text()
+        def example(operation):
+            match = re.search(r"<!-- " + operation + r"-complete-example -->\s*```json\s*(.*?)```", text, re.S)
+            return json.loads(match.group(1))
+        decision = example("process-decision")
+        self.assertIn("confirmation_source", decision["decision"])
+        self.assertNotIn("confirmation_source", decision)
+        self.fixture.designed()
+        plan = example("process-plan")["plan"]
+        # Adapt the illustrative existing IDs/paths to this explicitly synthetic fixture.
+        item = plan["items"][0]
+        item.update(component_ids=["code", "lock"], requirement_ids=["R1", "R2"])
+        item["verification"][0]["requirement_ids"] = ["R1", "R2"]
+        before = self.snapshot()
+        broken = json.loads(json.dumps(plan))
+        broken["items"][0]["steps"][0]["interfaces"] = ["short-name-not-declared"]
+        with self.assertRaises(self.fixture_core.WorkflowError) as failure:
+            self.fixture.op("process-plan", plan=broken)
+        self.assertEqual(failure.exception.code, "unknown_reference")
+        self.assertEqual(self.snapshot(), before)
+        self.fixture.op("process-plan", plan=plan)
+        self.assertEqual(self.fixture.state["process"]["stage"], "plan_confirmation")

@@ -139,7 +139,7 @@ The adapter exposes `task_workflow_delegate`, `task_workflow_wait`, and
 `task_workflow_cancel` for owned Task Workflow workers. These reuse native
 provider/model checks and return explicit activation handles. The coordinator
 waits for actual child settlement and cleanup before final delivery. The host's
-original subagent tools and the 53 shared Python operations remain available.
+original subagent tools and the shared Python operations remain available.
 Discover current tools and schemas after activation or reconnect. A remembered
 tool name, child report, or background notice is not a new human instruction.
 
@@ -159,7 +159,7 @@ Human actual-session testing remains separate from isolated recovery checks.
 
 Build and inspect the candidate archive from the reviewed checkout. Keep its
 actual filename and checksum in a durable release directory outside experiment
-outputs, such as the host DSH data home under `releases/task-workflow/0.1.13/`:
+outputs, such as the host DSH data home under `releases/task-workflow/0.1.14/`:
 
 ```sh
 npm pack --dry-run --json

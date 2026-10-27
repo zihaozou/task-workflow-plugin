@@ -135,9 +135,20 @@ Ordered action steps and linked verification IDs:
 Named checks/assertions, commands or inspection targets, expected outcomes:
 Required behavior and acceptance criteria:
 Dependencies and current revisions:
+Snapshot entrypoints and required code/configuration/assets, when applicable:
+Fixed external references and immutable identities:
+Startup validation command and required origin checks:
+Shared snapshot identity, run provenance, and mutable output location:
+Snapshot ownership, live references, and cleanup boundary:
 Verification to run and evidence to return:
 Stop at a choice beyond approved design or delegation:
 ```
+
+For executable snapshots, inspect the declared dependency closure before freezing.
+Use the program-selected scope and return startup exit/report evidence plus actual
+code origins. Stop when a required dependency or identity is missing or mutable.
+Preserve existing snapshots and running inputs; remove only owned, unreferenced
+content under the approved cleanup boundary.
 
 Implement named work items from the approved plan in owned paths. Report the
 change revision, verification, and any deviation. Stop when a new important
