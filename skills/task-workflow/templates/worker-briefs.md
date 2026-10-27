@@ -6,25 +6,70 @@ stop condition. Workers do not delegate recursively. Store the brief as a
 record section or program evidence reference. Do not create a second task
 record or an unbounded set of user-facing documents.
 
+For workflow-scoped workers on DeepSeek Harness, use the exposed Task Workflow
+delegate/wait/cancel tools. Capture the returned activation handle and give each worker
+a terminal return contract. The worker returns its final report through its
+activation result. Use native messaging for important early questions or
+findings; these messages do not mean the activation ended. Send a separate final
+parent message only when the coordinator explicitly requests one.
+The coordinator waits for the actual terminal result and cleanup for every owned
+handle before final delivery. Explicit cancellation also requires settlement.
+The caller-delivery tools do not promise an automatic parent completion notice.
+
 ## Common header
 
 ```text
-Task ID:
-Protocol and state version:
-Role and owner:
+Request applicability and authorized scope:
+Task ID and parent task/session association, if applicable:
+State root (actual absolute root argument):
+Project checkout (actual absolute base path):
+Task worktree (actual absolute path or recorded base placeholder):
+Canonical record (actual absolute record.md path):
+Protocol and current state version:
+Role, actor, and exact plan item or review target:
 Objective:
-Approved design revision and source, if applicable:
-Approved plan revision and source, if applicable:
-Confirmed requirements and source references:
+Exact Spec revision, digest, status, and source, if applicable:
+Exact Plan revision, digest, status, and source, if applicable:
+User request and approval source references:
+Confirmed requirements and decision sources:
 Delegated choices and exact scope:
-Owned paths or evidence scope:
-Inputs and current revisions:
+Permitted operations and owned paths or evidence scope:
+Current context read (actual tool/runtime and root/task_id arguments):
+Current main skill and available native loader or verified read fallback:
+Context, source files, and revisions to inspect before action:
 Expected return format:
+Terminal activation return and cleanup contract:
 Stop and report when:
 ```
 
-Every role stops before a consequential choice outside confirmed design or
-explicit delegation. Report the question to the coordinator for user discussion.
+A fresh DeepSeek native child does not inherit the parent's conversation
+history. Other host mechanisms, such as a Codex fork with history inheritance,
+can supply prior context; verify the actual capability. Keep the self-contained
+brief in either case. Fill these pointers with actual current values for
+workflow-scoped work; do not send
+only a task name, a remembered version, or an instruction to continue. The child
+first reads the supplied record, exact Spec/Plan or review target, source
+references, relevant files, and current read-only task context. Check that root,
+project, worktree, task, role, item, and revision agree before action. Load the
+current main skill through an actual exposed native skill loader or a verified
+current file-reading path. A registered skill or a usable tool does not prove it
+was loaded or grant authority.
+
+Preserve the child's actual binding status. An unbound child stays unbound unless
+actual authority permits a binding operation. Use the supplied root and task ID
+for the authorized read-only context call; do not
+bind the child to the parent's session or enroll a replacement task to obtain
+context. The brief is scoped coordinator delegation, not a new human request or
+approval. Trace behavior and write authority to the actual user sources and
+approved item. If context, sources, or pointers are unavailable or inconsistent,
+return that gap to the coordinator before dependent action.
+
+For an ordinary request outside an enrolled workflow, preserve ordinary scope
+and state that task/Spec/Plan pointers are not applicable. Do not invent a task,
+approval, or workflow history to fill the header. Before approval, record the
+actual proposed or missing revision status rather than claiming approval. Every
+role stops before a consequential choice outside confirmed design or explicit
+delegation and reports the question to the coordinator for user discussion.
 
 ## Coordinator
 

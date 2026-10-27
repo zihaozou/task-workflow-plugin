@@ -4,12 +4,15 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { ownedDelegations, collectionTools, delegationFacades, DELEGATE_TOOL, WAIT_TOOL, CANCEL_TOOL, OWNED_PROVIDER } from './delegation.js';
+import { taskScopedRecovery } from './recovery.js';
 
 export const name = 'task-workflow';
 export const inject = ['shell', 'sessionProjections', 'workingDirectory', 'systemPrompt', 'tools', 'skills'];
 export const UNAVAILABLE_NOTICE = 'Current Task Workflow context is unavailable. Inspect status before dependent work.';
 export const HOOK_TRUNCATED_NOTICE = 'Task Workflow hook output was truncated by the host. Use the complete current Task Workflow runtime context.';
 export const releaseRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+export const WORKFLOW_SCOPE = 'These workflow instructions apply only to authorized related Task Workflow work. Handle ordinary conversation, advice and simple requests directly. A status or progress request authorizes inspection and a direct answer, preserves the current stage/wait, and does not authorize new questions, delegation or enrollment. Tool availability and context delivery grant no authority.';
 
 /** Shell arguments are literals, including installed paths with metacharacters. */
 export function quoteShellArgument(value, platform = process.platform) {
@@ -104,7 +107,7 @@ export function hookTransportShell(shell) {
 }
 
 /** Track only the callbacks belonging to this official bridge instance. */
-export function hookOwnership() {
+export function hookOwnership({ humanMessages = async (_agent, messages) => messages.filter(message => message.source?.kind === 'user') } = {}) {
   const abort = new AbortController();
   const pending = new Set(), listeners = [];
   const originals = new WeakMap();
@@ -114,7 +117,7 @@ export function hookOwnership() {
       const wrapper = function (...args) {
         const receiver = this;
         const originalNext = typeof args[1] === 'function' ? args[1] : undefined;
-        if (closed) return originalNext?.();
+        if (closed) return originalNext?.call(receiver);
         let downstream, calledNext = false;
         if (originalNext) args[1] = async function (...values) {
           calledNext = true;
@@ -137,7 +140,14 @@ export function hookOwnership() {
           }
         }
         const task = Promise.resolve().then(async () => {
-          if (closed) return originalNext?.();
+          if (closed) return originalNext?.call(receiver);
+          if (event === 'agent/pre-step') {
+            const messages = await humanMessages(args[0].agent, args[0].messages, args[0].signal);
+            if (closed || messages.length === 0) return args[1]?.call(receiver);
+            // Only this official hook sees the filtered prompt. Its downstream
+            // continuation still owns the complete original message batch.
+            args[0] = { ...args[0], messages };
+          }
           const result = await listener.apply(receiver, args);
           // Unloading cannot append this bridge's late prompt context, while
           // the already admitted user's unchanged downstream decision survives.
@@ -182,18 +192,21 @@ export async function disposeChild(child) {
 export function ownedLifetime(removeFiles) {
   const children = [];
   const drains = [];
-  let closed = false, cleanupTask, removeContext = () => {};
+  const contexts = [];
+  let closed = false, cleanupTask;
   return {
     get closed() { return closed; },
     add(child) { if (closed) throw new Error('Task Workflow is disposing.'); children.push(child); },
-    context(dispose) { removeContext = dispose; },
+    context(dispose) { contexts.push(dispose); },
     drain(dispose) { drains.push(dispose); },
     cleanup() {
       if (cleanupTask) return cleanupTask;
       closed = true;
       cleanupTask = (async () => {
         let contextError;
-        try { removeContext(); } catch (error) { contextError = error; }
+        for (const removeContext of contexts.splice(0)) {
+          try { removeContext(); } catch (error) { contextError = error; }
+        }
         const drained = await Promise.allSettled(drains.map(dispose => Promise.resolve().then(dispose)));
         const settled = await Promise.allSettled(children.map(disposeChild));
         if (contextError || drained.some(result => result.status === 'rejected')) throw new Error('Task Workflow callback cleanup did not complete.');
@@ -203,6 +216,42 @@ export function ownedLifetime(removeFiles) {
       return cleanupTask;
     },
   };
+}
+
+export function capabilityContext(ctx, agent, registry) {
+  try {
+    const schemas = ctx.tools.schemas(agent);
+    const names = schemas.map(tool => tool.name);
+    const owned = [DELEGATE_TOOL, WAIT_TOOL, CANCEL_TOOL].every(name => names.includes(name));
+    const questionTool = schemas.find(tool => tool.name === 'ask_user_question');
+    const skillTool = schemas.find(tool => tool.name === 'skill');
+    const agents = ctx.get?.('agents');
+    const currentRoot = agents ? agents.roots().includes(agent) : null;
+    return 'Current native Task Workflow capabilities: ' + JSON.stringify({
+      tool_names: names,
+      applicability: WORKFLOW_SCOPE,
+      skill_loader: {
+        available: Boolean(skillTool),
+        ...(skillTool ? { tool_name: skillTool.name, parameters: skillTool.parameters,
+          ...(skillTool.parameters?.properties?.name ? { arguments: { name: 'task-workflow' } } : {}) } : {}),
+        main_skill_path: path.join(releaseRoot, 'skills/task-workflow/SKILL.md'),
+        instruction: 'Before authorized workflow progress, load the current task-workflow skill through the actually available native skill tool using its current schema. If no supported loader is exposed, use an available supported file-reading tool for main_skill_path. If neither route is available, report current guidance unavailable before dependent work. A file path or a listed capability does not prove the skill was read. Do not invoke tools or enroll a task merely because this context is present.',
+      },
+      owned_delegation_available: owned,
+      ...(owned ? { workflow_delegation: 'For authorized related workflow delegation, use task_workflow_delegate and collect its exact handleId with task_workflow_wait before reporting the final child outcome. task_workflow_cancel disposes only that owned activation. A canceled wait leaves the worker running. Native interrupt acknowledgment is not settlement. Native and unowned worker messages remain independent.' } : {}),
+      owned_activations: registry?.context(agent) ?? [],
+      user_question: {
+        available: Boolean(questionTool), current_root: currentRoot,
+        ...(questionTool ? { tool_name: questionTool.name, parameters: questionTool.parameters } : {}),
+        protocol: 'When workflow work requires a user answer or approval, for discussion first record the question with process-question (or process-reenter) and wait for its successful result. For Spec/Plan approval, use the successfully recorded and reviewed exact current approval_target; do not call a discussion-only operation in an approval stage. Use the returned current pending question/digest or approval_target, then actually call ask_user_question if exposed and currently eligible; a prose question or option list does not replace that call. Present the complete current stage layout before the card. A status-only request preserves the existing wait and does not ask again. The current live root restriction is authoritative; do not infer eligibility from a historical parentSession marker. An owned child returns unresolved questions to its coordinator. If the tool is unavailable or the native service denies eligibility, report that fact and use the supported conversation/coordinator path without claiming a tool invocation.',
+        identity: 'Use questions[{id,question,header?,options?:[{label,description?}],multi_select?}] with the exact recorded question id. Render headings, question meaning and choices in the current conversation language. Keep a unique exact submitted-label to recorded choice_id mapping for this call; include the choice id in each label if labels would collide. Preserve each recorded choice meaning and consequence. Omit options when no choices were recorded; do not invent choices or force a count. Follow the currently exposed parameters; do not add a wait duration unless actually requested.',
+        answer_rule: 'Use only the actual native tool result linked to its callId, or an actual continued user-question-reply linked to that callId. Keep its raw selected/custom content and original source reference. Nonempty custom input takes precedence over selected labels and must not invent choice_id. Otherwise map only an exact submitted option label to its recorded choice_id. Empty, skipped, missing, aborted or pending/timed results do not confirm a choice or approval; preserve the current pending wait. Before recording a late answer, reread current context and validate the question id, question_digest and exact approval_target revision/digest against the original call; changed targets require fresh clarification. A fixture answer is test data, not human approval. Record process-answer and linked decisions before dependent progress.',
+      },
+      capability_rule: 'Use only the current tool names and their current schemas. Historical tool names are not current capabilities.',
+    });
+  } catch {
+    return 'Current native tool capabilities are unavailable. Inspect the current catalog before using remembered tools.';
+  }
 }
 
 export async function mountChild(ctx, lifetime, plugin, config) {
@@ -217,9 +266,11 @@ export async function mountChild(ctx, lifetime, plugin, config) {
 export async function apply(ctx) {
   // Production dependencies resolve only during native activation. Built-in-only
   // imports keep transport/ownership tests runnable without source node_modules.
-  const [HooksCodex, McpClient, SkillFilesystem, subprocess] = await Promise.all([
+  const [HooksCodex, McpClient, SkillFilesystem, subprocess, NativeDelegate, NativeRetry, llm] = await Promise.all([
     import('@deepseek-ai/dsh-hooks-codex'), import('@deepseek-ai/dsh-mcp-client'),
     import('@deepseek-ai/dsh-skill-filesystem'), import('@deepseek-ai/dsh-subprocess'),
+    import('@deepseek-ai/dsh-tool-subagent'),
+    import('@deepseek-ai/dsh-llm-retry'), import('@deepseek-ai/dsh-llm'),
   ]);
   const environment = subprocess.scrubbedParentEnv;
   if (typeof environment !== 'function') throw new Error('The native credential scrubber is unavailable.');
@@ -231,8 +282,25 @@ export async function apply(ctx) {
   const lifetime = ownedLifetime(() => fs.rmSync(directory, { recursive: true, force: true }));
   try {
     ctx.effect(() => () => lifetime.cleanup());
+    const readAgent = agent => readContextSync({ cwd: ctx.workingDirectory.get(agent.session), session_id: agent.session.header.id }, {
+      python, helper: path.join(releaseRoot, 'skills/task-workflow/scripts/deepseek_context.py'), environment,
+    });
+    const recovery = taskScopedRecovery({ readCurrent: readAgent,
+      toolSchemas: agent => ctx.tools.schemas(agent), streamChunks: llm.assistantStreamChunks });
+    lifetime.drain(() => recovery.close());
+    ctx.on('agent/assistant-stream', payload => recovery.observeFrame(payload));
+    ctx.on('session/event', (session, event) => recovery.observeEvent(session, event));
+    ctx.on('agent/disposed', ({ agent }) => recovery.disposeAgent(agent));
+    const ownedRetry = { name: 'task-workflow-request-recovery', Config: NativeRetry.Config, inject: NativeRetry.inject,
+      apply(child, config) { return NativeRetry.apply(child.extend({ on(event, listener, options) {
+        return recovery.on(child, event, listener, options);
+      } }), config); } };
+    await mountChild(ctx, lifetime, ownedRetry, {});
     fs.writeFileSync(configPath, JSON.stringify(resolvedHookConfig(releaseRoot, python)), { mode: 0o600 });
-    const hooks = hookOwnership();
+    const nativeSubagents = ctx.get('subagents');
+    const registry = nativeSubagents ? ownedDelegations(nativeSubagents) : undefined;
+    if (registry) lifetime.drain(() => registry.close());
+    const hooks = hookOwnership(registry ? { humanMessages: (...args) => registry.humanMessages(...args) } : {});
     lifetime.drain(() => hooks.close());
     const ownedBridge = { name: 'task-workflow-official-hooks', Config: HooksCodex.Config, inject: HooksCodex.inject,
       apply(child, config) {
@@ -251,16 +319,39 @@ export async function apply(ctx) {
       args: [path.join(releaseRoot, 'skills/task-workflow/scripts/mcp_server.py')], cwd: releaseRoot, failOnStartupError: true });
     await mountChild(ctx, lifetime, SkillFilesystem, { providerName: 'task-workflow', includeDefaultRoots: false,
       customSkillDirs: [path.join(releaseRoot, 'skills')] });
+    if (registry) {
+      const ownedNative = { name: 'task-workflow-owned-delegation', Config: NativeDelegate.Config, inject: NativeDelegate.inject,
+        apply(child, config) {
+          const facades = delegationFacades(child, registry);
+          for (const tool of collectionTools(registry)) child.tools.register(tool);
+          const systemPrompt = new Proxy(child.systemPrompt, { get(target, property) {
+            if (property === 'section') return section => target.section(section.name !== `tool:${DELEGATE_TOOL}` ? section : {
+              ...section, text(context) {
+                const visible = typeof section.text === 'function' ? section.text(context) : section.text;
+                return visible ? WORKFLOW_SCOPE + ' For authorized Task Workflow delegation, start the owned child with task_workflow_delegate. Collect its final return value and cleanup through task_workflow_wait before reporting completion. Use task_workflow_cancel only for an owned activation. Meaningful early worker questions and findings remain valid messages.' : '';
+              },
+            });
+            const value = Reflect.get(target, property, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+          } });
+          return NativeDelegate.apply(child.extend({ ...facades, systemPrompt }), config);
+        } };
+      await mountChild(ctx, lifetime, ownedNative, { provider: OWNED_PROVIDER, toolName: DELEGATE_TOOL });
+      ctx.on('agent/disposed', ({ agent }) => registry.disposeParent(agent));
+    }
+    lifetime.context(ctx.systemPrompt.context({ name: 'task-workflow:capabilities', order: 901, required: true, interpolate: false,
+      text(context) { return lifetime.closed || !context.agent ? '' : capabilityContext(ctx, context.agent, registry); } }));
     lifetime.context(ctx.systemPrompt.context({ name: 'task-workflow:current', order: 900, required: true, interpolate: false,
       text(context) {
         if (lifetime.closed || !context.agent) return '';
         try {
-          const session = context.agent.session;
-          return readContextSync({ cwd: ctx.workingDirectory.get(session), session_id: session.header.id }, {
-            python, helper: path.join(releaseRoot, 'skills/task-workflow/scripts/deepseek_context.py'), environment,
-          });
-        } catch { return UNAVAILABLE_NOTICE; }
+          const value = readAgent(context.agent);
+          recovery.captureContext(context.agent, value);
+          return value;
+        } catch { recovery.captureContext(context.agent, UNAVAILABLE_NOTICE); return UNAVAILABLE_NOTICE; }
       } }));
+    lifetime.context(ctx.systemPrompt.context({ name: 'task-workflow:request-recovery', order: 902, required: true, interpolate: false,
+      text(context) { return lifetime.closed || !context.agent ? '' : recovery.context(context.agent); } }));
   } catch (error) {
     await lifetime.cleanup();
     throw error;

@@ -13,6 +13,8 @@ import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
+import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -20,6 +22,7 @@ import tempfile
 import threading
 import time
 import uuid
+import weakref
 
 
 VERSION = 1
@@ -156,6 +159,17 @@ def git_identity(path):
         fail("git_identity", "The checkout must be registered by Git at its exact path and branch.")
     return {"path": str(path), "common_dir": str(common), "branch": branch}
 
+def init_checkout_identity(value, field):
+    """Explain enrollment path roles while retaining existing identity guards."""
+    try:
+        return git_identity(value)
+    except WorkflowError as error:
+        if error.code in ('invalid_path', 'git_identity', 'git_error'):
+            fail(error.code, 'init.' + field + ' must name an existing absolute Git checkout root, '
+                 'not a project label or a subdirectory. Use the actual checkout path; '
+                 'put the short task label in task_id. ' + error.message)
+        raise
+
 def git_registered_worktree(repository, path, branch=None):
     for record in git(repository, "worktree", "list", "--porcelain", "-z").split("\0\0"):
         fields = dict(field.split(" ", 1) if " " in field else (field, "") for field in record.split("\0") if field)
@@ -205,19 +219,225 @@ def sync_dir(path):
     except OSError:
         pass
 
+_LOCK_THREADS = weakref.WeakValueDictionary()
+_LOCK_THREADS_MUTEX = threading.Lock()
+_LOCK_HOST = None
+_LOCK_RETIRED = {}
+_LOCK_FDS = set()
+
+
+def reset_lock_process():
+    global _LOCK_THREADS, _LOCK_THREADS_MUTEX, _LOCK_HOST, _LOCK_RETIRED, _LOCK_FDS
+    for fd in _LOCK_FDS:
+        try:
+            os.close(fd)  # Close the child's copy without unlocking the parent.
+        except OSError:
+            pass
+    _LOCK_THREADS = weakref.WeakValueDictionary()
+    _LOCK_THREADS_MUTEX = threading.Lock()
+    _LOCK_HOST = None
+    _LOCK_RETIRED = {}
+    _LOCK_FDS = set()
+
+
+if hasattr(os, 'register_at_fork'):
+    os.register_at_fork(before=lambda: _LOCK_THREADS_MUTEX.acquire(),
+                        after_in_parent=lambda: _LOCK_THREADS_MUTEX.release(),
+                        after_in_child=reset_lock_process)
+
+
+def lock_host_identity():
+    """Identify the current kernel/PID namespace; unknown hosts cannot reap."""
+    global _LOCK_HOST
+    if _LOCK_HOST is None:
+        identity = None
+        try:
+            boot = Path('/proc/sys/kernel/random/boot_id').read_text().strip()
+            namespace = os.stat('/proc/self/ns/pid').st_ino
+            if boot:
+                identity = {'boot': boot, 'pid_namespace': namespace}
+        except OSError:
+            if sys.platform == 'darwin':
+                result = subprocess.run(['sysctl', '-n', 'kern.bootsessionuuid'], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                if result.returncode == 0 and result.stdout.strip():
+                    identity = {'boot': result.stdout.decode('ascii').strip()}
+        _LOCK_HOST = {'hostname': socket.gethostname(), 'identity': identity}
+    return _LOCK_HOST
+
+
+def lock_uid():
+    return os.getuid() if hasattr(os, 'getuid') else None
+
+
+def lock_file_operation(fd, acquire, platform=None):
+    """Use nonblocking OS locks; unsupported filesystems fail closed."""
+    if (platform or os.name) == 'nt':
+        import msvcrt
+        if os.fstat(fd).st_size == 0:
+            os.write(fd, b'\0')
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_NBLCK if acquire else msvcrt.LK_UNLCK, 1)
+    else:
+        import fcntl
+        fcntl.flock(fd, (fcntl.LOCK_EX | fcntl.LOCK_NB) if acquire else fcntl.LOCK_UN)
+
+
+def lock_identity(info):
+    return info.st_dev, info.st_ino
+
+
 @contextlib.contextmanager
-def lock(path):
+def lock_guard(path):
+    # This inode is persistent. Unlinking it would split the advisory lock.
+    guard = path.with_name(path.name + '.guard')
+    fd = None
+    acquired = False
     try:
-        path.mkdir()
-    except FileExistsError:
-        fail("locked", "A conservative workflow lock exists; verify its owner manually before removal.")
-    try:
-        atomic_json(path / "owner.json", {"pid": os.getpid(), "host": __import__("socket").gethostname(), "created": now()})
+        with _LOCK_THREADS_MUTEX:
+            fd = os.open(str(guard), os.O_RDWR | os.O_CREAT | getattr(os, 'O_NOFOLLOW', 0), 0o600)
+            _LOCK_FDS.add(fd)
+        opened, named = os.fstat(fd), guard.lstat()
+        if (not stat.S_ISREG(opened.st_mode) or stat.S_ISLNK(named.st_mode)
+                or lock_identity(opened) != lock_identity(named)
+                or (lock_uid() is not None and opened.st_uid != lock_uid())):
+            fail('unsafe_lock', 'The workflow lock guard is not an owned regular file.')
+        try:
+            lock_file_operation(fd, True)
+        except OSError as error:
+            if error.errno in (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK):
+                fail('locked', 'A workflow operation holds this lock.')
+            fail('lock_unavailable', 'The filesystem could not provide the required workflow lock guard.')
+        acquired = True
+        if lock_identity(guard.lstat()) != lock_identity(opened):
+            fail('unsafe_lock', 'The workflow lock guard changed during acquisition.')
         yield
     finally:
-        # Never delete an unexpected file or recursively remove another owner's lock.
-        (path / "owner.json").unlink(missing_ok=True)
-        path.rmdir()
+        primary = sys.exc_info()[1]
+        failure = None
+        if fd is not None:
+            try:
+                if acquired:
+                    lock_file_operation(fd, False)
+            except OSError as error:
+                failure = error
+            finally:
+                try:
+                    with _LOCK_THREADS_MUTEX:
+                        _LOCK_FDS.discard(fd)
+                        os.close(fd)
+                except OSError as error:
+                    failure = failure or error
+        if failure is not None and primary is None:
+            fail('lock_cleanup_failed', 'The workflow lock guard could not be released cleanly.')
+
+
+def read_lock_claim(path):
+    """Read a complete regular claim without following a replaced marker."""
+    try:
+        named = path.lstat()
+        if not stat.S_ISREG(named.st_mode) or (lock_uid() is not None and named.st_uid != lock_uid()):
+            return None
+        fd = os.open(str(path), os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        with os.fdopen(fd, 'r') as stream:
+            opened = os.fstat(stream.fileno())
+            if lock_identity(opened) != lock_identity(named):
+                return None
+            owner = json.load(stream)
+        if (not isinstance(owner, dict) or owner.get('lock_protocol') != 2
+                or not isinstance(owner.get('token'), str)
+                or re.fullmatch('[0-9a-f]{32}', owner['token']) is None
+                or type(owner.get('pid')) is not int or owner['pid'] < 1
+                or owner.get('uid') != lock_uid()):
+            return None
+        return lock_identity(opened), owner
+    except (OSError, ValueError):
+        return None
+
+
+def dead_lock_owner(owner):
+    # Same-host serialization is sufficient: foreign clients never reap a
+    # claim. Atomic publication still excludes them without assuming that
+    # every NFS client shares the advisory guard implementation.
+    host = lock_host_identity()
+    if not host['identity'] or owner.get('host') != host:
+        return False
+    try:
+        os.kill(owner['pid'], 0)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+    return False  # A reused live PID remains protected.
+
+
+def remove_lock_claim(path, identity, token):
+    current = read_lock_claim(path)
+    if current is None or current[0] != identity or current[1]['token'] != token:
+        fail('lock_changed', 'The workflow lock identity changed; its replacement was preserved.')
+    path.unlink()
+    sync_dir(path.parent)
+
+
+@contextlib.contextmanager
+def lock(path):
+    path = path.parent.resolve() / path.name
+    with _LOCK_THREADS_MUTEX:
+        local = _LOCK_THREADS.setdefault(str(path), threading.Lock())
+    if not local.acquire(blocking=False):
+        fail('locked', 'A workflow operation in this process holds the lock.')
+    try:
+        with lock_guard(path):
+            if path.exists() or path.is_symlink():
+                previous = read_lock_claim(path)
+                retired = _LOCK_RETIRED.get(str(path))
+                own_retired = bool(previous and retired == (previous[0], previous[1]['token'])
+                                   and previous[1]['pid'] == os.getpid())
+                if previous is None or not (own_retired or dead_lock_owner(previous[1])):
+                    fail('locked', 'A live, foreign or unidentified workflow lock exists; verify quiescence before manual recovery.')
+                remove_lock_claim(path, previous[0], previous[1]['token'])
+            _LOCK_RETIRED.pop(str(path), None)
+            owner = {'lock_protocol': 2, 'pid': os.getpid(), 'uid': lock_uid(),
+                     'host': lock_host_identity(), 'token': uuid.uuid4().hex, 'created': now()}
+            fd, temporary = tempfile.mkstemp(prefix='.' + path.name + '.owner-', dir=str(path.parent))
+            candidate = Path(temporary)
+            identity = lock_identity(os.fstat(fd))
+            published = False
+            try:
+                with os.fdopen(fd, 'wb') as stream:
+                    stream.write(canonical(owner) + b'\n'); stream.flush(); os.fsync(stream.fileno())
+                # Cleanup checks exact identity even if interruption occurs
+                # immediately after link returns or a foreign client wins.
+                published = True
+                try:
+                    os.link(str(candidate), str(path))
+                except FileExistsError:
+                    fail('locked', 'Another workflow operation acquired this lock.')
+                except OSError:
+                    fail('lock_unavailable', 'Atomic workflow lock publication is unavailable.')
+                sync_dir(path.parent)
+                candidate.unlink()
+                yield
+            finally:
+                primary = sys.exc_info()[1]
+                failure = None
+                try:
+                    if published:
+                        remove_lock_claim(path, identity, owner['token'])
+                except (OSError, WorkflowError) as error:
+                    failure = error
+                    current = read_lock_claim(path)
+                    if current and current[0] == identity and current[1]['token'] == owner['token']:
+                        _LOCK_RETIRED[str(path)] = (identity, owner['token'])
+                try:
+                    candidate.unlink(missing_ok=True)
+                except OSError as error:
+                    failure = failure or error
+                if failure is not None and primary is None:
+                    if isinstance(failure, WorkflowError):
+                        raise failure
+                    fail('lock_cleanup_failed', 'The workflow lock could not be removed; its complete owner claim was preserved.')
+    finally:
+        local.release()
 
 def store_dir(root, create=False):
     root = existing_dir(root)
@@ -467,6 +687,20 @@ def command_schemas():
             if key in properties:
                 properties[key]["items"] = {"type": "string"}
         properties.update(copy.deepcopy(PROCESS_SCHEMAS.get(name, {})))
+        properties['root'].update(description='Existing absolute directory that owns .task-workflow state. Normally use the base project checkout root; preserve an already registered state root.',
+                                  examples=['/absolute/path/to/project'])
+        if name == 'init':
+            guidance = {
+                'project': ('Existing absolute path to the base Git checkout root, not a project name. It must be registered by Git at this exact path and branch.', ['/absolute/path/to/project']),
+                'worktree': ('Existing absolute Git checkout root in the same repository. Omit for base enrollment; a dedicated task checkout must be project/.worktrees/task-id.', ['/absolute/path/to/project/.worktrees/report-export']),
+                'owned_worktree': ('Whether this task owns the dedicated worktree and may later clean it up. Omit or use false for the base checkout. worktree-prepare records ownership when it creates the task checkout.', [False]),
+                'task_id': ('Short task identifier, not a directory path or project name.', ['report-export']),
+                'session_id': ('Actual current host session identifier, when available. Do not invent a session identifier.', None),
+            }
+            for key, (description, examples) in guidance.items():
+                properties[key]['description'] = description
+                if examples is not None:
+                    properties[key]['examples'] = examples
         if name == "item-review":
             for key in ("verdict", "requirements_verdict", "quality_verdict"):
                 properties[key]["enum"] = ["accept", "changes"]
@@ -1770,8 +2004,8 @@ def registered_task_trees(state):
     return result
 
 def init(args, root, store):
-    project = git_identity(args['project'])
-    worktree = git_identity(args.get('worktree', args['project']))
+    project = init_checkout_identity(args['project'], 'project')
+    worktree = init_checkout_identity(args.get('worktree', args['project']), 'worktree')
     if worktree['common_dir'] != project['common_dir']:
         fail('git_identity', 'Project and worktree must share a Git repository.')
     expected = Path(project['path']) / '.worktrees' / args['task_id']
@@ -1780,7 +2014,9 @@ def init(args, root, store):
     if root != Path(project['path']) and (within(root, Path(project['path'])) or within(root, Path(worktree['path']))):
         fail('state_inside_checkout', 'Use the project root or an external state root.')
     if args.get('owned_worktree') and worktree['path'] == project['path']:
-        fail('invalid_ownership', 'The base checkout cannot be declared an owned task worktree.')
+        fail('invalid_ownership', 'The base checkout cannot be declared an owned task worktree. '
+             'For base enrollment, omit worktree or set it to project, and omit owned_worktree '
+             'or set it to false. Use worktree-prepare for the dedicated task checkout after plan approval.')
     environments = {}
     for name, value in args.get('environment_registry', {}).items():
         identifier(name)
@@ -1915,25 +2151,42 @@ def resource_associations(store, resource_id):
                 result.append((state, run_id, current))
     return result
 
+def exited_resource_reference(current):
+    """Use committed execution identity, independently of artifact acceptance."""
+    execution = current.get('execution')
+    try:
+        return bool(current.get('start_validated') and current.get('finished') and isinstance(execution, dict)
+            and type(execution.get('returncode')) is int
+            and execution.get('token') == current['token']
+            and execution.get('argv_digest') == digest(current['argv'])
+            and execution.get('manifest_digest') == current['manifest_digest']
+            and execution.get('environment_digest') == digest(environment_identity(current['environment']))
+            and execution.get('log') == str(Path(current['directory']) / 'execution.log')
+            and isinstance(execution.get('log_sha256'), str) and re.fullmatch('[0-9a-f]{64}', execution['log_sha256'])
+            and isinstance(execution.get('receipt_digest'), str) and re.fullmatch('[0-9a-f]{64}', execution['receipt_digest']))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
+
+
 def resource_projection(store, resource):
     associated = resource_associations(store, resource['resource_id'])
-    owner_state, _ = load_events(task_dir(store, resource['owner_task_id']))
-    states = {state['task_id']: state for state, _, _ in associated}
-    states[owner_state['task_id']] = owner_state
-    live = any(current['status'] not in TERMINAL_RUNS for _, _, current in associated)
-    closed = all(state.get('task_lifecycle', {}).get('status') == 'complete' and state['task_lifecycle'].get('closure')
-                 and all(exp.get('status') == 'complete' for exp in state.get('experiments', {}).values())
-                 and all(current['status'] in TERMINAL_RUNS for current in state['runs'].values()) for state in states.values())
-    refs = [{'task_id': state['task_id'], 'run_id': run_id, 'status': current['status']} for state, run_id, current in associated]
+    refs = []
+    for state, run_id, current in associated:
+        exited = current['status'] == 'awaiting_artifacts' and exited_resource_reference(current)
+        blocking = current['status'] not in TERMINAL_RUNS and not exited
+        refs.append({'task_id': state['task_id'], 'run_id': run_id, 'status': current['status'],
+                     'release_blocking': blocking,
+                     'exit_receipt_digest': current.get('execution', {}).get('receipt_digest') if exited else None})
+    live = any(reference['release_blocking'] for reference in refs)
     key = digest({'resource_id': resource['resource_id'], 'resource_version': resource['version'],
-                  'tasks': {name: {'version': value['version'], 'closure': value.get('task_lifecycle')} for name, value in states.items()}, 'refs': refs})
-    evidence_valid = all(successful_scope_proof(state) for state in states.values())
+                  'refs': refs})
     released = resource.get('release', {}).get('status') == 'released'
     uncertain = resource.get('release', {}).get('status') in ('releasing', 'unknown')
     current = observation_current(resource)
-    eligible = bool(closed and evidence_valid and not live and current and resource['observed_state'] == 'available' and not released and not uncertain)
-    reason = ('released' if released else 'release_unknown' if uncertain else 'live_references' if live else
-              'aggregate_scope_open' if not closed else 'accepted_evidence_changed' if not evidence_valid else 'observation_required' if not current or resource['observed_state'] != 'available' else 'eligible')
+    permitted = resource.get('can_release') is True
+    eligible = bool(permitted and not live and current and resource['observed_state'] == 'available' and not released and not uncertain)
+    reason = ('released' if released else 'release_unknown' if uncertain else 'release_permission_required' if not permitted else
+              'live_references' if live else 'observation_required' if not current or resource['observed_state'] != 'available' else 'eligible')
     derived = ('released' if released else 'unknown' if uncertain else 'in_use' if live else 'releasable' if eligible else
                'available' if current and resource['observed_state'] == 'available' else 'unknown')
     return {**copy.deepcopy(resource), 'derived_state': derived, 'observed_at': resource['observation']['time'],
@@ -2007,6 +2260,7 @@ def make_observation(args):
 def observe_resource(args, state, store):
     resource, previous = read_resource(store, args['resource_id'])
     resource_owner(resource, args['actor'])
+    require_coordinator(args, state)
     if resource['owner_task_id'] != state['task_id']:
         fail('resource_owner', 'Use the resource owning task for this operation.')
     if resource['version'] != args['expected_resource_version']:
@@ -2014,6 +2268,12 @@ def observe_resource(args, state, store):
     validate_capabilities(args['capabilities'])
     if resource.get('release', {}).get('status') == 'released':
         fail('resource_released', 'A released resource cannot be revived; register a new resource identity.')
+    if ('can_release' in args) != ('authorization_source' in args):
+        fail('resource_permission_source_required', 'A permission correction requires can_release and its actual authorization_source together.')
+    if 'can_release' in args:
+        if resource.get('release'):
+            fail('resource_sealed', 'A release intent seals permission changes; reconcile the existing action.')
+        resource.update(can_release=args['can_release'], permission_source=text_value(args['authorization_source']))
     resource.update(observed_state=args['observed_state'], capabilities=args['capabilities'], observation=make_observation(args))
     commit_event(resource_dir(store, args['resource_id']), resource, previous, 'resource-observe', args['actor'])
     return {'resource': resource_projection(store, resource)}
@@ -2038,7 +2298,7 @@ def release_resource(args, root, store):
         if args['expected_resource_version'] != resource['version'] or args['eligibility_key'] != projection['eligibility']['key']:
             fail('stale_resource_decision', 'Resource observations or aggregate references changed; inspect release eligibility again.')
         if resource.get('release') or not projection['eligibility']['eligible']:
-            fail('release_denied', 'Release requires closed aggregate scopes and resolved run references without a prior release intent.')
+            fail('release_denied', 'Release requires permission, current available resource evidence and resolved capacity references without a prior release intent.')
         token = 'release-' + uuid.uuid4().hex
         resource['release'] = {'status': 'releasing', 'token': token, 'argv': args['argv'], 'actor': args['actor'],
             'authorization_source': text_value(args['authorization_source']), 'eligibility_key': args['eligibility_key'], 'time': now()}
@@ -2085,7 +2345,7 @@ def _dispatch(operation, arguments):
         existing_dir(args["root"])
         return {"ok": True, "commands": command_schemas()}
     if operation == "init":
-        args['_managed_paths'] = bootstrap_project(git_identity(args['project']))
+        args['_managed_paths'] = bootstrap_project(init_checkout_identity(args['project'], 'project'))
     root, store = store_dir(args["root"], create=operation == "init")
     if operation == "init":
         return init(args, root, store)
@@ -2311,7 +2571,7 @@ COMMANDS.update({
     "run-observe": mutation("Observe an externally provided matching actual execution receipt.", {"run_id": "string", "receipt_path": "string", "evidence": "array"}),
     "run-reconcile": mutation("Reconcile a matching execution receipt without repeating execution.", {"run_id": "string"}, {"receipt_path": "string", "evidence": "array"}),
     "resource-register": mutation("Register an opaque project resource with ownership and observation evidence.", {"resource_id": "string", "handle": "string", "provided_by": "string", "can_release": "boolean", "authorization_source": "string", "ownership_evidence": "array", "capabilities": "object", "observed_state": "string", "evidence": "array"}, {"valid_for_seconds": "integer"}),
-    "resource-observe": mutation("Record fresh observed resource facts.", {"resource_id": "string", "expected_resource_version": "integer", "capabilities": "object", "observed_state": "string", "evidence": "array"}, {"valid_for_seconds": "integer"}),
+    "resource-observe": mutation("Record observed resource facts and an optional explicitly sourced permission correction.", {"resource_id": "string", "expected_resource_version": "integer", "capabilities": "object", "observed_state": "string", "evidence": "array"}, {"valid_for_seconds": "integer", "can_release": "boolean", "authorization_source": "string"}),
     "resource-status": spec("Project resource facts and derived release eligibility.", {"resource_id": "string"}),
     "resource-release": mutation("Record explicit release intent before one supplied release action.", {"resource_id": "string", "expected_resource_version": "integer", "eligibility_key": "string", "authorization_source": "string", "argv": "array"}, {"timeout": "integer"}),
     "resource-release-reconcile": mutation("Confirm matching release receipt and evidence without repeating release.", {"resource_id": "string", "expected_resource_version": "integer", "token": "string", "evidence": "array"}),

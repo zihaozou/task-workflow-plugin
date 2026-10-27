@@ -18,10 +18,21 @@ experiment execution. The current Git project owns state under `.task-workflow`.
 Plugin installation, hook delivery, status reads, and old state grant no action
 authorization.
 
-Discover the program's `schema` operation before mutations. Use its actual
+Discover current host tools before selecting a transport. Refresh discovery
+after activation, reconnect, or an unavailable-tool error. Discover the program's `schema` operation before mutations. Use its actual
 arguments, operation names, versions, and guards. Record task identity,
 coordinator, authorization source, and the completion contract. Pass the
 host-provided session identifier when available.
+
+`init.root` is an existing absolute state directory, normally the project
+checkout root. `init.project` is the existing absolute base Git checkout root,
+not its display name. Use `task_id` for a short task label. For base enrollment,
+omit `worktree` and use `owned_worktree:false`; `worktree-prepare` creates the
+dedicated checkout after plan approval. An existing dedicated checkout must be
+`project/.worktrees/task-id` in the same Git repository. Ownership permits later
+cleanup of that dedicated checkout; it never applies to the base checkout.
+Correct an initialization error using the current schema and its repair message;
+keep the selected project, state root, and actual session identity consistent.
 
 Resolve private conventions from instructions already loaded by the host. Pass
 concrete environment, storage, execution, and resource values as explicit
@@ -54,6 +65,77 @@ Set `question.purpose` to `playback_confirmation` when asking the user to confir
 a playback. Use `clarification` for clarification questions; omission retains
 that default for compatibility. The program selects playback reply fields and
 waits from this persisted field, not from question identifiers or text heuristics.
+
+### Complete process-question request
+
+This is a complete illustrative `process-question` argument object, not a task
+requirement or user authorization. Replace the root, task ID, actor, current
+version, proposal references, and content with actual task values. Record sourced
+intent and exploration first. The question fields belong inside `question`;
+common operation arguments remain outside it. Use no choices for an open
+question when appropriate; this example's meaningful alternatives do not set a
+required count. An empty scope is valid before requirements are recorded.
+
+<!-- process-question-complete-example -->
+```json
+{
+  "root": "/absolute/path/to/project",
+  "task_id": "report-export",
+  "actor": "coordinator",
+  "expected_version": 3,
+  "question": {
+    "id": "q-json-destination",
+    "text": "Where should JSON output be written?",
+    "rationale": "The destination determines how the receiving script reads results.",
+    "scope": [],
+    "important": true,
+    "purpose": "clarification",
+    "source": {
+      "kind": "agent",
+      "reference": "Illustrative coordinator proposal; replace with the actual discussion reference."
+    },
+    "choices": [
+      {
+        "id": "stdout",
+        "text": "Write JSON to stdout",
+        "consequence": "The receiving script reads stdout while the existing CSV behavior stays unchanged.",
+        "source": {
+          "kind": "agent",
+          "reference": "Illustrative coordinator proposal; replace with the actual discussion reference."
+        }
+      },
+      {
+        "id": "file",
+        "text": "Write JSON to a separate file",
+        "consequence": "The receiving script reads that file while the existing CSV behavior stays unchanged.",
+        "source": {
+          "kind": "agent",
+          "reference": "Illustrative coordinator proposal; replace with the actual discussion reference."
+        }
+      }
+    ]
+  }
+}
+```
+
+After an `ok:true` result, obtain the pending question and digest from its
+`dialogue_contract`. Use the available native question tool with that exact
+question identity. Render the question and unique choice labels in the user's
+conversation language while preserving their meaning and the label-to-choice-ID
+mapping. Retain the native call association in existing evidence or source
+references. If the capability is unavailable or unsuitable, ask the same question
+in prose and keep the same wait. A recording failure does not authorize asking a
+new, unrecorded question.
+
+Match an immediate native result or a later reply's actual call ID and question
+ID to that recorded question; recheck its digest before `process-answer`.
+Preserve nonempty custom human text with its actual source and no invented
+`choice_id`. An empty custom value does not mask a valid selected choice.
+Otherwise map only an unambiguous selection to the original choice ID. Empty,
+skipped, pending, stale, or ambiguous answers do not establish agreement. Update
+source-linked decisions before dependent work. Native Spec/Plan approval cards
+refer to the live approval target after the reviewed revision is shown; no new
+discussion question is required in an approval stage.
 
 Use the fixed readable layouts in [../templates/conversation.md](../templates/conversation.md):
 concise bold labels, one point per bullet, tables for comparisons, and the exact
@@ -132,7 +214,9 @@ explicit user approval. If a lighter Codex model is unavailable, use an availabl
 Sol model; do not silently escalate to Astra.
 
 On DeepSeek Harness, inherit the host's current authorized provider/model route,
-including the user's selected Flash route. Use the host's native subagent tools.
+including the user's selected Flash route. Use the exposed plugin-owned
+`task_workflow_delegate`, `task_workflow_wait`, and `task_workflow_cancel` tools
+for Task Workflow workers. They retain native provider, model, and preset checks.
 Query selectable child routes only when its native model-discovery tool is
 actually exposed and selection is authorized. Do not guess an internal Flash
 identifier, pass OpenAI model names, enable model-selection settings, or silently
@@ -140,6 +224,14 @@ change the cost or provider. Record the actual selected route and delegation
 evidence. An unavailable capability is a gap to resolve, not a capability to
 claim. Reuse a worker only while its model remains suitable, and use a lighter
 available authorized route when appropriate. Workers do not delegate recursively.
+A worker result, automatic wakeup, resume, or injected context is not a new
+human request. Continue the recorded task from its actual wait state.
+Track every owned activation handle. Wait for its actual terminal result and
+cleanup before final delivery; a report sent while its activation is still
+running does not settle it. Cancel an owned activation explicitly when its work
+should end, then await settlement. Report cleanup failures as unresolved.
+A progress reply can state that work remains active; do not declare completion
+or rely on another automatic parent turn to finish the handoff.
 Review actual evidence and avoid agent turns or review cycles that add none.
 Do not claim a capability or parallel execution that did not occur.
 See [deepseek.md](deepseek.md) for native installation, context, and execution
@@ -199,10 +291,35 @@ can reference pending capacity after identity, ownership, release seal, and
 capability checks. Actual start requires a fresh available observation and no
 conflicting execution reported by the provider. The plugin imposes no blanket
 active-run limit; actual provider availability and scheduling govern admission.
-Finishing a run records its
-execution outcome; it does not grant release permission. Release requires
-explicit permission, verified ownership, and resolved active references.
-Reconcile uncertain release results before retrying. A status read has no
+Resource eligibility is specific to that capacity. `resource-status` exposes
+recorded release permission, a fresh available observation, and matching run
+references. Planned, preparing, prepared, queued, running, and unknown execution
+still holds capacity. An `awaiting_artifacts` run can stop holding it only when
+committed exit evidence matches its actual execution identity. Task or experiment
+closure and artifact acceptance are separate outcomes, not substitutes for a
+capacity observation; an unrelated open task does not hold this resource.
+
+Finishing execution does not grant release permission or per-action authority.
+A persistent retention choice is distinct from the owner's actual permission:
+retain persistent capacity until the applicable explicit release instruction,
+without silently rewriting `can_release` to represent that lifecycle choice.
+Apply the user's loaded private lifecycle policy as well as current eligibility.
+A release-on-success policy can require whole-scope acceptance even when compute
+capacity is already free. The public program does not encode that private policy.
+
+If owner permission was recorded incorrectly, use the existing
+`resource-observe` operation with both `can_release` and `authorization_source`.
+The pair requires the actual source, current task and resource versions, the
+current coordinator, recorded resource owner and matching user identity, plus
+the normal fresh observation, capabilities, and evidence. A permission correction
+is recorded in event history; it does not release capacity or authorize the
+release action. The pair cannot change permission after a release intent is
+sealed. Do not silently migrate an old flag or infer permission from availability.
+
+Actual release still uses the exact release command, a fresh authorization
+source, and the existing intent seal and receipt. Preserve active and uncertain
+references. Reconcile an uncertain result against its actual receipt before any
+retry; never repeat an already committed release. A status read has no
 provisioning or release effect.
 
 An experiment has one research goal and may contain many frozen runs. A
@@ -319,12 +436,37 @@ interruption, compare the canonical record with actual files, Git refs,
 resource ownership, execution receipts, and artifacts. Check whether an action
 happened before replaying it. Record discrepancies and recover from evidence.
 
+### Lock ownership and conservative recovery
+
+Current locks use a complete regular-file claim at the existing lock pathname
+and a persistent advisory `.guard` sibling. The owner record contains a unique claim token,
+user ID, process ID, and host-instance identity; acquisition and cleanup also
+check file identity. An existing guard file alone is not an active claim. Keep
+it in place.
+
+Under the advisory guard, automatic recovery is limited to a recognized complete
+claim with a proven dead process on the same host instance, or this process's
+exact retired claim after its critical section ended and cleanup failed. The
+latter requires the in-memory retired token and file identity; a live active
+claim cannot be treated as retired. Age alone does not establish abandonment.
+Empty or unknown files, foreign-host claims, and legacy lock directories remain
+blocked for manual inspection at a verified quiescent boundary. A missing or
+unverifiable owner is not permission to remove a lock. Inspect actual process/workload ownership and the lock identity
+before authorized recovery. Do not delete a live claim or a persistent guard.
+There is no new lock-recovery API or timeout-based unlock rule.
+
 ## 6. Report and complete
 
 Lead updates with a new result or next action. Include material verification,
 output locations, and unresolved decisions. Explain unfamiliar terms on first
 use, keep names stable, and explain rename mappings. Keep routine updates short
 and avoid duplicate reports.
+Routine progress and questions name the actual work or user decision. Omit
+internal rule/skill citations, process apologies, and administrative narration.
+Correct a wrong question directly; keep authority and verification details in
+the task record. Honor higher-priority mandatory permission disclosures when
+they actually apply.
+
 
 Before large execution, state scope and stopping conditions. Review actual
 results and required cleanup before declaring completion. Report integration,

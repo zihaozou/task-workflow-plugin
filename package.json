@@ -1,6 +1,6 @@
 {
   "name": "@local/task-workflow",
-  "version": "0.1.9",
+  "version": "0.1.13",
   "private": true,
   "type": "module",
   "description": "Shared Task Workflow tools, skills and context for DeepSeek Harness.",
@@ -22,6 +22,9 @@
     "@deepseek-ai/cordis": "~4.0.5",
     "@deepseek-ai/dsh-mcp-client": "0.2.1-rc.3",
     "@deepseek-ai/dsh-skill-filesystem": "0.2.1-rc.3",
-    "@deepseek-ai/dsh-subprocess": "0.2.1-rc.3"
+    "@deepseek-ai/dsh-subprocess": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-tool-subagent": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-llm-retry": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-llm": "0.2.1-rc.3"
   }
 }

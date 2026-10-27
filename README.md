@@ -78,6 +78,13 @@ acceptance. Plans assign concrete file responsibilities, interfaces, action step
 named checks, verification commands or inspection targets, and expected outcomes.
 Lifecycle phase names alone do not form an implementation plan.
 There is no fixed number of questions or alternative designs.
+Replies start with the current stage's content, with headings in the user's
+conversation language. The English templates define meaning, not fixed display
+strings. A successfully recorded question uses an available, eligible native
+question card. Answers map to the exact recorded question; nonempty custom text
+takes precedence, and skipped or pending responses preserve the wait. When the host
+cannot provide the card, the same recorded question remains available in prose.
+
 
 Questions are recorded before sending. Actual answer sources and affected
 requirements and decisions are updated before dependent progression. New important
@@ -128,8 +135,31 @@ skill, and a read-only provider for current project/session context during nativ
 request assembly. The provider refreshes context after same-turn compaction;
 host-sourced context does not become human authority or force another turn.
 It adds synchronous read cost before model admission.
+The adapter exposes `task_workflow_delegate`, `task_workflow_wait`, and
+`task_workflow_cancel` for owned Task Workflow workers. These reuse native
+provider/model checks and return explicit activation handles. The coordinator
+waits for actual child settlement and cleanup before final delivery. The host's
+original subagent tools and the 53 shared Python operations remain available.
+Discover current tools and schemas after activation or reconnect. A remembered
+tool name, child report, or background notice is not a new human instruction.
 
-Build and inspect the candidate archive from the reviewed checkout:
+For an authorized active workflow, the adapter automatically recovers the exact
+provider failure for invalid tool-argument JSON in a complete, closed set of
+known workflow MCP calls. It checks the current typed failed attempt and request
+identity, delegates once to native recovery, and uses
+its narrow retry fallback only when native recovery declines. It rechecks the
+same task and request after native backoff. Every retry is another model request
+and can add input/output charges. Eligible recovery continues until valid output
+or cancellation; it does not change provider/model selection or global provider
+retry settings. Failed attempts remain recorded and completed task work is
+preserved. Schema, tool, and workflow guard errors are not this recovery target.
+Human actual-session testing remains separate from isolated recovery checks.
+
+
+
+Build and inspect the candidate archive from the reviewed checkout. Keep its
+actual filename and checksum in a durable release directory outside experiment
+outputs, such as the host DSH data home under `releases/task-workflow/0.1.13/`:
 
 ```sh
 npm pack --dry-run --json
@@ -142,6 +172,20 @@ its profile backed up, install the reviewed archive through the supported comman
 ```sh
 dsh plugin --profile desktop add --save-exact "$archive_path"
 ```
+
+After an authorized release is pushed, prefer its immutable Git commit as the
+saved installation origin:
+
+```sh
+dsh plugin --profile desktop add --save-exact \
+  'git+https://github.com/zihaozou/task-workflow-plugin.git#<approved-release-commit>'
+```
+
+Verify that exact Git-installed payload against the reviewed archive. If Git
+retrieval is unavailable, retain the checksum-verified archive in the durable
+release directory as the installation source. Candidate artifacts retain their
+test identity; a successful candidate test does not authorize publication.
+
 
 The bundle adds to existing profile composition. Preserve other bundles, rows,
 settings, credentials, and earlier runtime files. Package presence and saved

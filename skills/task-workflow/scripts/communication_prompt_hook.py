@@ -31,7 +31,12 @@ NAMING_REMINDER = (
     "at its first user-visible use, and explain the mapping when renaming. "
     "Avoid repeated definitions for familiar, user-used, or already explained "
     "terms. Clarify terms within the normal reply; use a small two-column table "
-    "only when useful. Add no separate review notice or extra turn."
+    "only when useful. Add no separate review notice or extra turn. "
+    "State the concrete current work or user decision. Omit routine internal "
+    "rule/skill citations, process apologies, and administrative narration. "
+    "Correct a wrong question directly without blaming the skill. "
+    "Honor higher-priority mandatory permission "
+    "disclosures when they actually apply."
 )
 
 

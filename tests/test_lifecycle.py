@@ -100,7 +100,7 @@ class LifecycleTests(Fixture):
         preserved.unlink()
         self.assertEqual(self.prepare()['run']['status'], 'prepared')
 
-    def test_changed_or_deleted_accepted_artifacts_block_success_and_release(self):
+    def test_changed_or_deleted_accepted_artifacts_block_success_but_not_idle_capacity_release(self):
         self.integrated()
         self.op('resource-register', resource_id='resource', handle='artifact-fixture', provided_by='user', can_release=True,
             authorization_source='Fixture permission', ownership_evidence=['Owner evidence'], capabilities={},
@@ -135,10 +135,14 @@ class LifecycleTests(Fixture):
                 artifact.write_text('changed')
             else:
                 artifact.unlink()
-            self.assertEqual(query()['eligibility']['reason'], 'accepted_evidence_changed')
-            self.error('release_denied', lambda: self.op('resource-release', resource_id='resource', expected_resource_version=eligible['version'],
-                eligibility_key=eligible['eligibility']['key'], authorization_source='Fixture release', argv=[sys.executable, '-c', 'pass']))
+            self.assertTrue(query()['eligibility']['eligible'])
+            self.assertEqual(query()['eligibility']['key'], eligible['eligibility']['key'])
             artifact.write_bytes(original)
+        artifact.write_text('Changed accepted artifact does not hold exited capacity')
+        eligible = query()
+        released = self.op('resource-release', resource_id='resource', expected_resource_version=eligible['version'],
+            eligibility_key=eligible['eligibility']['key'], authorization_source='Explicit idle resource release', argv=[sys.executable, '-c', 'pass'])
+        self.assertEqual(released['resource']['release']['status'], 'unknown')
 
     def test_unbounded_default_waits_without_timeout(self):
         self.integrated(); current = self.prepare()['run']

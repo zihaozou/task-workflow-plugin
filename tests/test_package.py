@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'skills/task-workflow/scripts'
 NATIVE_RELEASE_FILES = {
     'README.md', 'package.json', 'adapters/deepseek/index.js',
-    'adapters/deepseek/cordis.patch.yml', 'hooks/hooks.json',
+    'adapters/deepseek/cordis.patch.yml', 'adapters/deepseek/delegation.js',
+    'adapters/deepseek/recovery.js', 'hooks/hooks.json',
     'skills/task-workflow/SKILL.md', 'skills/task-workflow/agents/openai.yaml',
     'skills/task-workflow/references/workflow.md',
     'skills/task-workflow/references/deepseek.md',
@@ -39,7 +40,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.9')
+        self.assertEqual(manifest['version'], '0.1.13')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -62,7 +63,7 @@ class PackageTests(unittest.TestCase):
         self.assertIn("name: '@local/task-workflow'", (ROOT / patch).read_text())
         for dependency in ('dsh-hooks-codex', 'dsh-hook-protocol'):
             self.assertEqual(manifest['dependencies']['@deepseek-ai/' + dependency], '0.2.1-rc.3')
-        for dependency in ('dsh-mcp-client', 'dsh-skill-filesystem', 'dsh-subprocess'):
+        for dependency in ('dsh-mcp-client', 'dsh-skill-filesystem', 'dsh-subprocess', 'dsh-tool-subagent', 'dsh-llm-retry', 'dsh-llm'):
             self.assertEqual(manifest['peerDependencies']['@deepseek-ai/' + dependency], '0.2.1-rc.3')
         for relative in NATIVE_RELEASE_FILES:
             with self.subTest(path=relative):
@@ -77,7 +78,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(packages), 1)
         package = packages[0]
         self.assertEqual(package['name'], '@local/task-workflow')
-        self.assertEqual(package['version'], '0.1.9')
+        self.assertEqual(package['version'], '0.1.13')
         paths = [entry['path'] for entry in package['files']]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(set(paths), NATIVE_RELEASE_FILES)

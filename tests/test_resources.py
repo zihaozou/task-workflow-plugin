@@ -1,5 +1,6 @@
 """Generic resource ownership, aggregate eligibility, and release recovery."""
 import json
+import copy
 from pathlib import Path
 import sys
 import subprocess
@@ -24,17 +25,17 @@ class ResourceTests(Fixture):
         return self.op('resource-release', resource_id='resource', expected_resource_version=resource['version'],
             eligibility_key=resource['eligibility']['key'], authorization_source='Explicit fixture release', argv=command)
 
-    def test_planned_references_and_aggregate_closure_block_release(self):
+    def test_only_matching_capacity_references_block_release_while_scope_remains_open(self):
         self.approved(); self.register()
         resource = self.resource()
-        self.assertEqual(resource['derived_state'], 'available')
-        self.assertEqual(resource['eligibility']['reason'], 'aggregate_scope_open')
+        self.assertEqual(resource['derived_state'], 'releasable')
+        self.assertEqual(resource['eligibility']['reason'], 'eligible')
         self.op('run-plan', run_id='planned', resource_id='resource', requirements={'units': 1})
         self.assertEqual(self.resource()['derived_state'], 'in_use')
         self.error('release_denied', lambda: self.release(self.resource(), [sys.executable, '-c', 'pass']))
         self.op('run-cancel', run_id='planned', reason='Fixture cancelled')
-        self.close()
         self.assertEqual(self.resource()['derived_state'], 'releasable')
+        self.assertEqual(self.state['task_lifecycle']['status'], 'open')
 
     def test_capability_owner_and_stale_decision_guards(self):
         self.approved(); resource = self.register()
@@ -43,8 +44,77 @@ class ResourceTests(Fixture):
             observed_state='available', capabilities={'units': 2}, evidence=['Observation'], valid_for_seconds=60))
         self.close()
         stale = self.resource()
-        self.op('task-reopen', reason='Reopen invalidates release eligibility')
+        self.op('task-reopen', reason='Unrelated task state does not hold idle capacity')
+        self.assertEqual(stale['eligibility']['key'], self.resource()['eligibility']['key'])
+        self.observe()
         self.error('stale_resource_decision', lambda: self.release(stale, [sys.executable, '-c', 'pass']))
+
+    def test_permission_correction_is_explicit_versioned_and_separate_from_release(self):
+        self.approved()
+        resource = self.op('resource-register', resource_id='resource', handle='permission-fixture', provided_by='user', can_release=False,
+            authorization_source='User supplied capacity without release permission', ownership_evidence=['Owner evidence'],
+            capabilities={}, observed_state='available', evidence=['Current idle evidence'])['resource']
+        self.assertFalse(resource['eligibility']['eligible'])
+        self.assertEqual(resource['eligibility']['reason'], 'release_permission_required')
+        self.error('release_permission_required', lambda: self.release(resource, [sys.executable, '-c', 'pass']))
+        fields = dict(resource_id='resource', expected_resource_version=resource['version'], capabilities={},
+                      observed_state='available', evidence=['Observed idle for the permission correction'])
+        for partial in ({'can_release': True}, {'authorization_source': 'Actual user permission'}):
+            self.error('resource_permission_source_required', lambda: self.op('resource-observe', **fields, **partial))
+        self.assertEqual(self.resource()['version'], resource['version'])
+        corrected = self.op('resource-observe', **fields, can_release=True,
+            authorization_source='Actual user granted release permission for this handle')['resource']
+        self.assertEqual(corrected['version'], resource['version'] + 1)
+        self.assertEqual(corrected['permission_source'], 'Actual user granted release permission for this handle')
+        self.assertNotIn('release', corrected)
+        self.assertTrue(corrected['eligibility']['eligible'])
+        self.error('revision_conflict', lambda: self.op('resource-observe', **fields, can_release=False,
+            authorization_source='Stale permission edit'))
+        released = self.release(corrected, [sys.executable, '-c', 'pass'])['resource']
+        self.error('resource_sealed', lambda: self.op('resource-observe', resource_id='resource', expected_resource_version=released['version'],
+            capabilities={}, observed_state='available', evidence=['Observation'], can_release=False, authorization_source='Too late to alter this action'))
+        _, store = w.store_dir(str(self.root))
+        record, _ = w.read_resource(store, 'resource')
+        self.assertTrue(record['can_release'])
+        events = [json.loads(path.read_text()) for path in (w.resource_dir(store, 'resource') / 'events').glob('*.json')]
+        self.assertTrue(any(event['operation'] == 'resource-observe' for event in events))
+
+    def test_exited_awaiting_artifacts_frees_capacity_with_external_receipt_identity(self):
+        self.integrated(); self.register()
+        current = self.prepare(resource_id='resource')['run']
+        dispatched = self.op('run-dispatch', run_id='run')
+        completed = subprocess.run(dispatched['runner_argv'], capture_output=True)
+        self.assertEqual(completed.returncode, 0, completed.stderr.decode())
+        self.refresh()
+        receipt = Path(current['directory']) / 'execution-receipt.json'
+        external = self.base / 'external-exit-receipt.json'
+        external.write_bytes(receipt.read_bytes()); receipt.unlink()
+        self.op('run-observe', run_id='run', receipt_path=str(external), evidence=['Actual external receipt location'])
+        self.assertEqual(self.state['runs']['run']['status'], 'awaiting_artifacts')
+        self.assertTrue(w.exited_resource_reference(self.state['runs']['run']))
+        self.observe()
+        resource = self.resource()
+        self.assertTrue(resource['eligibility']['eligible'])
+        self.assertFalse(resource['run_refs'][0]['release_blocking'])
+        self.assertEqual(self.state['task_lifecycle']['status'], 'open')
+        # Artifact/log acceptance remains a separate fact from the committed exit.
+        (Path(current['directory']) / 'result.txt').unlink()
+        external.unlink()
+        self.assertTrue(self.resource()['eligibility']['eligible'])
+        self.release(self.resource(), [sys.executable, '-c', 'pass'])
+
+    def test_unverified_or_mismatched_awaiting_artifacts_remains_a_capacity_blocker(self):
+        self.approved(); self.register()
+        self.op('run-plan', run_id='pending', resource_id='resource')
+        state = copy.deepcopy(self.state)
+        current = state['runs']['pending']
+        current.update(status='awaiting_artifacts', execution={'returncode': 0}, environment=None)
+        _, store = w.store_dir(str(self.root))
+        resource, _ = w.read_resource(store, 'resource')
+        with mock.patch.object(w, 'resource_associations', return_value=[(state, 'pending', current)]):
+            projected = w.resource_projection(store, resource)
+        self.assertEqual(projected['eligibility']['reason'], 'live_references')
+        self.assertTrue(projected['run_refs'][0]['release_blocking'])
 
     def test_release_intent_receipt_and_no_repeat(self):
         self.approved(); self.register(); self.close()

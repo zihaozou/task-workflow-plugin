@@ -4,10 +4,36 @@ Use these stage layouts with the mandatory sequence in the main skill. Use the
 user's language in conversation and English summaries in the one task record.
 Bold labels group content; bullets state one finding, choice, action, or result.
 Use a table when relationships are easier to compare. Put the exact recorded
-question or approval request in its own final section. Omit empty optional groups
+question or approval request in its own final section or native question card. Omit empty optional groups
 and routine statements about recording, provenance, or workflow mechanics.
 Show useful source links beside relevant findings. Keep machine identifiers,
 state versions, and digests in the record. Readable revision names remain visible.
+Start directly with the current stage's content. Do not preface it by announcing
+that a template or workflow will be used. Render all display headings and card
+labels in the current conversation language. The English labels below identify
+semantic roles; keep the source templates and persisted summaries in English.
+Use the matching section, not the full set of layouts. A direct status reply
+answers status and keeps the existing wait; it does not repeat a full Spec/Plan.
+Routine replies name the actual work or user decision. Omit internal rule/skill
+citations, process apologies, and administrative narration. Correct a wrong
+question directly rather than attributing it to the skill. Keep authority and
+checks in the record. Preserve a higher-priority mandatory permission disclosure
+when it actually applies.
+
+
+After the required recording succeeds, use the host's available, eligible native
+question capability (`ask_user_question` on DeepSeek Harness) for the final
+Question, Confirm, or Approve action.
+The prose supplies stage context; the native card supplies the question and real
+choices. Do not duplicate a displayed card as another plain-text question.
+The question text in these examples illustrates card content. If the native
+capability is unavailable or unsuitable, use that same recorded question in the
+final prose section. Preserve its exact ID and digest; do not invent choices.
+Match the native call and question identity before recording an answer. Nonempty custom
+text overrides selected labels; an empty, skipped, or pending response keeps the
+wait and does not approve anything. Spec/Plan cards bind to the current approval
+target after the exact reviewed revision is shown.
+
 
 Read the fresh `dialogue_contract` before each related reply. Follow its
 `applicability`, `reply_fields`, `presentation`, `required_recording_steps`,

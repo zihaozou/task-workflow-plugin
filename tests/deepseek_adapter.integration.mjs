@@ -10,7 +10,11 @@ import { createHash, randomUUID } from 'node:crypto';
 import {
   quoteShellArgument, runProcessSync, readContextSync, resolvedHookConfig,
   ownedLifetime, mountChild, releaseRoot, UNAVAILABLE_NOTICE, hookTransportShell, HOOK_TRUNCATED_NOTICE,
+  hookOwnership, capabilityContext,
+  WORKFLOW_SCOPE,
 } from '../adapters/deepseek/index.js';
+import { ownedDelegations, collectionTools, delegationFacades, DELEGATE_TOOL } from '../adapters/deepseek/delegation.js';
+import { taskScopedRecovery, INVALID_TOOL_JSON, CONTEXT_PREFIX } from '../adapters/deepseek/recovery.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const temporary = () => fs.mkdtempSync(path.join(os.tmpdir(), 'task-workflow-test-'));
@@ -159,6 +163,301 @@ test('ownership: pending child drain precedes config removal and cleanup is idem
   await assert.rejects(failed.cleanup(), /cleanup did not complete/);
 });
 
+test('dialogue: only human hook input changes, while whole downstream batches survive', async () => {
+  let wrapper;
+  const prompts = [];
+  const hooks = hookOwnership();
+  hooks.on({ on(event, handler) { assert.equal(event, 'agent/pre-step'); wrapper = handler; return () => {}; } }, 'agent/pre-step', async (payload, next) => {
+    prompts.push(payload.messages);
+    return next();
+  });
+  const human = { id: 'human', source: { kind: 'user' }, content: [{ type: 'text', text: 'Actual human prompt' }] };
+  const report = { id: 'report', source: { kind: 'agent-message', senderSessionId: 'child' }, content: [{ type: 'text', text: 'New worker finding' }] };
+  const settlement = { id: 'settled', source: { kind: 'subagent-settled', senderSessionId: 'child' }, content: [{ type: 'text', text: 'New final report' }] };
+  for (const messages of [[report], [settlement], [human, report, settlement], [human]]) {
+    const downstream = { kind: 'enter', messages, startsRequestSeries: true };
+    const actual = await wrapper({ agent: { id: 'parent' }, messages }, async () => downstream);
+    assert.equal(actual, downstream);
+    assert.equal(actual.messages, messages);
+  }
+  assert.deepEqual(prompts, [[human], [human]]);
+  await hooks.close();
+});
+
+test('dialogue: each capability snapshot uses the actual current native catalog', () => {
+  const agent = { id: 'parent' };
+  let names = ['wait_agent', 'native-tool'];
+  const ctx = { tools: { schemas(actual) { assert.equal(actual, agent); return names.map(name => ({ name })); } } };
+  assert.ok(capabilityContext(ctx, agent).includes('wait_agent'));
+  names = ['native-tool', 'task_workflow_delegate', 'task_workflow_wait', 'task_workflow_cancel'];
+  const current = capabilityContext(ctx, agent);
+  assert.ok(!current.includes('wait_agent'));
+  assert.ok(current.includes('"owned_delegation_available":true'));
+});
+
+test('dialogue: native question guidance follows current schema and runtime root ownership', () => {
+  const agent = { id: 'resumed-child', session: { header: { parentSessionId: 'historical-parent' } } };
+  const schema = { name: 'ask_user_question', parameters: { type: 'object', properties: { questions: { type: 'array' } } } };
+  let schemas = [schema], roots = [agent];
+  const ctx = { tools: { schemas: () => schemas }, get(name) { assert.equal(name, 'agents'); return { roots: () => roots }; } };
+  const read = () => JSON.parse(capabilityContext(ctx, agent).split(': ', 2)[1]).user_question;
+  const current = read();
+  assert.equal(current.available, true); assert.equal(current.current_root, true);
+  assert.deepEqual(current.parameters, schema.parameters);
+  for (const rule of ['actually call ask_user_question', 'status-only request', 'approval_target', 'discussion-only']) assert.ok(current.protocol.includes(rule));
+  for (const rule of ['unique exact submitted-label', 'current conversation language', 'Omit options', 'do not add a wait duration']) assert.ok(current.identity.includes(rule));
+  for (const rule of ['custom input takes precedence', 'Empty, skipped', 'pending/timed', 'user-question-reply', 'question_digest', 'approval_target', 'original call']) assert.ok(current.answer_rule.includes(rule));
+  roots = [];
+  assert.equal(read().current_root, false);
+  schemas = [];
+  assert.equal(read().available, false); assert.equal(read().parameters, undefined);
+});
+
+test('dialogue: workflow scope and current native skill loader remain explicit for unbound requests', () => {
+  const agent = { id: 'unbound' };
+  let schemas = [{ name: 'skill', parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] } }];
+  const ctx = { tools: { schemas: () => schemas } };
+  const read = () => JSON.parse(capabilityContext(ctx, agent).split(': ', 2)[1]);
+  const current = read();
+  assert.equal(current.applicability, WORKFLOW_SCOPE);
+  for (const rule of ['ordinary conversation', 'direct answer', 'preserves the current stage/wait', 'no authority']) assert.ok(current.applicability.includes(rule));
+  assert.equal(current.skill_loader.available, true);
+  assert.deepEqual(current.skill_loader.arguments, { name: 'task-workflow' });
+  assert.deepEqual(current.skill_loader.parameters, schemas[0].parameters);
+  assert.equal(current.skill_loader.main_skill_path, path.join(ROOT, 'skills/task-workflow/SKILL.md'));
+  assert.ok(fs.existsSync(current.skill_loader.main_skill_path));
+  assert.ok(current.skill_loader.instruction.includes('supported file-reading tool'));
+  assert.ok(current.skill_loader.instruction.includes('does not prove the skill was read'));
+  schemas = [];
+  assert.equal(read().skill_loader.available, false); assert.equal(read().skill_loader.arguments, undefined);
+  assert.deepEqual(read().owned_activations, []);
+  schemas = [{ name: 'skill', parameters: { type: 'object', properties: { other: { type: 'string' } } } }];
+  assert.equal(read().skill_loader.arguments, undefined);
+});
+
+const nativeParent = id => ({ id, session: { header: { id } } });
+
+function recoveryFixture({ names = ['mcp__task-workflow__process-question'], message = INVALID_TOOL_JSON } = {}) {
+  let current = { root: '/synthetic', session_id: 'recovery-session', task: { task_id: 'recovery-task', session_id: 'recovery-session', task_status: 'open' }, dialogue_contract: { state_version: 7 } };
+  let catalog = names.map(name => ({ name, parameters: { type: 'object' } }));
+  const text = () => CONTEXT_PREFIX + JSON.stringify(current);
+  const agent = { session: { header: { id: 'recovery-session' }, requestHeader: () => ({ config: { provider: 'fixture' }, tools: names.map(name => ({ name, parameters: { type: 'object' } })) }) } };
+  const recovery = taskScopedRecovery({ readCurrent: text, toolSchemas: () => catalog, streamChunks: (stream, type) => stream.filter(chunk => chunk.type === type) });
+  const signal = new AbortController();
+  const payload = { agent, turn: 1, step: 2, provider: 'fixture', failure: { code: 'MALFORMED_RESPONSE', message }, signal: signal.signal,
+    retryPolicy: { mode: 'normal', maxRetries: 0, retryableCodes: ['MALFORMED_RESPONSE'], initialDelayMs: 3, maxDelayMs: 9, jitterRatio: 0 } };
+  function capture(seq = 10, { closed = true } = {}) {
+    recovery.captureContext(agent, text());
+    recovery.observeFrame({ agent, frame: { type: 'start', attemptId: 'attempt-' + seq, turn: 1, step: 2 } });
+    const stream = names.flatMap((name, index) => [{ type: 'block-start', index, blockType: 'tool-call' }, ...(closed ? [{ type: 'block-end', index, block: { type: 'tool-call', name, arguments: 'not repaired' } }] : [])]);
+    stream.push({ type: 'finish', reason: { kind: 'error', failure: payload.failure } });
+    recovery.observeEvent(agent.session, { type: 'assistant/attempt', seq, data: { turn: 1, step: 2, stream } });
+    recovery.observeFrame({ agent, frame: { type: 'end', attemptId: 'attempt-' + seq, outcome: { kind: 'committed', eventType: 'assistant/attempt', seq } } });
+  }
+  const wrap = listener => { let result; recovery.on({ on(event, callback) { result = callback; return () => {}; } }, 'agent/request-error', listener); return result; };
+  return { recovery, agent, payload, signal, capture, wrap, changeBinding() { current.dialogue_contract.state_version++; }, changeCatalog() { catalog = []; }, changeSchema() { catalog[0] = { ...catalog[0], parameters: { type: 'object', required: ['new_field'] } }; } };
+}
+
+test('recovery: exact durable workflow attempts extend finite policy without repairing arguments', async () => {
+  const fixture = recoveryFixture();
+  const original = structuredClone(fixture.payload.retryPolicy);
+  let downstream = 0, scheduled = 0;
+  const callback = fixture.wrap(async (payload, next) => {
+    assert.deepEqual(payload.retryPolicy, { mode: 'always', initialDelayMs: 3, maxDelayMs: 9, jitterRatio: 0 });
+    assert.equal(await next(), undefined); scheduled++; return { kind: 'retry' };
+  });
+  for (let index = 0; index < 8; index++) {
+    fixture.capture(10 + index);
+    assert.equal((await callback(fixture.payload, async () => { downstream++; })).kind, 'retry');
+  }
+  assert.equal(scheduled, 8); assert.equal(downstream, 8);
+  assert.deepEqual(fixture.payload.retryPolicy, original);
+  assert.ok(fixture.recovery.context(fixture.agent).includes('No tools from that failed response were dispatched'));
+  assert.ok(!fixture.recovery.context(fixture.agent).includes('not repaired'));
+  fixture.recovery.close();
+});
+
+test('recovery: unknown, mixed, incomplete, unbound and other failures retain native handling', async () => {
+  for (const options of [{ names: ['native_other'] }, { names: ['mcp__task-workflow__process-question', 'native_other'] }, { message: 'DeepSeek Messages stream: invalid block index' }, { incomplete: true }, { unbound: true }, { policy: false }]) {
+    const fixture = recoveryFixture(options);
+    fixture.capture(10, { closed: !options.incomplete });
+    if (options.unbound) fixture.recovery.captureContext(fixture.agent, 'unavailable');
+    if (options.policy === false) fixture.payload.retryPolicy = undefined;
+    // An unavailable current read must fail closed even with a prior captured binding.
+    if (options.unbound) fixture.changeBinding();
+    let owned = 0, native = 0;
+    const result = await fixture.wrap(async () => { owned++; })(fixture.payload, async () => { native++; return { kind: 'native' }; });
+    assert.deepEqual(result, { kind: 'native' }); assert.equal(owned, 0); assert.equal(native, 1);
+    fixture.recovery.close();
+  }
+});
+
+test('recovery: a consumed hint cannot survive a later unrelated failed attempt', async () => {
+  const fixture = recoveryFixture(); fixture.capture();
+  const callback = fixture.wrap(async (_payload, next) => { await next(); return { kind: 'retry' }; });
+  await callback(fixture.payload, async () => undefined);
+  assert.ok(fixture.recovery.context(fixture.agent));
+  fixture.payload.failure = { code: 'MALFORMED_RESPONSE', message: 'Different native malformed response' };
+  fixture.capture(11);
+  assert.equal(fixture.recovery.context(fixture.agent), '');
+  const native = { kind: 'retry' };
+  assert.equal(await callback(fixture.payload, async () => native), native);
+  assert.equal(fixture.recovery.context(fixture.agent), ''); fixture.recovery.close();
+});
+
+test('recovery: post-backoff task/catalog guards affect only added retries and disposal aborts own wait', async () => {
+  for (const mutate of ['changeBinding', 'changeCatalog', 'changeSchema']) {
+    const fixture = recoveryFixture(); fixture.capture();
+    const entered = deferred(), release = deferred();
+    const callback = fixture.wrap(async (_payload, next) => { await next(); entered.resolve(); await release.promise; return { kind: 'retry' }; });
+    const pending = callback(fixture.payload, async () => undefined);
+    await entered.promise; fixture[mutate](); release.resolve();
+    assert.equal(await pending, undefined);
+    fixture.recovery.close();
+  }
+  const inherited = recoveryFixture(); inherited.capture();
+  const decision = { kind: 'retry' };
+  const preserved = await inherited.wrap(async (_payload, next) => next())(inherited.payload, async () => { inherited.changeBinding(); return decision; });
+  assert.equal(preserved, decision, 'Existing downstream retry retains object identity and authority');
+  inherited.recovery.close();
+  const unloading = recoveryFixture(); unloading.capture();
+  const waiting = deferred(), release = deferred();
+  const nativePending = unloading.wrap(async (payload, next) => {
+    const result = await next();
+    return payload.signal.aborted ? undefined : result;
+  })(unloading.payload, async () => { waiting.resolve(); await release.promise; return decision; });
+  await waiting.promise; unloading.recovery.close(); release.resolve();
+  assert.equal(await nativePending, decision, 'Plugin disposal cannot revoke a completed native-owned retry decision');
+  const cleanupFailure = recoveryFixture(); cleanupFailure.capture();
+  assert.equal(await cleanupFailure.wrap(async (_payload, next) => { await next(); throw new Error('Owned listener cleanup failed'); })(cleanupFailure.payload, async () => decision), decision);
+  cleanupFailure.recovery.close();
+  for (const stop of ['caller', 'plugin']) {
+    const fixture = recoveryFixture(); fixture.capture(); const entered = deferred();
+    const pending = fixture.wrap(async (payload, next) => {
+      await next(); entered.resolve();
+      await new Promise(resolve => payload.signal.addEventListener('abort', resolve, { once: true }));
+      return undefined;
+    })(fixture.payload, async () => undefined);
+    await entered.promise;
+    if (stop === 'caller') fixture.signal.abort(); else fixture.recovery.close();
+    assert.equal(await pending, undefined); fixture.recovery.close();
+  }
+});
+
+test('delegation: initial handoff publication is excluded without excluding a later real human', async () => {
+  const publication = deferred(), result = deferred();
+  let spec;
+  const registry = ownedDelegations({ async startActivation(actual) {
+    spec = actual; await publication.promise;
+    return { childId: actual.childId, messageId: 'handoff', result: result.promise, dispose: async () => { result.resolve({ output: [], stopReason: 'aborted' }); } };
+  } });
+  const parent = nativeParent('parent');
+  const start = registry.start({ provider: 'spawn', request: { parent }, signal: new AbortController().signal });
+  await Promise.resolve();
+  assert.equal(spec.delivery, 'caller');
+  const handoff = { id: 'handoff', source: { kind: 'user' } };
+  const human = { id: 'later-human', source: { kind: 'user' } };
+  const report = { id: 'worker-report', source: { kind: 'agent-message' } };
+  let admitted = false;
+  const input = registry.humanMessages({ id: spec.childId }, [handoff, human, report]).then(value => { admitted = true; return value; });
+  await Promise.resolve(); assert.equal(admitted, false);
+  publication.resolve(); await start;
+  assert.deepEqual(await input, [human]);
+  await registry.close();
+});
+
+test('delegation: caller abort leaves work intact and completion waits for exact cleanup', async () => {
+  const result = deferred(), cleanup = deferred(), disposing = deferred();
+  let calls = 0;
+  const registry = ownedDelegations({ async startActivation(spec) {
+    return { childId: spec.childId, messageId: 'initial', result: result.promise,
+      async dispose() { calls++; disposing.resolve(); await cleanup.promise; } };
+  } });
+  const parent = nativeParent('parent');
+  const handle = await registry.start({ request: { parent } });
+  const owned = registry.descriptor(handle.childId, parent);
+  const caller = new AbortController();
+  const abandoned = registry.wait(owned.handleId, parent, caller.signal);
+  caller.abort(); await assert.rejects(abandoned, { name: 'AbortError' }); assert.equal(calls, 0);
+  const final = { output: [{ type: 'text', text: 'Exact native closing report' }], stopReason: 'completed', structured: { checked: true } };
+  let collected = false;
+  const wait = registry.wait(owned.handleId, parent).then(value => { collected = true; return value; });
+  result.resolve(final); await disposing.promise;
+  assert.equal(collected, false);
+  cleanup.resolve();
+  const outcome = await wait;
+  assert.equal(outcome.result, final); assert.equal(outcome.cleanup.status, 'complete'); assert.equal(calls, 1);
+  await registry.close();
+});
+
+test('delegation: foreign handles are rejected and concurrent cancel/wait targets only the owned activation', async () => {
+  const result = deferred(); let disposed = 0;
+  const registry = ownedDelegations({ async startActivation(spec) {
+    return { childId: spec.childId, messageId: 'initial', result: result.promise,
+      async dispose() { disposed++; result.resolve({ output: [], stopReason: 'aborted' }); } };
+  } });
+  const parent = nativeParent('parent'), foreign = nativeParent('parent');
+  const handle = await registry.start({ request: { parent } });
+  const owned = registry.descriptor(handle.childId, parent);
+  await assert.rejects(registry.cancel(owned.handleId, foreign), /unavailable/);
+  await assert.rejects(registry.cancel('unowned-native-child', parent), /unavailable/);
+  assert.equal(disposed, 0);
+  const [canceled, waited] = await Promise.all([registry.cancel(owned.handleId, parent), registry.wait(owned.handleId, parent)]);
+  assert.equal(canceled, waited); assert.equal(canceled.result.stopReason, 'aborted'); assert.equal(disposed, 1);
+  await registry.close();
+});
+
+test('delegation: unload drains a racing owned start and exposes cleanup failures', async () => {
+  const publication = deferred(), result = deferred(); let disposed = 0;
+  const registry = ownedDelegations({ async startActivation(spec) {
+    await publication.promise;
+    return { childId: spec.childId, messageId: 'initial', result: result.promise,
+      async dispose() { disposed++; result.resolve({ output: [], stopReason: 'aborted' }); } };
+  } });
+  const start = registry.start({ request: { parent: nativeParent('parent') } });
+  const rejected = assert.rejects(start, /disposed during startup/);
+  const close = registry.close(); publication.resolve();
+  await rejected; await close; assert.equal(disposed, 1);
+  const failed = ownedDelegations({ async startActivation(spec) {
+    return { childId: spec.childId, messageId: 'initial', result: Promise.resolve({ output: [], stopReason: 'completed' }),
+      async dispose() { throw new Error('Synthetic owned cleanup failure'); } };
+  } });
+  const parent = nativeParent('other');
+  const handle = await failed.start({ request: { parent } });
+  const outcome = await failed.wait(failed.descriptor(handle.childId, parent).handleId, parent);
+  assert.equal(outcome.result.stopReason, 'completed'); assert.equal(outcome.cleanup.status, 'failed');
+  const token = failed.descriptor(handle.childId, parent).handleId;
+  await assert.rejects(failed.disposeParent(parent), /cleanup did not complete/);
+  assert.deepEqual(failed.context(parent), []);
+  await assert.rejects(failed.wait(token, parent), /unavailable/);
+  await assert.rejects(failed.close(), /cleanup did not complete/);
+});
+
+test('delegation: parent disposal aborts unpublished work and releases completed handle entries', async () => {
+  const entered = deferred();
+  const registry = ownedDelegations({ async startActivation(spec) {
+    entered.resolve();
+    await new Promise((resolve, reject) => { spec.signal.addEventListener('abort', () => reject(new Error('Synthetic native startup aborted')), { once: true }); });
+  } });
+  const parent = nativeParent('parent');
+  const start = registry.start({ request: { parent } });
+  const rejected = assert.rejects(start, /startup aborted/);
+  await entered.promise; await registry.disposeParent(parent); await rejected;
+  assert.deepEqual(registry.context(parent), []);
+  await assert.rejects(registry.start({ request: { parent } }), /disposed/);
+  await registry.close();
+  const complete = ownedDelegations({ async startActivation(spec) {
+    return { childId: spec.childId, messageId: 'initial', result: Promise.resolve({ output: [], stopReason: 'completed' }), dispose: async () => {} };
+  } });
+  const live = nativeParent('live');
+  const handle = await complete.start({ request: { parent: live } });
+  const descriptor = complete.descriptor(handle.childId, live);
+  await complete.wait(descriptor.handleId, live); await complete.disposeParent(live);
+  assert.deepEqual(complete.context(live), []);
+  await assert.rejects(complete.wait(descriptor.handleId, live), /unavailable/);
+  await complete.close();
+});
+
 async function execute(command, args, { cwd, env, receipt } = {}) {
   const child = spawn(command, args, { cwd, env, stdio: ['ignore', 'pipe', 'pipe'] });
   const output = [], errors = [];
@@ -236,28 +535,40 @@ class Sdk {
   }
 }
 
-function probeSource() {
+function probeSource(questions = false) {
   return `// Private deterministic test provider; native tools, hooks and runtime are real.
 import { appendFileSync, readFileSync } from 'node:fs';
-import { LlmAdapter } from '@deepseek-ai/dsh-llm';
+import { LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm';
 const receipt = value => appendFileSync(process.env.TW_TEST_RECEIPT, JSON.stringify(value) + '\\n');
-export const inject = ['llm', 'skills', 'tools', 'workingDirectory', 'compaction'];
+export const inject = ['llm', 'skills', 'tools', 'workingDirectory', 'compaction'${questions ? ", 'agents', 'userQuestions'" : ''}];
 export async function apply(ctx) {
   const workspace = process.cwd();
   const task = 'native-task';
   let compactAfterTool = false;
   let observedAgent;
+  let questionMode = 'skip';
+  if (${questions}) ctx.on('user-questions/request', async request => {
+    receipt({kind:'synthetic-question-request',questions:request.questions,session:request.agent.id,currentRoot:ctx.get('agents').roots().includes(request.agent)});
+    if(questionMode==='pending') { const {UserQuestionError}=await import('@deepseek-ai/dsh-user-questions'); throw new UserQuestionError('Synthetic unanswered batch','ASK_TIMED_OUT'); }
+    return {answers:request.questions.map(question=>({id:question.id,selected:questionMode==='skip'?[]:[question.options[0].label],...(questionMode==='custom'?{custom:'Use a third destination; preserve original source.'}:{})}))};
+  });
   const source = reference => ({kind:'user',reference});
   const req = (id,text,kind,reference,confirmation=reference) => ({id,text,kind,status:'confirmed',source:source(reference),confirmation_source:source(confirmation)});
   const action = (op,args,mutation=true) => ({op,args,mutation});
   function actions(stage) {
     if(stage==='BOOTSTRAP') return [
+      ...(${questions}?[action('@skill',{name:'task-workflow'},false)]:[]),
       action('schema',{root:workspace},false),
       action('init',{root:workspace,project:workspace,task_id:task,title:'Synthetic JSON report task',actor:'native-test',authorization_source:'synthetic-bootstrap-request',session_id:'native-session',integration_required:false},false),
       action('process-intent',{intent:{goal:'Add JSON output while preserving CSV.',why:'Synthetic script compatibility fixture.',success_criteria:['JSON is readable and CSV behavior remains.'],source:source('synthetic-bootstrap-request')}}),
       action('process-exploration',{exploration:{current_behavior:'The fixture README records an existing CSV command.',evidence:['README.md'],unknowns:[]}}),
-      action('process-question',{question:{id:'output-choice',text:'Where should NONPROMPTED_FIRST_CANARY JSON output go?',rationale:'The destination defines the output interface.',scope:[],important:true,source:{kind:'agent',reference:'synthetic-question-1'}}}),
+      action('process-question',{question:{id:'output-choice',text:'Where should NONPROMPTED_FIRST_CANARY JSON output go?',rationale:'The destination defines the output interface.',scope:[],important:true,source:{kind:'agent',reference:'synthetic-question-1'},...(${questions}?{choices:[{id:'stdout',text:'Write to stdout',consequence:'The receiver reads stdout',source:{kind:'agent',reference:'Synthetic candidate'}},{id:'file',text:'Write a file',consequence:'The receiver reads the file',source:{kind:'agent',reference:'Synthetic candidate'}}]}:{})}}),
+      ...(${questions}?[action('@ask',{questions:[{id:'output-choice',question:'Where should NONPROMPTED_FIRST_CANARY JSON output go?',header:'Question',options:[{label:'stdout: Write to stdout',description:'The receiver reads stdout'},{label:'file: Write a file',description:'The receiver reads the file'}]}]},false)]:[]),
     ];
+    if(stage==='ASKPENDING'||stage==='ASKCUSTOM') {
+      questionMode=stage==='ASKPENDING'?'pending':'custom';
+      return [action('@ask',{questions:[{id:'output-choice',question:'Where should NONPROMPTED_FIRST_CANARY JSON output go?',options:[{label:'stdout: Write to stdout'},{label:'file: Write a file'}]}]},false)];
+    }
     if(stage==='ISOLATE') return [];
     if(stage==='STATUS') return [action('context',{root:workspace,task_id:task},false)];
     if(stage==='ANSWER') return [
@@ -295,9 +606,11 @@ export async function apply(ctx) {
       const resultMessage=[...options.messages].reverse().find(message=>message.role==='tool'&&message.toolCallId===this.pending);
       if(resultMessage&&this.pending) {
         if(resultMessage.isError) throw new Error('Native tool error: '+JSON.stringify(resultMessage));
-        const value=JSON.parse(resultMessage.content.filter(block=>block.type==='text').map(block=>block.text).join('\\n'));
+        const raw=resultMessage.content.filter(block=>block.type==='text').map(block=>block.text).join('\\n');
+        const value=this.operation==='@skill'?{loaded:raw.includes('Task Workflow')}:JSON.parse(raw);
         receipt({kind:'actual-tool-result',callId:this.pending,op:this.operation,result:value});
-        if(value.ok!==true) throw new Error('Workflow rejected fixture operation: '+JSON.stringify(value));
+        if(!['@ask','@skill'].includes(this.operation)&&value.ok!==true) throw new Error('Workflow rejected fixture operation: '+JSON.stringify(value));
+        if(this.operation==='@ask'&&value.answers?.[0]?.custom) this.queue.push(action('process-answer',{question_id:value.answers[0].id,answer:value.answers[0].custom,source:source('Synthetic native answerer tool call '+this.pending)}));
         this.version=value.state?.version??value.dialogue_contract?.state_version??this.version;
         this.pending=undefined;
       }
@@ -308,7 +621,7 @@ export async function apply(ctx) {
         this.pending='native-call-'+(++this.counter|| (this.counter=1)); this.operation=next.op;
         receipt({kind:'scripted-call',stage,op:next.op,args,callId:this.pending});
         yield {type:'block-start',index:0,blockType:'tool-call'};
-        yield {type:'block-end',index:0,block:{type:'tool-call',id:this.pending,name:'mcp__task-workflow__'+next.op,arguments:JSON.stringify(args)}};
+        yield {type:'block-end',index:0,block:{type:'tool-call',id:this.pending,name:next.op==='@ask'?'ask_user_question':next.op==='@skill'?'skill':'mcp__task-workflow__'+next.op,arguments:JSON.stringify(args)}};
         yield {type:'finish',reason:{kind:'tool-calls'}};
       } else {
         receipt({kind:'stage-complete',stage,version:this.version});
@@ -320,6 +633,7 @@ export async function apply(ctx) {
   }
   ctx.llm.registerAdapter(['workflow-test-stub'],new Stub());
   ctx.on('agent/created',async({agent})=>{
+    if (${questions} && agent.id==='native-session') await probeLineage();
     observedAgent=agent;
     const loaded=await ctx.skills.get('task-workflow',{scope:agent,cwd:workspace});
     receipt({kind:'capabilities',session:agent.session.header.id,schemas:ctx.tools.schemas(agent),skill:{name:loaded?.name,path:loaded?.path,hasContent:!!loaded?.content}});
@@ -338,11 +652,29 @@ export async function apply(ctx) {
     return next();
   });
   ctx.effect(()=>()=>receipt({kind:'probe-disposed'}));
+  async function probeLineage() {
+    const options={provider:'workflow-test-stub',model:'stub'};
+    const first=await ctx.agents.create({sessionId:'lineage-root',meta:{cwd:workspace,parentSession:'historical-parent'},agentOptions:options});
+    first.agent.followup(createUserMessage({source:{kind:'user'},content:[{type:'text',text:'TW_TEST_ISOLATE: Synthetic persisted lineage anchor.'}]}));
+    await first.agent.whenIdle();
+    await first.dispose();
+    const resumed=await ctx.agents.resume({resumeSessionId:'lineage-root',agentOptions:options});
+    let child;
+    try {
+      const args={questions:[{id:'lineage-probe',question:'Synthetic current-root eligibility probe.'}]};
+      const execute=agent=>ctx.tools.get('ask_user_question',agent).execute(args,{agent,signal:new AbortController().signal,callId:'lineage-probe-call'});
+      const answer=await execute(resumed.agent);
+      receipt({kind:'resumed-root-question',historicalParent:resumed.agent.session.header.parentSession,currentRoot:ctx.agents.roots().includes(resumed.agent),answer});
+      child=await ctx.agents.create({sessionId:'live-owned-child',parentAgent:resumed.agent,meta:{cwd:workspace,parentSession:'lineage-root'},agentOptions:options});
+      try { await execute(child.agent); throw new Error('Owned child unexpectedly asked the user'); }
+      catch(error) { if(error.code!=='DELEGATED_CALLER') throw error; receipt({kind:'owned-question-rejected',code:error.code}); }
+    } finally { if(child)await child.dispose(); await resumed.dispose(); }
+  }
 }
 `;
 }
 
-async function makeFixture(cli, t) {
+async function makeFixture(cli, t, { owned = false, questions = false, recovery = false } = {}) {
   const run = path.join(process.env.DSH_TEST_ARTIFACT_ROOT || path.join(os.homedir(), 'Experiments/task-workflow-plugin/deepseek-integration/runs'), `${new Date().toISOString().replaceAll(':', '-')}-${randomUUID()}`);
   fs.mkdirSync(run, { recursive: true, mode: 0o700 });
   t.diagnostic(`Native evidence and live handle: ${run}`);
@@ -362,17 +694,207 @@ async function makeFixture(cli, t) {
   }
   const packed = await execute('npm', ['pack', '--json', '--pack-destination', path.join(run, 'artifacts')], { cwd: ROOT, env, receipt: path.join(run, 'pack.json') });
   const archive = path.join(run, 'artifacts', JSON.parse(packed.stdout)[0].filename);
-  await execute(cli, ['plugin', '--profile', 'workflow-test', 'add', '--save-exact', archive, '@deepseek-ai/dsh-hooks-codex@0.2.1-rc.3', '@deepseek-ai/dsh-hook-protocol@0.2.1-rc.3'], { cwd: workspace, env, receipt: path.join(run, 'install.json') });
+  await execute(cli, ['plugin', '--profile', 'workflow-test', 'add', '--save-exact', archive, '@deepseek-ai/dsh-hooks-codex@0.2.1-rc.3', '@deepseek-ai/dsh-hook-protocol@0.2.1-rc.3', ...(recovery ? ['@deepseek-ai/dsh-llm-deepseek@0.2.1-rc.3'] : []), ...(questions ? ['@deepseek-ai/dsh-user-questions@0.2.1-rc.3', '@deepseek-ai/dsh-tool-ask-user@0.2.1-rc.3', '@deepseek-ai/dsh-tool-skill@0.2.1-rc.3'] : [])], { cwd: workspace, env, receipt: path.join(run, 'install.json') });
   const installed = path.join(profile, 'node_modules/@local/task-workflow');
-  assert.equal(json(path.join(installed, 'package.json')).version, '0.1.9');
+  assert.equal(json(path.join(installed, 'package.json')).version, json(path.join(ROOT, 'package.json')).version);
   assert.ok(json(path.join(profile, 'package.json')).dsh.profile.bundles.includes('@local/task-workflow'));
   const probe = path.join(profile, 'node_modules/@local/workflow-test-probe');
   fs.mkdirSync(probe, { recursive: true });
   writeJson(path.join(probe, 'package.json'), { name: '@local/workflow-test-probe', private: true, type: 'module', main: 'index.js', peerDependencies: { '@deepseek-ai/dsh-llm': '0.2.1-rc.3' } });
-  fs.writeFileSync(path.join(probe, 'index.js'), probeSource());
-  fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), `# Private exploration/test composition; no Desktop or auth state.\n- insert:\n    - id: native-test-shell\n      name: '@deepseek-ai/dsh-bash-local'\n    - id: native-test-skills\n      name: '@deepseek-ai/dsh-skill'\n    - id: native-test-probe\n      name: '@local/workflow-test-probe'\n`);
+  fs.writeFileSync(path.join(probe, 'index.js'), recovery ? recoveryProbeSource() : owned ? ownedProbeSource() : probeSource(questions));
+  if (owned || recovery) {
+    const manifest = json(path.join(profile, 'package.json'));
+    manifest.dsh.profile.bundles = manifest.dsh.profile.bundles.filter(name => name !== '@local/task-workflow');
+    writeJson(path.join(profile, 'package.json'), manifest);
+    env.TW_OWNED_ROOT = run;
+    env.TW_OWNED_ENTRY = pathToFileURL(path.join(installed, 'adapters/deepseek/index.js')).href;
+  }
+  fs.writeFileSync(path.join(profile, 'cordis.patch.yml'), `# Private exploration/test composition; no Desktop or auth state.\n- insert:\n    - id: native-test-shell\n      name: '@deepseek-ai/dsh-bash-local'\n    - id: native-test-skills\n      name: '@deepseek-ai/dsh-skill'\n${questions ? "    - id: native-test-questions\n      name: '@deepseek-ai/dsh-user-questions'\n    - id: native-test-skill-tool\n      name: '@deepseek-ai/dsh-tool-skill'\n    - id: native-test-ask\n      name: '@deepseek-ai/dsh-tool-ask-user'\n      config:\n        mode: timed\n" : ''}${owned ? "    - id: native-test-subagents\n      name: '@deepseek-ai/dsh-subagent'\n" : ''}    - id: native-test-probe\n      name: '@local/workflow-test-probe'\n${owned ? "    - id: unchanged-native-delegate\n      name: '@deepseek-ai/dsh-tool-subagent'\n      config:\n        provider: spawn\n        toolName: subagent\n" : ''}`);
   writeJson(path.join(run, 'fixture.json'), { cli, run, workspace, other, profile, installed, archive, archiveSha256: createHash('sha256').update(fs.readFileSync(archive)).digest('hex'), provider: 'workflow-test-stub', model: 'stub', realProvider: false });
   return { cli, run, workspace, other, profile, installed, archive, env };
+}
+
+function recoveryProbeSource() {
+  return `// Real Messages transport and parser against an isolated loopback SSE server.
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as http from 'node:http';
+import {DeepSeekAdapter,resolveAdapterOptions} from '@deepseek-ai/dsh-llm-deepseek';
+const mode=process.env.TW_RECOVERY_MODE;
+const root=process.env.TW_OWNED_ROOT;
+const log=path.join(root,'recovery-'+mode+'.jsonl');
+const receipt=value=>fs.appendFileSync(log,JSON.stringify(value)+'\\n');
+export const inject=['llm','agents'];
+export async function apply(ctx) {
+ const Native=await import(process.env.TW_OWNED_ENTRY);
+ let native,requests=0;
+ const workspace=process.cwd(),task='recovery-'+mode;
+ const state=()=>JSON.parse(fs.readFileSync(path.join(workspace,'.task-workflow/tasks',task,'state.json'),'utf8'));
+ const server=http.createServer(async(request,response)=>{
+  let body='';for await(const part of request)body+=part;
+  requests++;receipt({kind:'http-request',number:requests,method:request.method,url:request.url,recoveryHint:body.includes('The native provider rejected the previous workflow response')});
+  response.writeHead(200,{'content-type':'text/event-stream'});
+  const event=(type,data)=>response.write('event: '+type+'\\ndata: '+JSON.stringify({type,...data})+'\\n\\n');
+  event('message_start',{message:{id:'synthetic-'+mode+'-'+requests,model:'deepseek-flash',role:'assistant',content:[],usage:{input_tokens:1,output_tokens:0}}});
+  const valid=mode==='valid'||mode==='always';
+  if(valid&&requests===7){
+   event('content_block_start',{index:0,content_block:{type:'text',text:''}});
+   event('content_block_delta',{index:0,delta:{type:'text_delta',text:'Synthetic recovery completed.'}});
+   event('content_block_stop',{index:0});
+   event('message_delta',{delta:{stop_reason:'end_turn'},usage:{output_tokens:1}});
+  }else{
+   const current=state();
+   const operation=valid&&requests===1?'process-exploration':'process-question';
+   const envelope={root:workspace,task_id:task,actor:'native-test',expected_version:current.version};
+   if(operation==='process-exploration')envelope.exploration={current_behavior:'Prior successful SSE operation.',evidence:['Synthetic loopback provider'],unknowns:[]};
+   else envelope.question={id:'raw-sse-choice',text:'Which synthetic output is required?',rationale:'Exercise native malformed response recovery.',scope:[],important:true,source:{kind:'agent',reference:'Synthetic raw SSE fixture'}};
+   const malformed=!valid||(requests>=2&&requests<=5);
+   const raw=malformed?JSON.stringify(envelope.question)+', "root": '+JSON.stringify(workspace)+'}':JSON.stringify(envelope);
+   event('content_block_start',{index:0,content_block:{type:'tool_use',id:'sse-'+mode+'-'+requests,name:'mcp__task-workflow__'+operation,input:{}}});
+   const middle=Math.floor(raw.length/2);
+   for(const partial_json of [raw.slice(0,middle),raw.slice(middle)])event('content_block_delta',{index:0,delta:{type:'input_json_delta',partial_json}});
+   event('content_block_stop',{index:0});
+   event('message_delta',{delta:{stop_reason:'tool_use'},usage:{output_tokens:1}});
+  }
+  event('message_stop',{});response.end();
+ });
+ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+ ctx.effect(()=>()=>new Promise(resolve=>{server.close(resolve);server.closeAllConnections();}));
+ const policy=mode==='always'?{mode:'always',backoff:{initialDelayMs:1,maxDelayMs:1,jitterRatio:0}}:mode==='valid'?{mode:'normal',maxRetries:1,retryableCodes:['MALFORMED_RESPONSE'],backoff:{initialDelayMs:1,maxDelayMs:1,jitterRatio:0}}:
+  {mode:'normal',maxRetries:0,retryableCodes:['TRANSPORT'],backoff:{initialDelayMs:5000,maxDelayMs:5000,jitterRatio:0}};
+ const options=resolveAdapterOptions({baseURL:'http://127.0.0.1:'+server.address().port,retryPolicy:policy});
+ ctx.llm.registerAdapter(['workflow-recovery-sse'],new DeepSeekAdapter({options:()=>options,resolveAuth:async()=>({headers:{}}),resolveUserId:()=> 'synthetic-loopback-test',prepareExtensions:async()=>({fields:{},accept:async()=>{}})}));
+ native=ctx.plugin(Native);await native;
+ if(native.state!==2)throw new Error('Native recovery candidate is not active');
+ ctx.on('session/event',(session,event)=>{
+  if(session.header.id!==task)return;
+  if(['assistant/attempt','assistant/message','tool/call','tool/result','llm/retry','llm/retry-started','turn/end'].includes(event.type))receipt({kind:'event',seq:event.seq,type:event.type,data:event.data});
+  if(event.type==='llm/retry'&&mode==='cancel')ctx.agents.get(session.header.id).cancel({kind:'user'});
+  if(event.type==='llm/retry'&&mode==='unload')Promise.resolve().then(async()=>{
+   await native.dispose();await native.await();
+   receipt({kind:'native-unloaded',state:native.state});
+   fs.writeFileSync(path.join(root,'recovery-unloaded'),'done');
+  });
+ });
+ ctx.on('agent/pre-step',({agent,messages},next)=>{receipt({kind:'pre-step',session:agent.id,sources:messages.map(message=>message.source)});return next();});
+ ctx.on('agent/assistant-stream',({agent,frame})=>{if(frame.type==='start')receipt({kind:'attempt-start',session:agent.id,turn:frame.turn,step:frame.step});});
+}
+`;
+}
+
+function ownedProbeSource() {
+  return `// Synthetic provider and fault barriers; tools and managed Agents are native.
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { LlmAdapter } from '@deepseek-ai/dsh-llm';
+const root=process.env.TW_OWNED_ROOT;
+const receipt=value=>fs.appendFileSync(path.join(root,'owned.jsonl'),JSON.stringify(value)+'\\n');
+const marker=(name,value={})=>fs.writeFileSync(path.join(root,name),JSON.stringify(value));
+const waitFile=name=>fs.existsSync(path.join(root,name))?Promise.resolve():new Promise(resolve=>{
+ const watcher=fs.watch(root,()=>{if(fs.existsSync(path.join(root,name))){watcher.close();resolve();}});
+ if(fs.existsSync(path.join(root,name))){watcher.close();resolve();}
+});
+export const inject=['llm','subagents','tools','agents'];
+export async function apply(ctx) {
+ const Native=await import(process.env.TW_OWNED_ENTRY);
+ const modes=new Map(), parents=new Map();
+ ctx.subagents.registerProvider({name:'spawn',inheritsParentContext:false,
+  capabilities:{agentOptions:true,agentPreset:true,outputSchema:true,depthLimit:true},
+  async prepareContinuable(request){
+   modes.set(request.sessionId,request.parent.id);
+   receipt({kind:'native-prepare',child:request.sessionId,parent:request.parent.id});
+   if(request.parent.id==='startup-parent'){
+    marker('startup-entered');
+    await new Promise((resolve,reject)=>{
+     if(request.signal.aborted){reject(request.signal.reason);return;}
+     request.signal.addEventListener('abort',()=>{marker('startup-aborted');reject(request.signal.reason);},{once:true});
+    });
+   }
+   return {};
+  }});
+ let native;
+ const lifetime=ctx.plugin({name:'private-native-owner',apply(parent){native=parent.plugin(Native);}});
+ await lifetime;await native;
+ if(native.state!==2)throw new Error('Tested native composition is not active');
+ let stale=ctx.tools.register({name:'wait_agent',description:'Private removable catalog canary',parameters:{type:'object',properties:{},additionalProperties:false},
+  output:{schema:{type:'object',additionalProperties:false},render:()=>[]},execute:()=>({})});
+ ctx.on('tools/post-execute',async(exec,result,next)=>{const decision=await next();
+  if(exec.name==='task_workflow_delegate'&&stale){stale();stale=undefined;}
+  receipt({kind:'native-tool-settlement',parent:exec.agent?.id,name:exec.name,isError:result.isError});return decision;
+ });
+ ctx.on('agent/created',({agent})=>{
+  receipt({kind:'agent-created',id:agent.id,parent:agent.session.header.parentSession,provider:agent.options.provider,model:agent.options.model});
+  if(agent.session.header.origin!=='subagent'){parents.set(agent.id,agent);return;}
+  if(modes.get(agent.id)==='owned-parent')agent.ctx.effect(()=>async()=>{
+   receipt({kind:'owned-cleanup-start',child:agent.id});marker('cleanup-started');
+   await waitFile('release-cleanup');receipt({kind:'owned-cleanup-end',child:agent.id});
+  });
+ });
+ ctx.on('subagent/start',value=>receipt({kind:'activation-start',...value}));
+ ctx.on('subagent/end',value=>receipt({kind:'activation-end',...value}));
+ ctx.on('session/event',(session,event)=>{
+  if(event.type==='hook/invoked')receipt({kind:'hook',session:session.header.id,point:event.data.point});
+  if(event.type==='user/message')receipt({kind:'input',session:session.header.id,id:event.data.id,source:event.data.source});
+ });
+ class Stub extends LlmAdapter {
+  states=new Map();
+  async *stream(options){
+   const id=options.sessionId;
+   receipt({kind:'request',session:id,messages:options.messages,tools:options.tools});
+   const mode=modes.get(id);
+   if(mode){
+    marker('child-started-'+mode,{child:id});
+    if(mode==='owned-parent')await ctx.subagents.sendMessage(ctx.agents.get(id),'owned-parent',[{type:'text',text:'MEANINGFUL_EARLY_FINDING'}],{signal:options.signal});
+    if(mode==='cancel-parent'||mode==='unowned-parent'){
+     if(mode==='unowned-parent')await waitFile('release-unowned');
+     else await new Promise((resolve,reject)=>{if(options.signal.aborted)reject(options.signal.reason);else options.signal.addEventListener('abort',()=>reject(options.signal.reason),{once:true});});
+    }
+    yield{type:'block-start',index:0,blockType:'text'};
+    yield{type:'text-delta',index:0,text:'EXACT_OWNED_REPORT_'+mode};yield{type:'finish',reason:{kind:'stop'}};return;
+   }
+   let state=this.states.get(id);if(!state){state={step:0};this.states.set(id,state);}
+   const tool=[...options.messages].reverse().find(message=>message.role==='tool'&&message.toolCallId===state.pending);
+   if(tool){
+    receipt({kind:'parent-tool-result',session:id,name:state.operation,isError:tool.isError,content:tool.content});
+    if(tool.isError){if(id!=='foreign-parent'&&id!=='startup-parent')throw new Error('Unexpected native tool failure: '+JSON.stringify(tool));}
+    else if(state.operation==='subagent'){
+     receipt({kind:'unchanged-native-render',session:id,text:tool.content.filter(block=>block.type==='text').map(block=>block.text).join('\\n')});
+    }else{
+     const value=JSON.parse(tool.content.filter(block=>block.type==='text').map(block=>block.text).join('\\n'));
+     if(state.operation==='task_workflow_delegate'){state.handle=value.handleId;state.child=value.subagentId;marker('last-handle',{...value,parent:id});}
+     if(state.operation==='task_workflow_wait'||state.operation==='task_workflow_cancel'){
+      if(value.status!=='settled'||value.cleanup.status!=='complete')throw new Error('Owned collection did not prove cleanup');
+      state.collected=value;receipt({kind:'collected',session:id,value});
+     }
+    }
+    state.pending=undefined;
+   }
+   let name,args;
+   if(state.step===0){
+    if(id==='foreign-parent'){name='task_workflow_wait';args={handle_id:JSON.parse(fs.readFileSync(path.join(root,'first-handle'),'utf8')).handleId};}
+    else{name=id==='unowned-parent'?'subagent':'task_workflow_delegate';args={description:'Synthetic owned check',prompt:'Return the synthetic final report using the inherited route.'};}
+   }else if(state.step===1&&id!=='foreign-parent'&&id!=='startup-parent'&&id!=='unowned-parent'){
+    name=id==='cancel-parent'?'task_workflow_cancel':'task_workflow_wait';args={handle_id:state.handle};
+   }
+   if(name){state.step++;state.operation=name;state.pending=id+'-call-'+state.step;
+    yield{type:'block-start',index:0,blockType:'tool-call'};
+    yield{type:'block-end',index:0,block:{type:'tool-call',id:state.pending,name,arguments:JSON.stringify(args)}};
+    yield{type:'finish',reason:{kind:'tool-calls'}};return;
+   }
+   if(id==='owned-parent'&&!state.collected)throw new Error('Full parent answer preceded collection');
+   receipt({kind:'final-answer',session:id,collected:!!state.collected});marker('final-'+id);
+   yield{type:'block-start',index:0,blockType:'text'};yield{type:'text-delta',index:0,text:'FULL_FINAL_REPORT_'+id};yield{type:'finish',reason:{kind:'stop'}};
+  }
+ }
+ ctx.llm.registerAdapter(['workflow-test-stub'],new Stub());
+ let unloading=false;
+ const watcher=fs.watch(root,async(_event,name)=>{
+  if(name!=='unload-native'||unloading||!fs.existsSync(path.join(root,name)))return;
+  unloading=true;try{await Native.disposeChild(lifetime);marker('native-unloaded');}catch(error){marker('native-unloaded',{error:String(error)});}
+ });
+ ctx.effect(()=>()=>watcher.close());
+}
+`;
 }
 
 function currentRuntimeContext(request) {
@@ -406,6 +928,182 @@ function requireStage(fixture, stage) {
 const CLI = process.env.DSH_TEST_CLI;
 if (!CLI) test('installed runtime: acceptance requires explicit DSH_TEST_CLI', () => {
   assert.fail('Installed-runtime acceptance is blocked without DSH_TEST_CLI. Run only the named low-level groups for dependency-free checks.');
+});
+if (CLI) test('installed recovery: real malformed Messages SSE regenerates without tool replay and honors cancellation', async t => {
+  const fixture = await makeFixture(CLI, t, { recovery: true });
+  await execute('python3', ['-c', `import sys
+sys.path.insert(0,sys.argv[1])
+import workflow
+root=sys.argv[2]
+for mode in ('valid','always','cancel','unload'):
+ task='recovery-'+mode
+ state=workflow.dispatch('init',dict(root=root,project=root,task_id=task,title='Synthetic SSE recovery',actor='native-test',authorization_source='Explicit isolated fixture',session_id=task,integration_required=False))['state']
+ for operation,fields in [('process-intent',dict(intent=dict(goal='Verify native recovery',why='Synthetic transport fixture',success_criteria=['No rejected input executes'],source=dict(kind='user',reference='Synthetic fixture authorization')))),('process-exploration',dict(exploration=dict(current_behavior='Fixture inspected',evidence=['Synthetic fixture'],unknowns=[])))]:
+  state=workflow.dispatch(operation,dict(root=root,task_id=task,actor='native-test',expected_version=state['version'],**fields))['state']
+`, path.join(fixture.installed, 'skills/task-workflow/scripts'), fixture.workspace]);
+  for (const mode of ['valid', 'always', 'cancel', 'unload']) {
+    const receipts = path.join(fixture.run, 'recovery-runtime-' + mode); fs.mkdirSync(receipts);
+    const sdk = new Sdk(CLI, fixture.workspace, { ...fixture.env, TW_RECOVERY_MODE: mode }, receipts);
+    const taskDir = path.join(fixture.workspace, '.task-workflow/tasks/recovery-' + mode);
+    const before = treeHashes(taskDir);
+    try {
+      await sdk.call('initialize', { cwd: fixture.workspace, provider: 'workflow-recovery-sse', model: 'deepseek-flash' });
+      let outcome;
+      try { await sdk.prompt('recovery-' + mode, 'Synthetic raw SSE recovery ' + mode); outcome = 'settled'; }
+      catch (error) { outcome = error.message; if (mode === 'valid' || mode === 'always') throw error; }
+      if (mode === 'unload') await waitFile(path.join(fixture.run, 'recovery-unloaded'), sdk);
+      const observed = lines(path.join(fixture.run, 'recovery-' + mode + '.jsonl'));
+      const requests = observed.filter(row => row.kind === 'http-request');
+      const failed = observed.filter(row => row.kind === 'event' && row.type === 'assistant/attempt');
+      const retries = observed.filter(row => row.kind === 'event' && row.type === 'llm/retry');
+      if (mode === 'valid' || mode === 'always') {
+        assert.equal(requests.length, 7); assert.equal(failed.length, 4); assert.equal(retries.length, 4);
+        assert.equal(retries.filter(row => row.data.mode === 'normal').length, mode === 'valid' ? 1 : 0);
+        assert.equal(retries.filter(row => row.data.mode === 'always').length, mode === 'valid' ? 3 : 4);
+        if (mode === 'valid') assert.ok(requests.some(row => row.recoveryHint), 'The model receives a scoped regeneration hint');
+        assert.ok(failed.every(row => row.data.stream.some(record => record.type === 'chunk' && record.chunk.type === 'finish' && record.chunk.reason.failure?.message === INVALID_TOOL_JSON)));
+        const calls = observed.filter(row => row.kind === 'event' && row.type === 'tool/call');
+        assert.equal(calls.length, 2, 'Only the prior successful operation and new valid question execute');
+        assert.equal(calls.filter(row => row.data.name === 'mcp__task-workflow__process-exploration').length, 1);
+        assert.equal(calls.filter(row => row.data.name === 'mcp__task-workflow__process-question').length, 1);
+        assert.equal(json(path.join(taskDir, 'state.json')).process.questions[0].id, 'raw-sse-choice');
+        assert.equal(observed.filter(row => row.kind === 'pre-step' && row.sources.some(source => source.kind === 'user')).length, 1, 'Regeneration adds no human prompt');
+      } else {
+        assert.equal(requests.length, 1); assert.equal(failed.length, 1); assert.equal(retries.length, 1);
+        assert.deepEqual(treeHashes(taskDir), before);
+        assert.ok(!observed.some(row => row.kind === 'event' && row.type === 'tool/call'));
+        if (mode === 'unload') assert.ok(observed.some(row => row.kind === 'native-unloaded' && row.state === 4));
+      }
+      writeJson(path.join(fixture.run, 'recovery-result-' + mode + '.json'), { passed: true, mode, requests: requests.length, malformedAttempts: failed.length, retries: retries.length, outcome, realProvider: false, realParser: true });
+      await sdk.close();
+    } finally { if (sdk.child.exitCode === null) await sdk.close(); }
+  }
+});
+if (CLI) test('installed owned protocol: native handles cleanup source and final-answer ordering', async t => {
+  const fixture = await makeFixture(CLI, t, { owned: true });
+  const receipts = path.join(fixture.run, 'owned-runtime'); fs.mkdirSync(receipts);
+  const sdk = new Sdk(CLI, fixture.workspace, fixture.env, receipts);
+  try {
+    await sdk.call('initialize', { cwd: fixture.workspace, provider: 'workflow-test-stub', model: 'stub' });
+    await sdk.call('session/prompt', { sessionId: 'owned-parent', contentBlocks: [{ type: 'text', text: 'Synthetic owned completion check.' }] });
+    await waitFile(path.join(fixture.run, 'cleanup-started'), sdk);
+    let observed = lines(path.join(fixture.run, 'owned.jsonl'));
+    assert.ok(!observed.some(item => item.kind === 'final-answer' && item.session === 'owned-parent'));
+    const handle = json(path.join(fixture.run, 'last-handle'));
+    fs.copyFileSync(path.join(fixture.run, 'last-handle'), path.join(fixture.run, 'first-handle'));
+    assert.equal(typeof handle.handleId, 'string'); assert.equal(handle.parent, 'owned-parent');
+    const parentRequests = observed.filter(item => item.kind === 'request' && item.session === 'owned-parent');
+    assert.equal(parentRequests.length, 2, 'The parent is waiting, not answering during child cleanup');
+    assert.ok(parentRequests[0].messages.filter(message => message.role === 'system').some(message => message.content.some(block => block.text?.includes(WORKFLOW_SCOPE))), 'The actual owned tool section preserves ordinary/status scope');
+    const capability = request => [...request.messages].reverse().flatMap(message => message.source?.kind === 'runtime-context' ? message.source.sections ?? [] : []).find(section => section.name === 'task-workflow:capabilities')?.text;
+    assert.ok(capability(parentRequests[0]).includes('wait_agent'));
+    assert.ok(!capability(parentRequests[1]).includes('wait_agent'));
+    assert.equal(parentRequests[1].tools.filter(tool => tool.name.startsWith('mcp__task-workflow__')).length, 53);
+    const ownedSchema = parentRequests[1].tools.find(tool => tool.name === 'task_workflow_delegate');
+    const nativeSchema = parentRequests[1].tools.find(tool => tool.name === 'subagent');
+    assert.deepEqual(ownedSchema.parameters, nativeSchema.parameters, 'Native parameter policy is retained');
+    fs.writeFileSync(path.join(fixture.run, 'release-cleanup'), 'release owned cleanup');
+    await sdk.call('session/wait', { sessionId: 'owned-parent' });
+    observed = lines(path.join(fixture.run, 'owned.jsonl'));
+    const cleanup = observed.findIndex(item => item.kind === 'owned-cleanup-end');
+    const collected = observed.findIndex(item => item.kind === 'collected' && item.session === 'owned-parent');
+    const final = observed.findIndex(item => item.kind === 'final-answer' && item.session === 'owned-parent');
+    assert.ok(cleanup >= 0 && cleanup < collected && collected < final);
+    assert.ok(observed.filter(item => item.kind === 'request' && item.session === 'owned-parent').some(request => request.messages.some(message => message.source?.kind === 'agent-message' && message.content.some(block => block.text?.includes('MEANINGFUL_EARLY_FINDING')))), 'A deliberate worker report remains in a subsequent parent request');
+    assert.equal(observed.filter(item => item.kind === 'request' && item.session === 'owned-parent').length, 3);
+    assert.ok(!observed.some(item => item.kind === 'input' && item.session === 'owned-parent' && item.source?.kind === 'subagent-settled'));
+    const child = observed.find(item => item.kind === 'agent-created' && item.parent === 'owned-parent');
+    assert.equal(child.provider, 'workflow-test-stub'); assert.equal(child.model, 'stub');
+    assert.ok(!observed.some(item => item.kind === 'hook' && item.session === child.id && item.point === 'UserPromptSubmit'), 'Owned delegated initial input is not a new human prompt');
+    assert.ok(observed.some(item => item.kind === 'hook' && item.session === 'owned-parent' && item.point === 'UserPromptSubmit'));
+    assert.equal(observed.filter(item => item.kind === 'hook' && item.session === 'owned-parent' && item.point === 'UserPromptSubmit').length, 1, 'The worker report does not become another human prompt hook');
+    await sdk.prompt('foreign-parent', 'Synthetic foreign handle rejection check.');
+    observed = lines(path.join(fixture.run, 'owned.jsonl'));
+    assert.ok(observed.some(item => item.kind === 'parent-tool-result' && item.session === 'foreign-parent' && item.isError));
+    await sdk.call('session/prompt', { sessionId: 'unowned-parent', contentBlocks: [{ type: 'text', text: 'Synthetic independent native activation.' }] });
+    await waitFile(path.join(fixture.run, 'child-started-unowned-parent'), sdk);
+    await waitFile(path.join(fixture.run, 'final-unowned-parent'), sdk);
+    await sdk.prompt('cancel-parent', 'Synthetic owned cancellation check.');
+    observed = lines(path.join(fixture.run, 'owned.jsonl'));
+    const canceled = observed.find(item => item.kind === 'collected' && item.session === 'cancel-parent');
+    assert.equal(canceled.value.result.stopReason, 'aborted'); assert.equal(canceled.value.cleanup.status, 'complete');
+    const unrelated = json(path.join(fixture.run, 'child-started-unowned-parent')).child;
+    assert.ok(!observed.some(item => item.kind === 'activation-end' && item.id === unrelated));
+    await sdk.call('session/prompt', { sessionId: 'startup-parent', contentBlocks: [{ type: 'text', text: 'Synthetic disposal during unpublished native startup.' }] });
+    await waitFile(path.join(fixture.run, 'startup-entered'), sdk);
+    fs.writeFileSync(path.join(fixture.run, 'unload-native'), 'dispose only the tested native plugin');
+    await waitFile(path.join(fixture.run, 'native-unloaded'), sdk);
+    assert.deepEqual(json(path.join(fixture.run, 'native-unloaded')), {});
+    assert.ok(fs.existsSync(path.join(fixture.run, 'startup-aborted')));
+    observed = lines(path.join(fixture.run, 'owned.jsonl'));
+    assert.ok(!observed.some(item => item.kind === 'activation-end' && item.id === unrelated));
+    fs.writeFileSync(path.join(fixture.run, 'release-unowned'), 'allow independent native work to finish');
+    await sdk.call('session/wait', { sessionId: 'unowned-parent' });
+    await sdk.close();
+    observed = lines(path.join(fixture.run, 'owned.jsonl'));
+    assert.ok(observed.some(item => item.kind === 'activation-end' && item.id === unrelated && item.stopReason === 'completed'));
+    writeJson(path.join(fixture.run, 'owned-result.json'), { passed: true, coreOperations: 53, cleanupBeforeCollectionBeforeFinal: true, automaticOwnedSettlementMessages: 0, nativePoliciesPreserved: true, foreignHandleRejected: true, startupAborted: true, unownedActivationPreserved: true });
+  } finally {
+    for (const marker of ['release-cleanup', 'release-unowned']) fs.writeFileSync(path.join(fixture.run, marker), 'owned test cleanup');
+    if (sdk.child.exitCode === null) await sdk.close();
+  }
+});
+if (CLI) test('installed questions: canonical stage text, recorded native card and actual answer states', async t => {
+  const fixture = await makeFixture(CLI, t, { questions: true });
+  const receipts = path.join(fixture.run, 'question-runtime'); fs.mkdirSync(receipts);
+  const sdk = new Sdk(CLI, fixture.workspace, fixture.env, receipts);
+  try {
+    await sdk.call('initialize', { cwd: fixture.workspace, provider: 'workflow-test-stub', model: 'stub' });
+    await sdk.prompt('native-session', 'TW_TEST_BOOTSTRAP: Synthetic question transport.');
+    let observed = lines(path.join(fixture.run, 'probe.jsonl'));
+    const resumedRoot = observed.find(row => row.kind === 'resumed-root-question');
+    assert.equal(resumedRoot.historicalParent, 'historical-parent'); assert.equal(resumedRoot.currentRoot, true);
+    assert.ok(observed.some(row => row.kind === 'owned-question-rejected' && row.code === 'DELEGATED_CALLER'));
+    const recorded = observed.findIndex(row => row.kind === 'actual-tool-result' && row.op === 'process-question');
+    const card = observed.findIndex(row => row.kind === 'synthetic-question-request' && row.questions[0].id === 'output-choice');
+    assert.ok(recorded >= 0 && card > recorded);
+    assert.equal(observed[card].currentRoot, true);
+    const beforeAsk = observed.slice(0, card).filter(row => row.kind === 'model-request').at(-1);
+    const context = currentRuntimeContext(beforeAsk);
+    const nativeCapabilities = beforeAsk.messages.filter(message => message.source?.kind === 'runtime-context')
+      .flatMap(message => message.source.sections ?? []).filter(section => section.name === 'task-workflow:capabilities').at(-1);
+    const capabilities = JSON.parse(nativeCapabilities.text.slice('Current native Task Workflow capabilities: '.length));
+    const actualSkill = beforeAsk.tools.find(tool => tool.name === 'skill');
+    assert.ok(actualSkill); assert.deepEqual(capabilities.skill_loader.parameters, actualSkill.parameters);
+    assert.deepEqual(capabilities.skill_loader.arguments, { name: 'task-workflow' });
+    assert.equal(capabilities.applicability, WORKFLOW_SCOPE);
+    assert.ok(observed.some(row => row.kind === 'actual-tool-result' && row.op === '@skill' && row.result.loaded));
+    assert.equal(context.stage_guidance.mode, 'first_reply');
+    assert.ok(context.stage_guidance.conversation_template.includes('## First discussion reply'));
+    assert.ok(!context.stage_guidance.conversation_template.includes('## Plan and approval'));
+    assert.ok(context.stage_guidance.title_language_rule.includes('current conversation language'));
+    const example = context.stage_guidance.recording_example.arguments;
+    assert.equal(example.root, fixture.workspace); assert.equal(example.task_id, 'native-task');
+    assert.equal(example.expected_version, context.dialogue_contract.state_version);
+    assert.ok(example.question.choices.every(choice => choice.id && choice.source));
+    const pending = context.dialogue_contract.pending_questions[0];
+    assert.equal(observed[card].questions[0].id, pending.id);
+    assert.deepEqual(observed[card].questions[0].options.map(option => option.label.split(':')[0]), pending.choices.map(choice => choice.id));
+    const taskDir = path.join(fixture.workspace, '.task-workflow/tasks/native-task');
+    const skippedState = json(path.join(taskDir, 'state.json'));
+    assert.equal(skippedState.process.questions[0].status, 'pending');
+    const before = treeHashes(taskDir);
+    await sdk.prompt('native-session', 'TW_TEST_ASKPENDING: Synthetic pending native answer.');
+    assert.deepEqual(treeHashes(taskDir), before);
+    observed = lines(path.join(fixture.run, 'probe.jsonl'));
+    assert.ok(observed.some(row => row.kind === 'actual-tool-result' && row.op === '@ask' && row.result.pending === true));
+    await sdk.prompt('native-session', 'TW_TEST_ASKCUSTOM: Synthetic custom answer overrides selected.');
+    observed = lines(path.join(fixture.run, 'probe.jsonl'));
+    const custom = observed.find(row => row.kind === 'actual-tool-result' && row.op === '@ask' && row.result.answers?.[0]?.custom);
+    assert.equal(custom.result.answers[0].selected[0], 'stdout: Write to stdout');
+    const answer = json(path.join(taskDir, 'state.json')).process.questions[0].answer;
+    assert.equal(answer.text, custom.result.answers[0].custom);
+    assert.equal(answer.choice_id, undefined);
+    assert.ok(answer.source.reference.includes(custom.callId));
+    assert.equal(requireCurrentContext(observed, json(path.join(taskDir, 'state.json')).version).stage_guidance.mode, 'answer_acknowledgment');
+    writeJson(path.join(fixture.run, 'question-result.json'), { passed: true, scriptedProviderOnly: true, recordedBeforeActualCard: true, skippedAndPendingPreserveWait: true, customRawSourcePreserved: true, completeCanonicalExampleDelivered: true });
+    await sdk.close();
+  } finally { if (sdk.child.exitCode === null) await sdk.close(); }
 });
 if (CLI) test('installed runtime: real archive, schemas, tools, authority, status, resume and isolation', async t => {
   const fixture = await makeFixture(CLI, t);

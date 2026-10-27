@@ -29,9 +29,25 @@ The plugin does not read, parse, edit, or require `AGENTS.md`. Do not add an ent
 to that file. The plugin has no user configuration file, execution profiles,
 root-selection wizard, or global task registry.
 
+Discover the tools actually exposed in the current session before choosing a
+transport or calling a mutation. Refresh discovery after activation, reconnect,
+or an unavailable-tool error; a remembered tool name is not current evidence.
+Read the live workflow schema before constructing arguments.
+For workflow-scoped work, load the current main skill through the native skill
+loader actually exposed by the host. Otherwise use its verified current skill
+path with a supported reader. If neither route is available, report the missing
+guidance before dependent work; do not guess a tool or stale installation path.
+Tool and skill availability do not authorize workflow enrollment or progression.
+Ordinary requests keep their direct scope; status requests inspect and answer
+without changing the wait.
+
 Work in the current Git project. Store task state in `<project>/.task-workflow/`.
-Use exactly `<project>/.worktrees/<task-id>/` for a development worktree. Reuse an
-existing registered task worktree for fixes. New experiment data defaults to
+Use exactly `<project>/.worktrees/<task-id>/` for a development worktree.
+For `init`, `project` is the existing absolute base checkout path; `task_id` is
+the short label. Normally `root` is that same checkout. Enroll from the base with
+`owned_worktree:false` and omit `worktree`; use `worktree-prepare` after plan
+approval to create the dedicated owned checkout. Preserve an existing registered
+state root. Reuse an existing registered task worktree for fixes. New experiment data defaults to
 `<project>/.experiments/<experiment-id>/runs/<run-id>/`; an explicit experiment
 root can come from the user's already loaded conventions. Preserve existing
 registered paths and frozen run inputs. Let the program maintain its project
@@ -57,6 +73,21 @@ approval request in a separate final section. Omit empty optional sections.
 Keep source identifiers, state versions, digests, and routine recording narration
 in the record; show relevant source links only where they help assess a finding.
 Use readable revision titles. Do not turn these layouts into long paragraphs.
+Start each applicable reply with the actual content for the current stage, not a
+promise to follow the workflow or a generic restatement of the whole process.
+Render headings and question-card labels in the user's current conversation
+language. English labels in templates and `reply_fields` identify their meaning;
+they are not literal display strings. Keep persisted summaries in English.
+Use only the current stage's layout and relevant content. Show a complete Spec
+or Plan when that exact revision needs review or approval, not on every request.
+Routine questions and progress replies state the concrete user decision or
+current work. Omit internal rule/skill citations, process apologies, and
+administrative narration. If a prior question was wrong, correct it and state
+the actual next decision; do not blame the skill. Keep authority and checks in
+the record. Honor any higher-priority mandatory permission disclosure when it
+actually applies.
+
+
 
 Use process protocol 2 for new tasks. Legacy tasks retain their recorded state
 until a guarded `process-upgrade` with actual authorization. Never invent prior
@@ -203,6 +234,40 @@ It cannot verify the semantic truth of natural language or guarantee that a mode
 follows these instructions. The coordinator must compare the record with actual
 messages, project facts, diffs, and evidence.
 
+## Native question handoff
+
+After a discussion or reentry question is successfully recorded, obtain its
+actual pending question ID and digest from the returned contract. Use the host's
+currently exposed native question capability (`ask_user_question` on DeepSeek
+Harness) when it is available and the current agent is eligible. Supply the current-stage context first, then invoke
+the native question card; do not replace the available card with a plain-text
+question or duplicate its contents in another question paragraph.
+
+Build the card from the exact recorded question and real choices. Preserve
+meaning when rendering in the conversation language. Map each unique displayed
+option label to its exact recorded choice ID. Do not invent alternatives or
+require an option count. Native free-text questions need no artificial choices.
+Record the association with the actual native call ID, question ID, and digest
+in the task's existing evidence or source references; do not create another task
+record. A Spec or Plan approval card refers to the live `approval_target` after
+the exact reviewed revision is displayed; do not create a discussion question
+in a stage that does not permit one.
+
+Match an immediate tool result or later native answer to that submitted call and
+question, then recheck the current pending question and digest before recording
+`process-answer`. A nonempty custom answer takes precedence over selected
+labels: preserve the raw human text and record no fabricated `choice_id`. A single unambiguous
+selection maps to its recorded choice ID. Empty, skipped, pending, stale, or
+ambiguous responses do not confirm a choice or approval; retain the actual wait.
+Use actual user sources and update linked decisions before dependent progress.
+
+If the capability is absent, unavailable to this agent, or cannot represent the
+question, ask the same recorded question in the final question section and
+preserve its identity and wait. Do not claim a native card was shown. A live
+owned child returns important questions to the coordinator. Native root
+eligibility comes from current host capabilities, not historical session links.
+See [references/deepseek.md](references/deepseek.md) for native answer details.
+
 ## Roles and review
 
 The primary agent coordinates and reviews the task.
@@ -215,7 +280,9 @@ explicit user approval. If a lighter Codex model is unavailable, use an availabl
 Sol model; do not silently escalate to Astra.
 
 On DeepSeek Harness, inherit the host's current authorized provider/model route,
-including the user's selected Flash route. Use the host's native subagent tools.
+including the user's selected Flash route. Use the exposed plugin-owned
+`task_workflow_delegate`, `task_workflow_wait`, and `task_workflow_cancel` tools
+for Task Workflow workers. They retain native provider, model, and preset checks.
 Query selectable child routes only when its native model-discovery tool is
 actually exposed and selection is authorized. Do not guess an internal Flash
 identifier, pass OpenAI model names, enable model-selection settings, or silently
@@ -223,12 +290,28 @@ change the cost or provider. Record the actual selected route and delegation
 evidence. An unavailable capability is a gap to resolve, not a capability to
 claim. Reuse a worker only while its model remains suitable, and use a lighter
 available authorized route when appropriate. Workers do not delegate recursively.
+A worker result, automatic wakeup, resume, or injected context is not a new
+human request. Continue the recorded task from its actual wait state.
+Track every owned activation handle. Wait for its actual terminal result and
+cleanup before final delivery; a report sent while its activation is still
+running does not settle it. Cancel an owned activation explicitly when its work
+should end, then await settlement. Report cleanup failures as unresolved.
+A progress reply can state that work remains active; do not declare completion
+or rely on another automatic parent turn to finish the handoff.
 The coordinator inspects actual diffs and evidence, and avoids repeated review
 cycles or agent turns that add no evidence.
 
 Each item follows `pending -> implementing -> reviewing -> complete`. Failed
-review returns it to `implementing`. Give implementers bounded ownership. Have
-a task reviewer return separate requirements and quality verdicts against the
+review returns it to `implementing`. Give implementers bounded ownership.
+Give each fresh child the actual state-root, project, worktree, canonical record,
+current context/skill pointers, exact item and role, Spec/Plan revisions, and
+source authority in the worker brief. A fresh DeepSeek native child does not
+inherit parent history. Other hosts may inherit history through their actual
+delegation mechanism; verify what the child receives and keep the explicit brief.
+It inspects that context before action and does not acquire the parent's binding
+from the brief. Binding changes require actual authority; a coordinator brief
+is not new human approval.
+Have a task reviewer return separate requirements and quality verdicts against the
 actual diff and evidence.
 Keep blocked reasons and next actions separate. Complete an independent overall
 review after implementation items pass. Approved design, item state, and worker
@@ -277,11 +360,20 @@ Cleanup requires accepted integration, snapshots, and reference-safety checks.
 
 Record who provided each resource and its observed availability. Derived states
 are `available`, `in_use`, `releasable`, `released`, and `unknown`. Record ownership,
-run references, and release permission explicitly. Resolve private provisioning and execution conventions
-from the user's already loaded instructions, then pass concrete parameters to
-the program. A state query does not provision or release a resource. A finished
-run does not authorize release. Reuse only after checking recorded ownership,
-fit, references, and actual availability.
+run references, and release permission explicitly. A persistent retention choice
+is separate from the owner's permission to release and from authorization for
+an actual release action. Do not infer any of these from a successful run or
+from each other. Resolve private provisioning and execution conventions from
+the user's already loaded instructions, then pass concrete parameters to the
+program. A state query does not provision or release a resource. Reuse only
+after checking recorded ownership, fit, references, and actual availability.
+Evaluate capacity against this resource's matching execution references, not
+unrelated task closure or artifact review. Preserve active, queued, reserved,
+cross-task, and uncertain holds; free capacity does not itself authorize release.
+Apply the actual private lifecycle choice and per-action authorization. Correct
+misrecorded permission only through the audited `resource-observe` pair described
+in the operator reference. Inspect current eligibility and the actual receipt
+before any retry; do not repeat a completed release.
 
 Do not impose plugin-level size, file-count, JSON, label, or output-length caps.
 Preserve snapshot contents and provenance. Do not set default command deadlines

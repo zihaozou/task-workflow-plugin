@@ -32,6 +32,25 @@ The shared MCP tools use the native namespace `mcp__task-workflow__`, for exampl
 host's other providers and existing skill directories. MCP names and schemas
 come from the same Python program; there is no separate DeepSeek operation set.
 
+The current capability snapshot reports `skill_loader.available` and the actual
+`tool_name` and `parameters` only when the live tool catalog exposes that loader.
+Use its supplied `arguments` only when present; the `name: task-workflow` example
+exists only for a schema that actually accepts `name`. If no native loader is
+available, read the verified `main_skill_path` through an actual supported file
+reader. If neither route is available, report missing guidance. Registration or
+an available loader is not evidence that the skill was read.
+
+`capabilities.applicability` scopes these facilities to an authorized related
+workflow request. Ordinary chat, advice, and simple requests keep their direct
+route; status/progress requests inspect and preserve the wait. Tool availability
+and injected context grant no new authority. This scope is guidance, not a new
+delegation argument or a change to native tool visibility or control. Pass fresh
+workflow children the actual record, root/project/worktree and current skill/
+context pointers from [../templates/worker-briefs.md](../templates/worker-briefs.md).
+They do not inherit the parent history or a task binding. Preserve ordinary
+scope and unchanged native delegation for work outside the enrolled workflow.
+
+
 ### Current context and attribution
 
 The official bridge supplies startup and accepted-prompt context. The adapter's
@@ -99,13 +118,48 @@ and optional reasoning-effort metadata for new agents; an existing Session's
 current selection remains authoritative for that Session. Record route metadata
 without dumping settings or credentials. Do not guess an internal Flash model ID.
 
-Use only native delegation tools visible to the current agent. A configured
-`subagent` tool may have another name. Its children normally inherit the native
-route. Query `list_subagent_models` only when the host exposes it and the user
-has authorized selectable routes. Do not enable model-selection settings or
-insert Codex model identifiers to obtain that tool. Preserve user preferences
-and the host's real capability checks. Task Workflow workers do not delegate
-recursively. See the shared policy in [workflow.md](workflow.md).
+Discover the tools currently exposed before choosing a transport. The adapter
+adds three native Task Workflow tools beside the unchanged 53 shared MCP
+operations. It leaves the host's original subagent tools unchanged.
+
+| Tool | Arguments and result |
+| --- | --- |
+| `task_workflow_delegate` | Native `prompt` and `description` are required; `cwd` is optional. Returns the native activation identity with an opaque `handleId`. |
+| `task_workflow_wait` | Takes `{ "handle_id": "<returned handleId>" }`. Returns `handleId`, `subagentId`, `status: "settled"`, the unaltered public native `result` when available, and `cleanup.status` (`complete` or `failed`). A failed result capture returns an explicit `error.code: "result_unavailable"`. |
+| `task_workflow_cancel` | Takes `{ "handle_id": "<returned handleId>" }`. Disposes that owned activation and waits for its actual result. It does not interrupt an unrelated native worker. |
+
+The tools reuse the official configured spawn provider with native preset,
+depth, working-directory, and authorized provider/model checks. Handles belong
+to the exact parent agent and session. Preserve the returned handle; do not
+substitute a child ID or invent a handle. Caller delivery captures the public
+activation result without an automatic parent completion notice. A child report
+or a native child-start acknowledgement is not terminal settlement.
+Handles live in the active plugin instance; they are not portable across a
+restart or reload. Keep their ownership and terminal evidence in the task
+record, but do not treat a recorded handle as a restored live control. Use the
+host's unchanged native controls for pre-existing or unowned activations.
+
+Wait for every owned activation to settle and finish cleanup before final
+delivery. A cancelled wait does not cancel the worker; use explicit cancellation
+when the work should end, then inspect its result. Check both the native result
+and cleanup status: a captured successful result does not prove cleanup passed.
+Report a cleanup failure as unresolved. Give progress updates while work is
+active, then continue waiting within the authorized task. Do not depend on a
+later automatic turn to complete the handoff. Workers return their terminal
+report through their activation result. Native messaging remains available for
+important early questions and findings; those messages do not settle a handle.
+Send a separate final parent message only when explicitly requested. Workers do
+not delegate recursively.
+
+Query `list_subagent_models` only when the host exposes it and selection is
+authorized. Do not enable model-selection settings or insert Codex model IDs.
+See the shared policy in [workflow.md](workflow.md). A child result, automatic
+wakeup, resume, or injected context is not a new human request. The prompt-hook
+gate accepts the host's native `user` source class and excludes the known owned
+initial handoff by its exact child and public message identity. Other source
+classes do not invoke that prompt hook. Native `user` classification alone does
+not prove human origin for an unowned handoff; verify the actual source before
+recording human authority. Host context delivery grants no new authority.
 
 A real-provider check uses the authorized route and the host's existing
 credential service. Keep secret resolution inside the host. Verify actual
@@ -113,13 +167,55 @@ provider/model metadata, a harmless native MCP context call, and a native child
 completion. A scripted stub proves transport or lifecycle behavior, not semantic
 obedience by the selected provider. Preserve those evidence classes separately.
 
+## Native questions and answers
+
+Use the current capability snapshot to discover `ask_user_question`, its actual
+parameters, and live root eligibility. The host's current registered roots decide
+eligibility; a historical parent-session link does not. A live delegated child
+returns unresolved questions to its coordinator. Do not change host settings or
+invent a question tool when the capability is unavailable.
+
+Record the workflow question successfully before calling the native tool. Use
+its returned pending question ID and digest. In the inspected 0.2.1-rc.3 native
+schema, `questions` contains entries with `id` and `question`, optional `header`,
+optional `options` containing `label` and optional `description`, and optional
+`multi_select`. Use the actual current schema if it differs. Set the native
+question ID to the recorded ID; render its meaning in the conversation language.
+Options come only from real recorded choices. Keep an unambiguous mapping from
+unique displayed labels to recorded choice IDs; a consequence can supply the
+option description. Omit options for an open question when supported. No fixed
+alternative count or timeout is introduced.
+
+Native answers contain `answers` entries with `id`, `selected` labels, and
+optional `custom`. An immediate result is associated with its actual tool call;
+a later `user-question-reply` names that call through `callId`. Match the call,
+question ID, and captured digest against the current pending question before
+recording the answer. If `custom` is nonempty, preserve its raw text and do not
+invent a choice ID from a simultaneously retained selection. When `custom` is
+absent or empty, map only a single unambiguous selected label to its exact
+recorded choice ID. Empty,
+skipped, pending, stale, or ambiguous replies keep the existing wait; they are
+not approval or evidence of user agreement. An actual native human answer is a
+user source even when delivered through a tool result or continued native reply.
+This answer handling does not change the prompt-hook source gate.
+
+For exact Spec/Plan approval, show the reviewed revision first and bind the card
+to the live approval target. Record only the actual explicit approval. If a
+native card is unavailable or cannot represent the request, use the same
+recorded question or approval target in prose and retain the wait. Do not claim
+that a card or an answer exists. Follow the shared handoff in the main skill.
+
 ## Build and inspect an archive
 
-From the reviewed candidate checkout:
+From the reviewed candidate checkout, keep the installable archive in a durable
+release directory outside experiment outputs. For the standard DSH data home:
 
 ```sh
+dsh_data_home="${DSH_HOME:-$HOME/.dsh}"
+archive_directory="$dsh_data_home/releases/task-workflow/0.1.13"
+mkdir -p "$archive_directory"
 npm pack --dry-run --json
-npm pack --pack-destination "$archive_directory"
+npm pack --pack-destination "$archive_directory" --json
 ```
 
 `archive_directory` is the chosen artifact output directory. Use the actual
@@ -169,6 +265,27 @@ readiness, tools, skill load, hooks, and current context in the target process.
 No Task Workflow configuration wizard, AGENTS entry, or credential export is
 required. DeepSeek profiles remain the host's ordinary installation mechanism.
 
+After the approved release is pushed, prefer an immutable Git commit as the
+saved installation origin. Replace the placeholder with the actual approved
+release commit, and use the same quit, backup, compatibility, and verification
+steps as for the archive:
+
+```sh
+dsh plugin --profile desktop add --save-exact \
+  'git+https://github.com/zihaozou/task-workflow-plugin.git#<approved-release-commit>'
+```
+
+The supported manager accepts Git specs and passes the commit fragment to pnpm.
+Its GitHub connectivity check does not prove installation or activation. Verify
+the saved source, actual package version, full installed payload, bundle order,
+and runtime readiness. Compare the Git-installed payload with the reviewed
+archive before replacing an active installation. Do not follow a moving branch
+or use an experiment directory as the permanent release source. If Git retrieval
+is unavailable, install the same checksum-verified archive from the durable
+release directory and retain that exact origin and hash in the installation
+receipt. Candidate installation does not authorize publication or replacement
+of an active profile.
+
 ## Candidate verification and release order
 
 1. Complete item checks and independent reviews for the approved candidate.
@@ -200,6 +317,48 @@ python3 -m unittest discover -s tests -p test_package.py -v
 test's actual scope: isolated SDK/stub evidence does not by itself prove live
 Desktop activation or real-provider completion. Test records are separate from
 Task Workflow approval, experiment acceptance, and closure.
+
+## Automatic invalid-tool-JSON recovery
+
+The adapter uses the official `@deepseek-ai/dsh-llm-retry` 0.2.1-rc.3 recovery
+boundary for the authorized active workflow's exact invalid tool-argument JSON
+failure, with public typed stream inspection from `@deepseek-ai/dsh-llm` at the
+same pinned version. The error must be `MALFORMED_RESPONSE` with message
+`DeepSeek Messages stream: tool input is invalid JSON`. Eligibility also requires
+the same live agent, turn, step, and confirmed current native `assistant/attempt`
+sequence, whose nonempty complete closed typed call set contains only currently declared
+workflow MCP operations. Mixed native/ordinary calls, unknown tools, missing or
+unbound tasks, and changed context pass through to native handling. It does not
+match phrases in old dialogue or rendered history. This exact parse failure is
+distinct from other malformed responses, schema validation, tool errors, and
+workflow guards.
+Unrelated failures keep their existing native handling.
+
+Native downstream recovery gets one delegation for the current failure. If it
+returns a retry decision, preserve that decision without scheduling another
+retry. If it declines, including after its configured finite budget is exhausted,
+the adapter's narrow fallback can continue this eligible request. The provider's
+original retry configuration and provider/model route remain unchanged. The
+fallback uses the official executor with a copy of the actual host backoff
+settings. It rechecks current task eligibility, typed attempt, and
+request identity after backoff before requesting the next attempt. Root, session,
+task, and version must still match the request binding; stale or unrelated
+context cannot authorize another request.
+
+Every retry is a new model request and can repeat input-token billing and add
+output charges. The selected recovery continues until valid output or actual
+cancellation while the same task/request remains eligible. Cancellation or
+plugin disposal stops the owned recovery wait and joins its settlement; a retry
+notice is not success. Preserve failed attempts and their retry evidence in the
+native session log through official `llm/retry` and `llm/retry-started` events.
+A syntactically valid response can still fail a schema or workflow guard; this policy does not turn those errors into user authorization.
+
+Recovery repeats model generation at the failed request boundary. It does not
+re-enroll the task, repeat completed workflow work, guess or edit JSON arguments,
+change provider settings, add a Stop continuation, or set a new retry-count cap.
+Inspect actual terminal outcomes. Isolated runtime checks establish their tested
+recovery and cancellation behavior; actual-session/model testing remains
+reserved for the human.
 
 ## Long operations and recovery
 

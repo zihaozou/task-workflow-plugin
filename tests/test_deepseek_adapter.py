@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,7 @@ import test_session_bindings as fixtures
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/task-workflow/scripts"
 sys.path.insert(0, str(SCRIPTS))
 import deepseek_context
+import mcp_server
 import workflow
 
 
@@ -44,6 +46,12 @@ class DeepSeekContextTests(unittest.TestCase):
     def context(self, **fields):
         return deepseek_context.context_for(self.payload(**fields))
 
+    def assert_core_context(self, actual, expected):
+        actual = dict(actual)
+        guidance = actual.pop("stage_guidance")
+        self.assertEqual(actual, expected)
+        self.assertEqual(guidance, deepseek_context.stage_guidance(expected["dialogue_contract"], expected))
+
     def command(self, raw=None, **fields):
         if raw is None:
             raw = json.dumps(self.payload(**fields)).encode("utf-8")
@@ -65,11 +73,11 @@ class DeepSeekContextTests(unittest.TestCase):
         expected = self.core.session_dialogue_context(str(self.root), "session-1")
         before = self.snapshot()
         schemas = self.core.command_schemas()
-        self.assertEqual(self.context(), {"ok": True, "context": expected})
+        self.assert_core_context(self.context()["context"], expected)
         result = self.command()
         self.assertEqual(result.returncode, 0)
         self.assertEqual(result.stderr, b"")
-        self.assertEqual(json.loads(result.stdout), {"ok": True, "context": expected})
+        self.assert_core_context(json.loads(result.stdout)["context"], expected)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.core.command_schemas(), schemas)
         self.assertEqual(len(schemas), 53)
@@ -187,9 +195,101 @@ class DeepSeekContextTests(unittest.TestCase):
         self.assertGreater(len(result.stdout), 1024 * 1024)
         self.assertEqual(result.stderr, b"")
         actual = json.loads(result.stdout)
-        self.assertEqual(actual, {"ok": True, "context": expected})
+        self.assert_core_context(actual["context"], expected)
         self.assertEqual(actual["context"]["dialogue_contract"]["latest_answer"]["question_text"], text)
         self.assertEqual(actual["context"]["dialogue_contract"]["latest_answer"]["answer"]["text"], raw_answer)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_every_stage_projects_only_complete_current_canonical_sections(self):
+        source = deepseek_context.TEMPLATE_ROOT / "conversation.md"
+        text = source.read_text()
+        common = text.split("## ", 1)[0]
+        cases = [("discussion", mode, mode) for mode in ("first_reply", "answer_acknowledgment", "playback", "reentry")]
+        cases += [(stage, None, "design") for stage in ("design", "design_review", "design_confirmation")]
+        cases += [("discussion", "design_preparation", "design")]
+        cases += [(stage, None, "plan") for stage in ("plan", "plan_confirmation")]
+        cases += [(stage, None, "execution") for stage in ("implementation", "delivery")]
+        for stage, mode, expected in cases:
+            with self.subTest(stage=stage, mode=mode):
+                guidance = deepseek_context.stage_guidance({"stage": stage, "dialogue_mode": mode})
+                heading = deepseek_context.CONVERSATION_SECTIONS[expected]
+                section = text.split("## " + heading + "\n", 1)[1].split("\n## ", 1)[0]
+                self.assertEqual(guidance["conversation_template"].rstrip(), (common + "## " + heading + "\n" + section).rstrip())
+                self.assertIn("current conversation language", guidance["title_language_rule"])
+                self.assertIn("semantic sections", guidance["title_language_rule"])
+                self.assertEqual("recording_example" in guidance, expected in ("first_reply", "answer_acknowledgment", "playback", "reentry"))
+                for filename, key, wanted in (("spec.md", "spec_template", expected == "design"), ("plan.md", "plan_template", expected == "plan")):
+                    self.assertEqual(key in guidance, wanted)
+                    if wanted:
+                        self.assertEqual(guidance[key], (deepseek_context.TEMPLATE_ROOT / filename).read_text())
+        legacy = deepseek_context.stage_guidance({"stage": "legacy"})
+        self.assertEqual(legacy["mode"], "recorded")
+        self.assertEqual(legacy["conversation_template"], common)
+
+    def test_canonical_template_is_refreshed_each_read_and_missing_is_sanitized(self):
+        self.enroll("first", "session-1")
+        folder = self.base / "templates"
+        shutil.copytree(deepseek_context.TEMPLATE_ROOT, folder)
+        shutil.copytree(deepseek_context.TEMPLATE_ROOT.parent / "references", self.base / "references")
+        before = self.snapshot()
+        with mock.patch.object(deepseek_context, "TEMPLATE_ROOT", folder):
+            first = self.context()["context"]["stage_guidance"]
+            source = folder / "conversation.md"
+            source.write_text(source.read_text().replace("## First discussion reply\n", "## First discussion reply\n\nFresh canonical canary.\n"))
+            second = self.context()["context"]["stage_guidance"]
+            self.assertNotIn("Fresh canonical canary", first["conversation_template"])
+            self.assertIn("Fresh canonical canary", second["conversation_template"])
+            source.unlink()
+            self.assertEqual(self.context(), deepseek_context.error_result("context_unavailable"))
+            self.assertEqual(self.context(session_id="unbound"), {"ok": True, "context": None})
+        self.assertEqual(self.snapshot(), before)
+
+    def test_direct_example_has_current_identity_and_preserves_canonical_nested_question(self):
+        state = self.enroll("first", "session-1")
+        guidance = self.context()["context"]["stage_guidance"]
+        arguments = guidance["recording_example"]["arguments"]
+        self.assertEqual((arguments["root"], arguments["task_id"], arguments["expected_version"]), (str(self.root), "first", state["version"]))
+        self.assertEqual(arguments["actor"], "<registered coordinator actor>")
+        reference = (SCRIPTS.parent / "references/workflow.md").read_text()
+        canonical = json.loads(re.search(r"<!-- process-question-complete-example -->\s*```json\s*(.*?)```", reference, re.S).group(1))
+        self.assertEqual(arguments["question"], canonical["question"])
+        self.assertIn("not a question or authorization", guidance["recording_example"]["instruction"])
+
+    def test_documented_nested_question_executes_and_malformed_input_never_mutates(self):
+        state = self.enroll("first", "session-1")
+        source = {"kind": "user", "reference": "Synthetic example test authorization"}
+        state = self.advance(state, "process-intent", intent={"goal": "Select output", "why": "Exercise the documented call", "success_criteria": ["Actual nested question is recorded"], "source": source})
+        state = self.advance(state, "process-exploration", exploration={"current_behavior": "Fixture inspected", "evidence": ["Fixture README"], "unknowns": []})
+        document = (SCRIPTS.parent / "references/workflow.md").read_text()
+        match = re.search(r"<!-- process-question-complete-example -->\s*```json\s*(.*?)```", document, re.S)
+        self.assertIsNotNone(match, "The executable example must be present in the actual reference")
+        arguments = json.loads(match.group(1))
+        arguments.update(root=str(self.root), task_id="first", actor="owner", expected_version=state["version"])
+        malformed = {key: value for key, value in arguments.items() if key != "question"}
+        malformed.update(arguments["question"])
+        before = self.snapshot()
+        server = mcp_server.Server()
+        server.initialized = True
+        request = {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "process-question", "arguments": malformed}}
+        with mock.patch.object(self.core, "dispatch", wraps=self.core.dispatch) as dispatch:
+            rejected = server.handle(request)
+            self.assertEqual(rejected["error"]["code"], -32602)
+            dispatch.assert_not_called()
+        self.assertEqual(self.snapshot(), before)
+        raw = json.dumps(malformed) + ', "root": ' + json.dumps(str(self.root)) + '}'
+        with self.assertRaises(json.JSONDecodeError):
+            mcp_server.parse_json(raw)
+        self.assertEqual(self.snapshot(), before)
+        result = self.core.dispatch("process-question", arguments)
+        self.assertEqual(result["dialogue_contract"]["pending_questions"][0]["id"], arguments["question"]["id"])
+        self.assertEqual(result["dialogue_contract"]["pending_questions"][0]["choices"], arguments["question"]["choices"])
+        # A late tool reply cannot write through its earlier task revision.
+        stale = {"root": str(self.root), "task_id": "first", "actor": "owner", "expected_version": state["version"],
+                 "question_id": arguments["question"]["id"], "answer": "Synthetic old answer", "source": source}
+        before = self.snapshot()
+        with self.assertRaises(self.core.WorkflowError) as conflict:
+            self.core.dispatch("process-answer", stale)
+        self.assertEqual(conflict.exception.code, "revision_conflict")
         self.assertEqual(self.snapshot(), before)
 
     def test_frozen_core_still_requires_only_workflow_and_runner(self):
