@@ -1,0 +1,27 @@
+{
+  "name": "@local/task-workflow",
+  "version": "0.1.9",
+  "private": true,
+  "type": "module",
+  "description": "Shared Task Workflow tools, skills and context for DeepSeek Harness.",
+  "exports": {
+    ".": "./adapters/deepseek/index.js"
+  },
+  "files": ["adapters/deepseek", "hooks/hooks.json", "skills/task-workflow"],
+  "dsh": {
+    "bundle": {"patch": "./adapters/deepseek/cordis.patch.yml"}
+  },
+  "scripts": {
+    "test:deepseek": "node --test tests/deepseek_adapter.integration.mjs"
+  },
+  "dependencies": {
+    "@deepseek-ai/dsh-hooks-codex": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-hook-protocol": "0.2.1-rc.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.0.5",
+    "@deepseek-ai/dsh-mcp-client": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-skill-filesystem": "0.2.1-rc.3",
+    "@deepseek-ai/dsh-subprocess": "0.2.1-rc.3"
+  }
+}

@@ -1,0 +1,3 @@
+- insert:
+    - id: task-workflow-native
+      name: '@local/task-workflow'

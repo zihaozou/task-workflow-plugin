@@ -205,14 +205,25 @@ messages, project facts, diffs, and evidence.
 
 ## Roles and review
 
-The primary agent coordinates and reviews the task. Choose the model for each
-focused delegation: Luna for simple lookup, documentation, and mechanical
-checks; Sol by default for implementation and review. Use Astra only after
-explicit user approval. If a lighter model is unavailable, choose an available
-Sol model. Do not escalate automatically to Astra. Reuse a worker only while
-its model remains suitable; downgrade routine fixes and later phases when a
-higher model is no longer needed. Workers do not delegate recursively. The
-coordinator inspects actual diffs and evidence, and avoids repeated review
+The primary agent coordinates and reviews the task.
+
+Choose each delegation through capabilities actually exposed by the current
+host. Preserve explicit user model and execution preferences. On Codex, use
+Luna for simple lookup, documentation, and mechanical checks, and Sol for
+implementation and review when those models are available. Astra requires
+explicit user approval. If a lighter Codex model is unavailable, use an available
+Sol model; do not silently escalate to Astra.
+
+On DeepSeek Harness, inherit the host's current authorized provider/model route,
+including the user's selected Flash route. Use the host's native subagent tools.
+Query selectable child routes only when its native model-discovery tool is
+actually exposed and selection is authorized. Do not guess an internal Flash
+identifier, pass OpenAI model names, enable model-selection settings, or silently
+change the cost or provider. Record the actual selected route and delegation
+evidence. An unavailable capability is a gap to resolve, not a capability to
+claim. Reuse a worker only while its model remains suitable, and use a lighter
+available authorized route when appropriate. Workers do not delegate recursively.
+The coordinator inspects actual diffs and evidence, and avoids repeated review
 cycles or agent turns that add no evidence.
 
 Each item follows `pending -> implementing -> reviewing -> complete`. Failed
@@ -237,7 +248,10 @@ Discover `scripts/workflow.py --help` and the `schema` operation before calling
 mutations. The standard-library program exposes `dispatch(op, args)`. CLI shape
 is `OP --root <project> --json-args '<JSON>'`; `--json-args -` accepts stdin JSON.
 The current schema defines operation names, arguments, versions, and guards.
-Treat those schemas as the authority rather than inventing fields.
+Treat those schemas as the authority rather than inventing fields. Use the
+current host's registered MCP tools or native shell and workflow CLI. DeepSeek
+installation, context refresh, native models, and long-operation boundaries are
+specified in [references/deepseek.md](references/deepseek.md).
 
 Register the current project and task after explicit invocation, enrollment, or a
 clear substantive action request. Pass the host-provided session identifier

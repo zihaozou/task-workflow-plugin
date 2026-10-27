@@ -4,9 +4,10 @@ Task Workflow routes substantive development and experiment action requests
 through exploration, a focused design discussion, reviewed design and plan
 approvals, delegated work, evidence review, and optional frozen runs.
 It combines a skill, recovery and communication hooks, and a Python workflow
-program exposed through command-line and MCP tools.
+program exposed through command-line and MCP tools. Codex and DeepSeek Harness
+use that same program and skill through their native registrations.
 
-## Install and enroll
+## Codex installation and enrollment
 
 Use Python 3.9 or later. The runtime uses the Python standard library. Git is
 required for development worktrees and integration.
@@ -99,8 +100,8 @@ still require authorized reopening before their work can change.
 The program validates declared state, source links, and guarded transitions. It
 cannot establish the semantic truth of conversation or guarantee model obedience.
 
-There is no setup wizard, user configuration file, execution profile, or global
-task registry. Your existing instructions can supply private conventions. The
+Task Workflow has no setup wizard, user configuration file, execution profile,
+or global task registry. Native host profiles remain host installation state. Your existing instructions can supply private conventions. The
 host loads those instructions; the agent resolves them into explicit workflow
 arguments. The plugin does not read, parse, modify, or require `AGENTS.md`.
 Its workflow context comes from the bundled skill, hooks, and program.
@@ -118,6 +119,44 @@ the operation interface from the repository with:
 ```sh
 python3 skills/task-workflow/scripts/workflow.py schema
 ```
+
+## DeepSeek Harness
+
+The native `@local/task-workflow` package targets DeepSeek Harness `0.2.1-rc.3`.
+It mounts the official compatible Codex Hook bridge, the shared MCP tools and
+skill, and a read-only provider for current project/session context during native
+request assembly. The provider refreshes context after same-turn compaction;
+host-sourced context does not become human authority or force another turn.
+It adds synchronous read cost before model admission.
+
+Build and inspect the candidate archive from the reviewed checkout:
+
+```sh
+npm pack --dry-run --json
+npm pack --pack-destination "$archive_directory"
+```
+
+Use the filename actually returned by `npm pack`. With the app safely quit and
+its profile backed up, install the reviewed archive through the supported command:
+
+```sh
+dsh plugin --profile desktop add --save-exact "$archive_path"
+```
+
+The bundle adds to existing profile composition. Preserve other bundles, rows,
+settings, credentials, and earlier runtime files. Package presence and saved
+selection are separate from live activation after restart. Use the current
+native authorized model route, including the user's selected Flash route;
+Codex model names are not DeepSeek route identifiers.
+
+Follow [the DeepSeek reference](skills/task-workflow/references/deepseek.md) for
+exact package dependencies, readiness, context errors, cleanup, verification,
+rollback, and long operations. It also describes native host call defaults, which
+are separate from Task Workflow's unchanged workload timeout behavior. The
+supported sequence is candidate installation and actual provider/delegation
+checks, independent overall review, guarded integration, packaged-payload
+comparison, then final installed verification. A stub test proves its observed
+transport behavior, not real-provider obedience.
 
 ## Project paths
 

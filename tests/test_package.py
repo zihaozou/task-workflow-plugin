@@ -1,4 +1,4 @@
-"""Check Codex packaging and project-scoped hook context."""
+"""Check unified release assets and Python-only Codex hook and tool discovery."""
 import hashlib
 import json
 import os
@@ -16,6 +16,19 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / 'skills/task-workflow/scripts'
+NATIVE_RELEASE_FILES = {
+    'README.md', 'package.json', 'adapters/deepseek/index.js',
+    'adapters/deepseek/cordis.patch.yml', 'hooks/hooks.json',
+    'skills/task-workflow/SKILL.md', 'skills/task-workflow/agents/openai.yaml',
+    'skills/task-workflow/references/workflow.md',
+    'skills/task-workflow/references/deepseek.md',
+} | {'skills/task-workflow/scripts/' + name for name in (
+    'workflow.py', 'runner.py', 'mcp_server.py', 'session_hook.py',
+    'communication_prompt_hook.py', 'deepseek_context.py',
+)} | {'skills/task-workflow/templates/' + name for name in (
+    'README.md', 'phases.md', 'conversation.md', 'record.md',
+    'worker-briefs.md', 'worker-reports.md', 'spec.md', 'plan.md',
+)}
 sys.path.insert(0, str(SCRIPTS))
 import communication_prompt_hook
 import session_hook
@@ -26,7 +39,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.8')
+        self.assertEqual(manifest['version'], '0.1.9')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -35,6 +48,50 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(interface['capabilities'], [])
         for key in ('skills', 'mcpServers', 'hooks'):
             self.assertTrue((ROOT / manifest[key]).exists())
+
+    def test_native_bundle_matches_codex_release_and_declares_shipped_entrypoints(self):
+        manifest = json.loads((ROOT / 'package.json').read_text())
+        codex = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
+        self.assertEqual(manifest['name'], '@local/task-workflow')
+        self.assertEqual(manifest['version'], codex['version'])
+        self.assertTrue(manifest['private'])
+        self.assertEqual(manifest['type'], 'module')
+        self.assertEqual(manifest['exports']['.'], './adapters/deepseek/index.js')
+        patch = manifest['dsh']['bundle']['patch']
+        self.assertEqual(patch, './adapters/deepseek/cordis.patch.yml')
+        self.assertIn("name: '@local/task-workflow'", (ROOT / patch).read_text())
+        for dependency in ('dsh-hooks-codex', 'dsh-hook-protocol'):
+            self.assertEqual(manifest['dependencies']['@deepseek-ai/' + dependency], '0.2.1-rc.3')
+        for dependency in ('dsh-mcp-client', 'dsh-skill-filesystem', 'dsh-subprocess'):
+            self.assertEqual(manifest['peerDependencies']['@deepseek-ai/' + dependency], '0.2.1-rc.3')
+        for relative in NATIVE_RELEASE_FILES:
+            with self.subTest(path=relative):
+                self.assertTrue((ROOT / relative).is_file())
+
+    @unittest.skipUnless(shutil.which('npm'), 'npm is needed only for the native archive development check')
+    def test_native_pack_contains_release_assets_and_excludes_private_data(self):
+        result = subprocess.run(['npm', 'pack', '--dry-run', '--json'], cwd=ROOT,
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        packages = json.loads(result.stdout)
+        self.assertEqual(len(packages), 1)
+        package = packages[0]
+        self.assertEqual(package['name'], '@local/task-workflow')
+        self.assertEqual(package['version'], '0.1.9')
+        paths = [entry['path'] for entry in package['files']]
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertEqual(set(paths), NATIVE_RELEASE_FILES)
+        private_parts = {'.git', '.task-workflow', '.worktrees', '.experiments',
+                         'experiments', 'runs', 'profiles', '.dsh', '.agents',
+                         'auth', 'credentials', 'node_modules', '__pycache__',
+                         '.venv', '.pytest_cache', '.mypy_cache', 'tests'}
+        for relative in paths:
+            with self.subTest(path=relative):
+                path = Path(relative)
+                self.assertFalse(path.is_absolute())
+                self.assertFalse(set(path.parts) & (private_parts | {'..'}))
+                self.assertFalse(path.name.startswith('.env'))
+                self.assertNotIn(path.suffix, {'.pyc', '.pyo', '.log', '.tgz'})
 
     def test_repository_marketplace_exposes_exactly_this_plugin(self):
         marketplace = json.loads((ROOT / '.agents/plugins/marketplace.json').read_text())
@@ -82,7 +139,12 @@ class PackageTests(unittest.TestCase):
             replies = [json.loads(line) for line in result.stdout.splitlines()]
             self.assertEqual([reply['id'] for reply in replies], [1, 2, 3])
             self.assertEqual(replies[0]['result']['serverInfo']['name'], 'task-workflow')
-            self.assertIn('context', {tool['name'] for tool in replies[1]['result']['tools']})
+            tools = replies[1]['result']['tools']
+            expected = session_hook.workflow.command_schemas()
+            self.assertEqual(len(tools), 53)
+            self.assertEqual(len(expected), 53)
+            self.assertEqual([{key: tool[key] for key in schema}
+                              for tool, schema in zip(tools, expected)], expected)
             self.assertFalse(replies[2]['result']['isError'])
             self.assertTrue(json.loads(replies[2]['result']['content'][0]['text'])['ok'])
 
@@ -147,7 +209,7 @@ class PackageTests(unittest.TestCase):
 
     def test_runtime_assets_and_python_syntax(self):
         for name in ('workflow.py', 'runner.py', 'mcp_server.py',
-                     'session_hook.py', 'communication_prompt_hook.py'):
+                     'session_hook.py', 'communication_prompt_hook.py', 'deepseek_context.py'):
             self.assertTrue((SCRIPTS / name).is_file(), name)
         self.assertFalse((SCRIPTS / 'status_view.py').exists())
         self.assertFalse((ROOT / 'skills/task-workflow/assets/workflow.html').exists())

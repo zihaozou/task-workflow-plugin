@@ -122,14 +122,28 @@ behavior, verification, and evidence requirements. Workers implement, fix, and
 test without recursive delegation. Use
 [../templates/worker-briefs.md](../templates/worker-briefs.md) and
 [../templates/worker-reports.md](../templates/worker-reports.md). Put brief and
-report references in the one task record. Choose a model for every focused delegation:
-Luna for simple lookup, documentation, and mechanical checks; Sol by default for
-implementation and review. Astra requires explicit user approval. If a lighter
-model is unavailable, choose an available Sol model. Never escalate automatically
-to Astra. Reuse workers only while their model remains suitable; downgrade
-routine fixes and later phases when the higher model is no longer needed.
+report references in the one task record.
+
+Choose each delegation through capabilities actually exposed by the current
+host. Preserve explicit user model and execution preferences. On Codex, use
+Luna for simple lookup, documentation, and mechanical checks, and Sol for
+implementation and review when those models are available. Astra requires
+explicit user approval. If a lighter Codex model is unavailable, use an available
+Sol model; do not silently escalate to Astra.
+
+On DeepSeek Harness, inherit the host's current authorized provider/model route,
+including the user's selected Flash route. Use the host's native subagent tools.
+Query selectable child routes only when its native model-discovery tool is
+actually exposed and selection is authorized. Do not guess an internal Flash
+identifier, pass OpenAI model names, enable model-selection settings, or silently
+change the cost or provider. Record the actual selected route and delegation
+evidence. An unavailable capability is a gap to resolve, not a capability to
+claim. Reuse a worker only while its model remains suitable, and use a lighter
+available authorized route when appropriate. Workers do not delegate recursively.
 Review actual evidence and avoid agent turns or review cycles that add none.
 Do not claim a capability or parallel execution that did not occur.
+See [deepseek.md](deepseek.md) for native installation, context, and execution
+boundaries.
 
 Each item follows `pending -> implementing -> reviewing -> complete`. Failed
 review returns it to `implementing`. A task reviewer returns separate
