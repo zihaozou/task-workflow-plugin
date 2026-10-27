@@ -70,6 +70,10 @@ playback. Playback separates user requirements, agent proposals, and explicitly
 delegated choices. A coherent design receives independent gap review before the
 user sees and approves that exact revision. The user then sees work and
 verification in a linked plan and approves its exact revision before execution.
+The complete confirmed objective and acceptance remain the target through every
+stage. Resolve difficulty through investigation and concrete planning; phase
+dependencies without reducing scope. A confirmed requirement changes only with
+explicit actual user authority recorded in `scope_changes`.
 Stage replies use concise bold labels, grouped bullets or tables, and a separate
 question. Empty optional groups and routine workflow narration are omitted.
 Spec and Design mean the same reviewed revision in the one task record. Specs
@@ -247,19 +251,35 @@ review returns the item to `implementing`.
 
 ```mermaid
 flowchart LR
-  A[Current project] --> B[Task worktree]
-  B --> C[Implementation and review]
-  C --> D[One authorized squash commit]
-  D --> E[Verify integrated revision]
-  E --> F[Freeze code and environment]
-  F --> G[Execute run]
-  G --> H[Accept artifacts and outcome]
+  A[Current main] --> B[Owned worktree generation]
+  B --> C[Implement and developmental verification]
+  C --> D[Independent item and overall reviews]
+  D --> E[One authorized squash commit]
+  E --> F[Verify integrated revision]
+  F --> G[Freeze Run inputs and validate startup]
+  G --> H[Check references and clean worktree]
+  H --> I[Guarded formal dispatch]
+  I --> J[Accept artifacts and outcome]
+  J --> K{Another approved revision?}
+  K -->|yes| A
 ```
 
 Implementation approval and integration authorization are recorded separately.
 Authorized integration creates one ordinary squash commit on the selected base,
 with normal Git hooks and signing. Verify that revision before freezing dependent
-runs. Cleanup checks integration proof, snapshots, and remaining references.
+runs. Integration requires a clean base by default. An authorized integration
+can preserve unrelated dirty tracked work through a preview-bound preservation
+digest, then verify the exact integrated commit in a detached checkout and
+freeze Run inputs from that commit's Git objects. Each new formal Run follows
+accepted implementation and overall review,
+integration and verification, input freeze and startup validation, reference
+checks, owned-worktree cleanup, then guarded dispatch. A later approved revision
+recreates a worktree from current main as a new generation and creates a new
+immutable Run for the same experiment. Development checks may use authorized
+resources, including GPUs, before merge; their evidence stays bound to the actual
+worktree revision. Integration verification runs against the exact integrated
+commit after merge and may also use authorized resources, including GPUs; its
+evidence stays bound to that commit.
 
 An experiment has one research goal and can have several frozen runs. Changed
 code or arguments for the same goal creates a new run. Changed goals create new
@@ -270,11 +290,20 @@ and applies only when the user supplies one; the plugin does not set a maximum.
 Use `run-execute`
 with `detached: true` for a local launch that returns immediately, or
 `run-dispatch` to save an external execution intent and obtain its exact pinned
-runner argument array. Dispatch records `queued`; the actual runner checks
-resource admission, makes a permanent claim, and records the workload start.
+runner argument array. External `check-dispatch` similarly returns exact
+`runner_argv` to the private controller. Direct verification wrappers execute
+their local runner. Dispatch records `queued`; the actual runner checks resource
+admission, makes a permanent claim, and records the workload start. `run-validate`
+uses the resource and controller path prepared for that Run.
 Observe or reconcile its receipt after rereading the current task version.
 
-Resources record who provided them and their observed availability. Their derived
+Resources record who provided them and their observed availability. Actual
+check and Run activity is tracked separately from holds that retain capacity for
+named future work or persistent choices. A hold does not count as active use;
+completion releases only that use's capacity. Physical release still requires
+actual per-action authority. Scope closure resolves only a matching
+program-owned hold; a manually created persistent hold requires explicit
+resolution. Their derived
 state is `available`, `in_use`, `releasable`, `released`, or `unknown`. Record
 ownership, run references, and release permission. Your
 private conventions determine concrete provisioning and execution choices; the

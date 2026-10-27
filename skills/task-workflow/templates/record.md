@@ -18,9 +18,11 @@ upgrade. State a pending user action only when one is actually required.
 
 ## Intent
 
-The user's objective, completion contract, task scope, original enrollment
-source, and any later scope changes. Distinguish the user's words from the
-agent's interpretation.
+The user's complete objective, completion contract, and original enrollment
+source. Distinguish user-confirmed scope from agent interpretation. Carry the
+full completion contract through every revision and worktree generation. Record
+any authorized scope change with its actual user source and affected
+requirements; implementation cost or complexity alone is not a scope change.
 
 ## Exploration
 
@@ -32,9 +34,16 @@ when it can change.
 
 One row per requirement: identifier, text, kind (`scope`, `constraint`, or
 `acceptance`), source reference, status (`proposed` or `confirmed`), user
-confirmation source when confirmed, and acceptance evidence. User requirements
-must not be relabeled as agent proposals. An agent suggestion must not be
-relabeled as a user requirement.
+confirmation source when confirmed, and acceptance evidence. Keep the confirmed
+requirement ledger source-backed and complete across reentry and requirement
+updates. Do not silently remove, rename, demote, or replace a confirmed item.
+Each authorized removal, replacement, revision, or demotion records the prior
+requirement digest, disposition, reason, and actual user authorization in
+`scope_changes` with `requirement_id`, `previous_digest`, `action`, `reason`, and
+`authorization_source`; `replacement_ids` is required only for replacement.
+Replacement requirements retain their actual confirmation sources. User
+requirements must not be relabeled as agent proposals. An agent
+suggestion must not be relabeled as a user requirement.
 
 ## Sourced decisions
 
@@ -62,22 +71,30 @@ responsibilities, and concrete task blocks. Each block includes component and
 requirement mappings, owned file actions/responsibilities, interface declarations,
 dependencies, ordered action steps, named tests/assertions or inspection criteria,
 verification commands/targets and expected results, acceptance, and review focus.
-Include applicable integration/recovery and user plan-approval source. Lifecycle
-phase names alone do not describe implementation tasks. If the design changes materially, return to discussion and revise
+Include a coverage map from every confirmed acceptance requirement to concrete
+tasks and checks, including difficult or expensive requirements. Phases may
+order dependencies while preserving the full goal and acceptance. Include
+applicable integration/recovery and user plan-approval source. Lifecycle phase
+names alone do not describe implementation tasks. If the design changes materially, return to discussion and revise
 the dependent plan.
 
 ## Execution and review
 
 For each item, record the implementation state, worker brief reference, change
 revision, tests and evidence, separate requirements and quality verdicts,
-remediation, and final overall-review verdict. A worker claim alone is not a
-verdict. Reviewers inspect actual changes and evidence.
+remediation, and final overall-review verdict. For every worktree generation,
+record its base revision, worktree identity, accepted evidence, integration and
+verification binding, cleanup intent and receipt, and links to dependent Runs.
+Preserve old generation and run evidence when a later approved revision creates
+a new generation. A worker claim alone is not a verdict. Reviewers inspect actual
+changes and evidence.
 
 ## Experiments and runs
 
 Research goal, experiment and frozen run identities, code and environment
-revisions, inputs, resource identity and ownership, execution receipt,
-artifact checks, acceptance, and closure. Include the inspected entrypoint dependency
+revisions, inputs, resource identity and ownership, actual resource-use activity,
+retention holds, execution receipt, artifact checks, acceptance, and closure.
+Include the inspected entrypoint dependency
 closure, inclusion paths for code/configuration/assets, excluded unrelated scope,
 fixed external identities, and their design/plan confirmation sources. Record the
 selected shared snapshot identity, per-run source provenance, startup validation
@@ -90,7 +107,9 @@ Code-only verification need not create a research experiment.
 
 Integrated revision, integration authorization source, final verification,
 accepted artifacts, user-facing result, material limitations, and required
-cleanup evidence. Distinguish integration, run, resource, and task closure.
+cleanup evidence. Show evidence for the complete confirmed completion contract.
+For formal runs, record successful worktree cleanup and the matching cleanup
+receipt before dispatch. Distinguish integration, run, resource, and task closure.
 
 ## Decision history
 

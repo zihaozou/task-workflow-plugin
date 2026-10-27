@@ -50,6 +50,7 @@ class DeepSeekContextTests(unittest.TestCase):
         actual = dict(actual)
         guidance = actual.pop("stage_guidance")
         self.assertEqual(actual, expected)
+        self.assertEqual(guidance['goal_integrity'], self.core.GOAL_INTEGRITY)
         self.assertEqual(guidance, deepseek_context.stage_guidance(expected["dialogue_contract"], expected))
 
     def command(self, raw=None, **fields):
@@ -80,7 +81,7 @@ class DeepSeekContextTests(unittest.TestCase):
         self.assert_core_context(json.loads(result.stdout)["context"], expected)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.core.command_schemas(), schemas)
-        self.assertEqual(len(schemas), 54)
+        self.assertEqual(len(schemas), 61)
 
     def test_unbound_project_and_other_session_are_successful_null_without_enrollment(self):
         self.assertEqual(self.context(), {"ok": True, "context": None})

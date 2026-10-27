@@ -56,6 +56,14 @@ legacy migration. Discover the live schema before calling any mutation. Pass
 the current state version and actor. Design and plan versions have digests;
 their review and approval operations refer to the exact digest shown.
 
+`process-requirements.scope_changes` records an explicit user-authorized change
+to a confirmed requirement. Each entry names `requirement_id`, its
+`previous_digest`, `action` (`remove`, `replace`, `revise`, or `demote`), the
+reason, and `authorization_source` pointing to the actual user message.
+`replacement_ids` is required only for `replace`. Keep revised and replacement
+requirements source-backed and confirmed. Omission, a new ID, or list
+replacement is not scope-change authority.
+
 For `process-question` and `process-reenter`, `question.scope` contains existing
 requirement identifiers, not descriptions or file paths. Use an empty list when
 no applicable requirements are recorded yet. Do not invent requirements merely
@@ -142,6 +150,12 @@ concise bold labels, one point per bullet, tables for comparisons, and the exact
 question or approval request in a separate final section. Omit empty optional
 groups and routine recording narration. Keep complete provenance and digest
 bindings in the one record; show relevant source links beside useful findings.
+Carry the complete confirmed objective and acceptance through every stage.
+Engineering effort is resolved through evidence gathering and concrete planning;
+it does not reopen confirmed scope. Preserve requirements across list updates,
+reentry, and worktree generations. A confirmed requirement changes only with
+explicit actual user authority recorded in `scope_changes`, including its prior
+digest, disposition, reason, and source.
 
 Spec and Design are the same revision and approval stage. Use Spec in conversation
 and retain the Design record heading and `process-design` operations. Follow
@@ -179,6 +193,8 @@ choices with exact scope, and remaining unknowns in that order. Record the playb
 question before sending; wait for confirmation, record its answer and corrected
 sources, then record confirmed playback. A source must identify an actual message,
 event, or reviewed revision. A user confirmation covers only the content shown.
+The complete requirement ledger remains the coverage anchor: a missing ID,
+renamed ID, or omitted row does not itself change confirmed scope.
 
 Write a coherent design with behavior, components, interfaces, mapped requirements
 and decisions, assumptions, verification, and recovery. Obtain independent gap
@@ -193,6 +209,10 @@ actual source before implementation. Broad approval does not cover unseen detail
 At every stage, check whether confirmed design and explicit delegation settle the
 next important choice. If not, use `process-reenter`, record its question before
 asking, and synchronize the answer and affected sources before dependent work.
+Do not reopen a confirmed inclusion because it is difficult, expensive, or can be
+phased. Use phases to order dependencies while retaining the complete goal and
+acceptance. Only the user's explicit recorded scope-change authority changes
+confirmed scope; do not invent a default subset, prototype, cap, or budget.
 Preserve unaffected facts and evidence. Revise affected design and plan versions;
 old approvals cannot approve changed versions. Routine work within approved scope
 continues. Follow [../templates/phases.md](../templates/phases.md) for required
@@ -401,38 +421,140 @@ required non-Git inputs need explicit preservation and evidence.
 Implementation approval and integration authorization are separate. Within
 recorded authorization, the program validates expected base and task revisions
 and creates exactly one ordinary squash commit on the base. Keep normal Git
-hooks and signing. Verify the actual integrated revision before freezing a
-dependent run. Preserve uncertain or conflicted integration for review before
-retrying. Cleanup checks integration proof, snapshots, references, and unique
-material before removing the owned worktree.
+hooks and signing. Integration requires a clean base by default. Set
+`preserve_unrelated_dirty: true` only for an authorized integration that must
+retain unrelated dirty tracked work. First call `integrate` as a dry run and
+review its preservation manifest and `preservation_digest`. The real operation
+requires the exact digest in `expected_preservation_digest` plus the same base
+and task revisions. It preserves staged and unstaged tracked files without
+stashing, resetting, forced checkout, or committing unrelated work. It checks
+candidate paths and ancestors for collisions; unrelated untracked and ignored
+trees outside that collision frontier remain outside the publication footprint.
+After the candidate commit passes the preservation recheck, publication uses a
+non-forcing fast-forward with Git autostash and overwrite-ignore disabled. A
+changed base or preservation identity stops publication for reconciliation.
+
+Verify the actual integrated revision before freezing a dependent formal Run.
+Development checks bind evidence to the worktree revision
+and may use an authorized managed resource, including a GPU, before merge.
+Integration verification runs against the exact integrated commit after merge
+and may also use an authorized managed resource, including a GPU. It defaults to
+`source_mode: live_checkout`, which retains clean-current-main checks. For a
+preservation-mode integration, use `source_mode: fixed_commit`. The optional
+`expected_integration_commit` asserts the recorded commit; it is never an
+arbitrary source selector. Both `integration-verify` and
+`check-dispatch(kind=integration)` accept these selectors. The program binds the
+check to the recorded commit, tree, design and approval, generation, and
+integration token. It creates a program-owned detached checkout inside the
+check evidence directory, verifies its exact Git identity and cleanliness, then
+executes there outside shared/task write locks. After claim settlement and
+receipt validation, it removes only the proven-owned unchanged checkout. If
+unique content or uncertain references remain, it records `cleanup_pending`
+and preserves the checkout; a claimed check is reconciled rather than replayed.
+The fixed runner removes `PYTHONPATH` and `PYTHONHOME`, disables bytecode writes,
+and rejects explicit command paths into mutable registered checkouts. An opaque
+validator must itself inspect the bound source. Cancelling an unclaimed fixed
+check removes only a proven-owned clean checkout; unexpected content remains
+with `cleanup_pending`.
+
+External `check-dispatch`
+reserves and records the check, then returns exact `runner_argv`
+for the private controller; it does not execute that external workload on the
+harness host. Direct `verify` and `integration-verify` wrappers run their
+program-pinned local runner. Formal Run startup validation uses the arguments,
+resource, and controller path recorded in that Run. For each new formal Run,
+freeze and validate its inputs, check references, then safely clean the owned
+worktree before guarded dispatch. Check live cross-task, runtime, and environment
+references and unique content before cleanup. A later approved revision
+recreates the fixed worktree path from current main as a new generation; retain
+earlier runs and evidence.
+
+`run-prepare` freezes executable files directly from the recorded integrated
+Git commit's tree. Its immutable preparation intent and Run snapshot retain the
+exact matching integration verification proof, including check identity,
+receipt digest, source mode, generation, and integration token. A preservation-
+mode integration requires a passed `fixed_commit` check bound to its recorded
+commit before freeze. Unrelated dirty checkout contents do not enter the frozen
+Run code. Recovery retains the original proof from the immutable preparation
+intent, even when a later check passes against the same source.
+
+Each check has an immutable intent with its source revision, selected item or
+Run, frozen arguments, pinned runtime, and optional managed resource. Its
+recorded state distinguishes reserved, starting, running, uncertain, passed,
+failed, stale, and cancelled checks. The pinned runner makes a durable claim
+before execution and writes its receipt. Long validation runs outside shared
+project and task write locks; reservation, admission, and receipt reconciliation
+use short transactions. `check-reconcile` verifies the actual receipt and source
+binding. A changed source remains recorded as stale. `check-cancel` applies only
+when the program proves a local protocol-4 pre-admission claim belongs to the
+same boot, host, and user and its matching runner is dead. Preserve the claim;
+do not replay it. A partial or foreign claim needs actual terminal evidence.
+Reconcile uncertain work before retry; never relaunch an existing check intent.
+On direct verification wrappers, `detached` changes waiting behavior only; use
+`check-dispatch` for the private resource controller.
+
+For a current check or a current formal Run, a claim without an execution receipt
+can be settled only from actual failure or cancellation evidence. Fresh status
+returns the program-derived `settlement_targets`; copy the complete matching
+check or Run target into an `execution-settlement` observation. Do not calculate
+or invent its token, contract, runner-argument, or claim digests. The observation
+records actual observer identity, method, host and time, a separate absolute raw
+controller receipt path and SHA-256, evidence references, and terminal coverage
+for the runner, every owned workload, and every process group. The raw receipt
+and observation must remain available and unchanged. Pass the observation path
+as `settlement_path` with nonempty evidence to `check-reconcile` or
+`run-reconcile`; it is mutually exclusive with `receipt_path` and requires
+coordinator authority. A dead runner alone does not prove its workloads or
+process groups ended. Weak, partial, foreign, or possibly started claims require
+controller-bound evidence covering the full owned execution. Settlement
+records only `failed` or `cancelled`; it never creates a workload receipt,
+return code, passed check, startup success, or artifact acceptance. Apply this
+path only to current checks and lifecycle-contract-1 Runs using runtime protocol
+4. Preserve retained legacy execution and reconciliation unchanged.
 
 ## 4. Resources and frozen execution
 
 A resource represents execution capacity supplied under the user's private
-conventions. The public program records identity, ownership, state, active run
-references, and release permission. It does not encode a provider's policy.
-Record who provided it separately from its observed availability. Its derived
+conventions. The public program records identity, ownership, state, actual use
+activity, retention holds, references, and release permission. Activity for
+checks and Runs tracks pending, active, uncertain, and terminal outcomes against
+actual capacity. A `resource-hold` records named future work or a persistent
+retention choice; it does not consume execution capacity. A terminal use releases
+only its own capacity. Retention and physical release remain separate, and
+release still requires actual per-action authority. The public program does not
+encode a provider's policy. Record who provided the resource separately from its
+observed availability. Its derived
 state is `available`, `in_use`, `releasable`, `released`, or `unknown`.
+
+When a managed check or Run uses a resource, the program can retain it for the
+matching task or experiment scope. `task-complete` and `experiment-complete`
+resolve only the program-owned `until_work_resolved` hold whose sole reference
+matches that exact scope. A manually created persistent hold stays retained
+after scope closure until `resource-hold-resolve` records its actual outcome and
+authority. A resource hold does not consume execution capacity.
 
 Register resources with actual identity and ownership evidence. Reuse them only
 after checking actual availability, compatibility, and all run references. A
 planned reservation establishes a resource reference. Planning and preparation
-can reference pending capacity after identity, ownership, release seal, and
-capability checks. Actual start requires a fresh available observation and no
+can record a prospective reference or retention hold after identity, ownership,
+release seal, and capability checks; they do not consume active execution
+capacity. Actual start requires a fresh available observation and no
 conflicting execution reported by the provider. The plugin imposes no blanket
 active-run limit; actual provider availability and scheduling govern admission.
 Resource eligibility is specific to that capacity. `resource-status` exposes
-recorded release permission, a fresh available observation, and matching run
-references. Planned, preparing, prepared, queued, running, and unknown execution
-still holds capacity. An `awaiting_artifacts` run can stop holding it only when
-committed exit evidence matches its actual execution identity. Task or experiment
+recorded release permission, a fresh available observation, and matching use
+references. Queued/admitting, starting, running, and uncertain uses of the exact
+resource still hold capacity. An `awaiting_artifacts` Run can stop holding
+execution capacity only when committed exit evidence matches its actual execution
+identity. Task or experiment
 closure and artifact acceptance are separate outcomes, not substitutes for a
 capacity observation; an unrelated open task does not hold this resource.
 
 Finishing execution does not grant release permission or per-action authority.
 A persistent retention choice is distinct from the owner's actual permission:
-retain persistent capacity until the applicable explicit release instruction,
-without silently rewriting `can_release` to represent that lifecycle choice.
+retain the resource under the applicable explicit release instruction. That
+hold does not consume active execution capacity. Do not silently rewrite
+`can_release` to represent a retention choice.
 Apply the user's loaded private lifecycle policy as well as current eligibility.
 A release-on-success policy can require whole-scope acceptance even when compute
 capacity is already free. The public program does not encode that private policy.
@@ -451,8 +573,19 @@ source, and the existing intent seal and receipt. Preserve active and uncertain
 references. Reconcile an uncertain result against its actual receipt before any
 retry; never repeat an already committed release. A status read has no
 provisioning or release effect.
+For compatibility, preserve task format 2 state, legacy Run and snapshot bytes,
+and pinned runtime files until supported old execution and reconciliation are
+quiescent. The retained 0.1.14 runner requires task format 2 when it admits old
+work. After legacy admissions and uncertain outcomes settle, use the explicit
+`lifecycle-upgrade` operation to transition task metadata from format 2 to 3.
+As a current task next uses a resource, admission transitions that resource
+only after retained legacy uses settle. Do not auto-upgrade active legacy tasks.
+Current entrypoints enforce the supported contract. Documentation cannot fence
+arbitrary obsolete clients; do not claim that a marker or short lock can do so.
 
-An experiment has one research goal and may contain many frozen runs. A
+An experiment has one research goal and may contain many frozen runs. Preserve
+the complete task goal and confirmed acceptance across phases and later worktree
+generations. A
 code-only task can use verification runs without becoming a research experiment.
 Changed code or arguments for the same goal creates a new run. Changed goals
 create new experiments.
@@ -600,14 +733,16 @@ resource identity, execution receipt, and artifact acceptance. The program pins
 the workflow and runner runtime. Preserve referenced runtime files and stable
 environments for existing execution. Later changes create a new run.
 
-New scoped runs use execution protocol 3 with the startup contract bound to their
-receipts. Preserve protocol 2 runs and their pinned runtime and inputs; use their
-original supported execution contract. Older backends must not execute protocol 3
-runs. Preserve legacy preparation intents and partial files rather than rewriting
-them into the new shape. An unfinished legacy preparation without a complete
-pinned runtime needs its retained original preparation backend. Completed
-snapshot/event recovery preserves its original contract. Existing execution
-receipts remain available through
+New lifecycle-scoped runs use execution protocol 4. Their immutable contract
+binds the approved worktree generation and integrated commit to the frozen
+inputs. The generation cleanup receipt also records successful startup
+validation for each new Run. Preserve protocol 2 and 3 runs and their pinned
+runtime and inputs; use their original supported execution contracts. Older backends must
+not execute protocol 4 runs. Preserve legacy preparation intents and partial
+files rather than rewriting them into the new shape. An unfinished legacy
+preparation without a complete pinned runtime needs its retained original
+preparation backend. Completed snapshot/event recovery preserves its original
+contract. Existing execution receipts remain available through
 their original runtime.
 
 Runs and commands have no default execution time limit. A timeout is optional
@@ -632,8 +767,10 @@ before claiming or starting, its run remains queued and can be cancelled.
 Reread task status after the runner starts to obtain the current version. Use
 `run-observe` with `run_id`, `receipt_path`, and `evidence`, or use
 `run-reconcile` for the canonical receipt. Both ingest actual execution evidence
-without launching or repeating the workload. Preserve the frozen inputs,
-execution token, log identity, and claim after interruption.
+without launching or repeating the workload. If an unsettled current Run has no
+workload receipt, use the separate terminal-observation settlement path above.
+Preserve the frozen inputs, execution token, log identity, and claim after
+interruption.
 
 Submission does not prove execution. A zero exit does not prove artifact
 quality. Accept actual artifacts with verification evidence. Experiment closure

@@ -25,9 +25,9 @@ approval, implementation, and final review.
 - CONVERSATION: In the first discussion reply, state intent and why, then actual
   findings and impact, then one important question with its consequence. Invite
   corrections. Inspect project context before this substantive reply.
-- WRITE: `process-intent` with goal, why, success criteria, and request source.
+- WRITE: `process-intent` with the complete goal, why, success criteria, and request source.
 - WAIT: The recorded first question must receive an actual answer.
-- EXIT: Intent and source are recorded without adding unasked-for scope.
+- EXIT: The complete user objective and source-backed completion contract are recorded. Do not replace a requested deliverable with a smaller subset because it is difficult or costly.
 - RETURN: Objective and criteria for exploration.
 
 ## Exploration
@@ -61,7 +61,9 @@ approval, implementation, and final review.
   omitted compatibility default for clarification questions; record its answer and updated sources before confirmed playback.
 - WAIT: The pending question or exact playback needs its actual user answer.
 - EXIT: No important unresolved choice blocks a coherent design draft; the
-  playback has an actual confirmation source.
+  playback has an actual confirmation source. Preserve every confirmed inclusion.
+  Questions resolve real semantics, acceptance, dependencies, or unknown facts;
+  effort alone does not reopen scope.
 - RETURN: Confirmed requirements, sourced decisions, delegated scope, and open
   assumptions for design.
 
@@ -79,7 +81,10 @@ approval, implementation, and final review.
 - WAIT: Await the independent review. Bring new important unknowns back into
   discussion before dependent work.
 - EXIT: An independent gap review accepts the same design digest that will be
-  shown to the user.
+  shown to the user and confirms coverage of the complete confirmed requirement
+  ledger. An omitted, renamed, demoted, or replaced confirmed requirement blocks
+  approval until restored or changed by explicit user authority recorded in
+  `scope_changes`.
 - RETURN: Reviewed design digest, review evidence, and remaining assumptions.
 
 ## User design approval
@@ -96,7 +101,8 @@ approval, implementation, and final review.
 ## Implementation plan and user plan approval
 
 - INPUT: Approved design digest and mapped requirements.
-- CONVERSATION: Use [plan.md](plan.md) for file responsibilities and concrete
+- CONVERSATION: Keep the complete objective and all confirmed acceptance
+  requirements visible. Use [plan.md](plan.md) for file responsibilities and concrete
   tasks: owned paths, exact interfaces, ordered actions, named checks/assertions,
   verification commands or inspection targets, expected results, dependencies,
   independent reviews, and applicable integration/recovery. Ask for approval in
@@ -106,20 +112,23 @@ approval, implementation, and final review.
   user approval source.
 - WAIT: Actual user approval of the exact shown plan revision, bound to its recorded digest.
 - EXIT: Plan approval applies to the current plan digest linked to the
-  approved design.
-- RETURN: Approved plan digest, item briefs, and acceptance criteria.
+  approved design, with every confirmed acceptance requirement mapped to work
+  and verification. Phases may sequence dependencies but do not reduce the goal.
+- RETURN: Approved plan digest, item briefs, and complete acceptance criteria.
 
 ## Delegated implementation and item review
 
 - INPUT: Approved plan and prepared owned worktree.
-- CONVERSATION: Give each implementer a bounded brief and report a material
-  deviation or blocked decision promptly.
+- CONVERSATION: Give each implementer the complete objective, confirmed
+  requirements, decision sources, and bounded ownership in the brief. Report a
+  material deviation or blocked decision promptly. Do not re-sell a smaller scope.
 - WRITE: Record item state, brief reference, change revision, test evidence,
   separate requirements verdict, separate quality verdict, and remediation in
   `Execution and review` through current program operations.
 - WAIT: Await worker evidence and independent verdicts. A new important unknown
   outside approved scope requires recorded reentry and a user answer.
-- EXIT: Every item passes both reviews on its current change revision.
+- EXIT: Every item passes both reviews on its current change revision, and the
+  overall review confirms complete source-backed requirement coverage.
 - RETURN: Complete item evidence and diff references for overall review.
 
 ## Overall review and integration
@@ -127,7 +136,23 @@ approval, implementation, and final review.
 - INPUT: Passing item verdicts, complete diff, approved design and plan.
 - CONVERSATION: Report cross-item findings and the integration action's scope.
 - WRITE: Record the independent overall verdict. Use guarded integration only
-  with its separate authorization source. Verify the integrated revision.
+  with its separate authorization source. Create one ordinary squash commit and
+  verify the integrated revision. Clean-base integration is the default. When
+  preserving unrelated dirty tracked work is authorized, review the preview
+  preservation digest and use that exact digest for publication; do not stash,
+  reset, force checkout, or commit unrelated work. Verify preserved integration
+  with `source_mode: fixed_commit`; optionally use
+  `expected_integration_commit` to assert the recorded commit. Freeze selected
+  formal Run inputs from the
+  verified Git objects with the matching check receipt and source mode bound.
+  Validate startup on the Run's recorded resource/controller path, check
+  references, and
+  clean the owned worktree before guarded formal dispatch. Development checks
+  may use authorized resources, including GPUs, before merge. Integration
+  verification runs against the exact integrated commit after merge and may
+  also use authorized resources. External `check-dispatch` returns exact runner
+  arguments to the private controller; direct verify wrappers execute the local
+  runner.
 - WAIT: Await the overall verdict and any missing integration authorization.
 - EXIT: Overall review passes and required integration is accepted and proven.
 - RETURN: Integrated revision and verification for any dependent runs.
@@ -145,6 +170,10 @@ approval, implementation, and final review.
   provenance, startup report and successful exit before the main workload,
   execution receipt, artifact evidence, acceptance, and closure in `Experiments
   and runs`; record final outcome and cleanup in `Delivery`.
+  Resource activity tracks actual uses; retention holds name future work or
+  persistent choices and do not consume execution capacity. A terminal check
+  releases only its own capacity. Reconcile uses, holds, and references before
+  closure or release.
 - WAIT: Await actual receipts, artifact review, and any missing user authority.
 - EXIT: Startup checks prove required imports/assets and actual origins; code,
   environment and resources were rechecked after validation. Required runs and
@@ -162,3 +191,7 @@ changed versions. Existing legacy tasks keep their recorded state. Use guarded
 questions, playback, or approvals. Existing resource and run evidence stays
 unchanged. Preserve unaffected facts and evidence. Mark affected approvals stale
 when their revision changes; do not reconstruct source history.
+Do not reopen confirmed scope for engineering effort. Preserve confirmed
+requirements across revised lists and worktree generations. Change them only
+through explicit actual user authority recorded in `scope_changes`, including
+the prior digest and disposition.

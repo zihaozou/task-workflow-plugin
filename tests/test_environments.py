@@ -109,7 +109,7 @@ class EnvironmentTests(Fixture):
         self.assertEqual(self.state['design'], before['design'])
         self.assertEqual(self.state['environment_registry']['runtime'], before['environment_registry']['runtime'])
 
-    def test_old_readers_and_following_writes_preserve_registration(self):
+    def test_old_readers_preserve_registration_and_reject_format3_writes(self):
         self.register()
         root = Path(__file__).resolve().parents[1]
         versions = {'0.1.9': 'cc1711d90b479aa4382758f59ee600d9e933a86e',
@@ -123,15 +123,18 @@ class EnvironmentTests(Fixture):
             current = copy.deepcopy(self.state)
             read, _ = old.load_events(path)
             self.assertEqual(read, current)
-            old.dispatch('decision', {'root': str(self.root), 'task_id': 'task', 'actor': 'owner',
-                'expected_version': current['version'], 'content': 'Ordinary compatible continuation using reader ' + version})
+            with self.assertRaises(old.WorkflowError) as denied:
+                old.dispatch('decision', {'root': str(self.root), 'task_id': 'task', 'actor': 'owner',
+                    'expected_version': current['version'], 'content': 'Obsolete writer attempt ' + version})
+            self.assertEqual(denied.exception.code, 'legacy_read_only')
+            self.op('decision', content='Current canonical writer preserves registration')
             self.refresh()
             self.assertEqual(self.state['environment_registry'], current['environment_registry'])
             self.assertEqual(self.state['environment_registrations'], current['environment_registrations'])
 
     def test_schema_cli_and_mcp_use_the_actual_append_operation(self):
         schemas = {entry['name']: entry['inputSchema'] for entry in w.command_schemas()}
-        self.assertEqual(len(schemas), 54)
+        self.assertEqual(len(schemas), 61)
         self.assertEqual(set(schemas['environment-register']['required']),
             {'root', 'task_id', 'actor', 'expected_version', 'environment_id', 'path', 'authorization_source'})
         arguments = {'task_id': 'task', 'actor': 'owner', 'expected_version': self.state['version'],

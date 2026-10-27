@@ -46,7 +46,7 @@ def context_for(event):
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return None
-    guidance = ROUTING_GUIDANCE + NAMING_REMINDER
+    guidance = ROUTING_GUIDANCE + NAMING_REMINDER + " Complete-goal contract: " + workflow.GOAL_INTEGRITY
     session_id = event.get("session_id")
     if isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
         guidance += " Host-provided session context for an authorized enrollment or recovery: " + json.dumps({"session_id": session_id}, ensure_ascii=True) + "."

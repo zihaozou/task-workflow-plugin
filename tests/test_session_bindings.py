@@ -57,6 +57,7 @@ class SessionBindingTests(unittest.TestCase):
         self.assertTrue(same['already_bound'])
         self.assertEqual(same['state']['version'], bound['version'])
         context = self.restored_context()
+        self.assertEqual(context['goal_integrity'], self.core.GOAL_INTEGRITY)
         self.assertEqual(context['task']['task_id'], 'first')
         self.assertEqual(context['task']['stage'], 'exploration')
         self.assertEqual(context['templates'], ['templates/conversation.md', 'templates/record.md'])

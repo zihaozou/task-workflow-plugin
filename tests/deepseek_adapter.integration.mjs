@@ -538,6 +538,7 @@ class Sdk {
 function probeSource(questions = false) {
   return `// Private deterministic test provider; native tools, hooks and runtime are real.
 import { appendFileSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { LlmAdapter, createUserMessage } from '@deepseek-ai/dsh-llm';
 const receipt = value => appendFileSync(process.env.TW_TEST_RECEIPT, JSON.stringify(value) + '\\n');
 export const inject = ['llm', 'skills', 'tools', 'workingDirectory', 'compaction'${questions ? ", 'agents', 'userQuestions'" : ''}];
@@ -555,6 +556,7 @@ export async function apply(ctx) {
   const source = reference => ({kind:'user',reference});
   const req = (id,text,kind,reference,confirmation=reference) => ({id,text,kind,status:'confirmed',source:source(reference),confirmation_source:source(confirmation)});
   const action = (op,args,mutation=true) => ({op,args,mutation});
+  const contentDigest = value => createHash('sha256').update(JSON.stringify(value,(_key,item)=>item&&typeof item==='object'&&!Array.isArray(item)?Object.fromEntries(Object.keys(item).sort().map(key=>[key,item[key]])):item)).digest('hex');
   function actions(stage) {
     if(stage==='BOOTSTRAP') return [
       ...(${questions}?[action('@skill',{name:'task-workflow'},false)]:[]),
@@ -579,7 +581,7 @@ export async function apply(ctx) {
     ];
     if(stage==='CORRECT') return [
       action('process-answer',{question_id:'correction-choice',answer:'Correction: write JSON to a file, preserving CSV.',source:source('synthetic-correction-2')}),
-      action('process-requirements',{requirements:[req('csv','Preserve CSV.','constraint','synthetic-bootstrap-request'),req('json','Write JSON to a file.','acceptance','synthetic-answer-1','synthetic-correction-2')]}),
+      action('process-requirements',{requirements:[req('csv','Preserve CSV.','constraint','synthetic-bootstrap-request'),req('json','Write JSON to a file.','acceptance','synthetic-answer-1','synthetic-correction-2')],scope_changes:[{requirement_id:'json',previous_digest:contentDigest(JSON.parse(readFileSync(workspace+'/.task-workflow/tasks/'+task+'/state.json','utf8')).process.requirements.find(item=>item.id==='json')),action:'revise',reason:'Actual synthetic correction changed the destination.',authorization_source:source('synthetic-correction-2')}]}),
       action('process-decision',{decision:{id:'destination',title:'JSON destination',choice:'Write JSON to a file.',rationale:'The synthetic user corrected the destination.',scope:['json'],status:'confirmed',source:source('synthetic-answer-1'),confirmation_source:source('synthetic-correction-2'),question_id:'correction-choice'}}),
     ];
     if(stage==='COMPACT') return [action('process-question',{question:{id:'after-compact',text:'Which target uses NONPROMPTED_COMPACT_CANARY?',rationale:'Verify refresh after same-turn native compaction.',scope:['json'],important:true,source:{kind:'agent',reference:'synthetic-question-3'}}})];
@@ -913,6 +915,8 @@ function requireCurrentContext(receipts, version, question) {
   const context = currentRuntimeContext(request);
   assert.equal(context?.task.task_id, 'native-task');
   assert.equal(context?.dialogue_contract.state_version, version);
+  assert.ok(context.stage_guidance.goal_integrity.includes('Preserve the complete current user objective'));
+  assert.ok(context.stage_guidance.goal_integrity.includes('confirmed acceptance requirements'));
   assert.equal(context?.dialogue_contract.pending_questions[0]?.id, question);
   assert.ok(context.dialogue_contract.current_runtime.workflow_entrypoint.endsWith('/skills/task-workflow/scripts/workflow.py'));
   return context;
@@ -998,7 +1002,7 @@ if (CLI) test('installed owned protocol: native handles cleanup source and final
     const capability = request => [...request.messages].reverse().flatMap(message => message.source?.kind === 'runtime-context' ? message.source.sections ?? [] : []).find(section => section.name === 'task-workflow:capabilities')?.text;
     assert.ok(capability(parentRequests[0]).includes('wait_agent'));
     assert.ok(!capability(parentRequests[1]).includes('wait_agent'));
-    assert.equal(parentRequests[1].tools.filter(tool => tool.name.startsWith('mcp__task-workflow__')).length, 54);
+    assert.equal(parentRequests[1].tools.filter(tool => tool.name.startsWith('mcp__task-workflow__')).length, 61);
     const ownedSchema = parentRequests[1].tools.find(tool => tool.name === 'task_workflow_delegate');
     const nativeSchema = parentRequests[1].tools.find(tool => tool.name === 'subagent');
     assert.deepEqual(ownedSchema.parameters, nativeSchema.parameters, 'Native parameter policy is retained');
@@ -1042,7 +1046,7 @@ if (CLI) test('installed owned protocol: native handles cleanup source and final
     await sdk.close();
     observed = lines(path.join(fixture.run, 'owned.jsonl'));
     assert.ok(observed.some(item => item.kind === 'activation-end' && item.id === unrelated && item.stopReason === 'completed'));
-    writeJson(path.join(fixture.run, 'owned-result.json'), { passed: true, coreOperations: 54, cleanupBeforeCollectionBeforeFinal: true, automaticOwnedSettlementMessages: 0, nativePoliciesPreserved: true, foreignHandleRejected: true, startupAborted: true, unownedActivationPreserved: true });
+    writeJson(path.join(fixture.run, 'owned-result.json'), { passed: true, coreOperations: 61, cleanupBeforeCollectionBeforeFinal: true, automaticOwnedSettlementMessages: 0, nativePoliciesPreserved: true, foreignHandleRejected: true, startupAborted: true, unownedActivationPreserved: true });
   } finally {
     for (const marker of ['release-cleanup', 'release-unowned']) fs.writeFileSync(path.join(fixture.run, marker), 'owned test cleanup');
     if (sdk.child.exitCode === null) await sdk.close();
@@ -1117,7 +1121,7 @@ if (CLI) test('installed runtime: real archive, schemas, tools, authority, statu
     assert.equal(capability.skill.name, 'task-workflow'); assert.equal(capability.skill.hasContent, true);
     const advertised = capability.schemas.filter(item => item.name.startsWith('mcp__task-workflow__'));
     const actualSchema = bootstrap.receipts.find(item => item.kind === 'actual-tool-result' && item.op === 'schema').result.commands;
-    assert.equal(actualSchema.length, 54); assert.equal(advertised.length, actualSchema.length);
+    assert.equal(actualSchema.length, 61); assert.equal(advertised.length, actualSchema.length);
     for (const command of actualSchema) {
       const native = advertised.find(item => item.name === 'mcp__task-workflow__' + command.name);
       assert.ok(native, command.name); assert.deepEqual(native.parameters, command.inputSchema); assert.equal(native.description, command.description);
@@ -1217,7 +1221,7 @@ if (CLI) test('installed runtime: real archive, schemas, tools, authority, statu
     requireCurrentContext(requireStage(fixture, 'STATUS').receipts, finalState.version, 'large-context');
     assert.deepEqual(treeHashes(taskDir), unchanged);
     await sdk.close();
-    const final = { result: 'passed', source: 'installed runtime with scripted LLM only', schemas: 54, stateVersion: finalState.version, taskUnchangedAfterStatus: true, actualToolCalls: status.receipts.filter(item => item.kind === 'actual-tool-result').length };
+    const final = { result: 'passed', source: 'installed runtime with scripted LLM only', schemas: 61, stateVersion: finalState.version, taskUnchangedAfterStatus: true, actualToolCalls: status.receipts.filter(item => item.kind === 'actual-tool-result').length };
     writeJson(path.join(fixture.run, 'functional-result.json'), final);
     assert.ok(lines(path.join(fixture.run, 'probe.jsonl')).some(item => item.kind === 'probe-disposed'));
   } finally { if (sdk.child.exitCode === null) await sdk.close(); }

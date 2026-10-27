@@ -11,10 +11,10 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
 
-from test_workflow import Fixture, SCRIPT, w
+from test_workflow import Fixture, LegacyFixture, SCRIPT, w
 
 
-class ScopedSnapshotTests(Fixture):
+class ScopedSnapshotTests(LegacyFixture):
     def test_selected_blobs_literal_paths_attributes_and_unrelated_inventory(self):
         tree = self.repo / 'unrelated'; tree.mkdir()
         for number in range(16001):
@@ -93,6 +93,8 @@ class ScopedSnapshotTests(Fixture):
         self.integrated()
         args = self.startup_fields()
         current = self.prepare()['run']
+        self.op('run-cancel', run_id='run', reason='Complete legacy baseline preparation fixture')
+        self.op('lifecycle-upgrade', authorization_source='Explicit fixture lifecycle transition')
         result = w.prepare_verification_snapshot(self.state, commit=self.git(self.repo, 'rev-parse','HEAD'),
             directory=self.root / '.experiments/verification/task/baselines/check', environment_id='runtime',
             authorization_source='Fixture project baseline request', **args)
@@ -100,7 +102,9 @@ class ScopedSnapshotTests(Fixture):
         self.assertEqual(result['baseline']['code_store'], current['code_store'])
         self.assertEqual(result['baseline']['purpose'], 'development-verification')
         self.assertNotIn('integration', result['baseline'])
-        self.assertTrue(w.startup_receipt_valid(result['baseline'], result['startup']))
+        check = result['check']['check']
+        validation = {**result['baseline'], 'directory': check['directory'], 'token': check['token']}
+        self.assertTrue(w.startup_receipt_valid(validation, result['startup']))
         self.assertEqual(set(self.refresh()['runs']), {'run'})
 
     def test_uv_environment_origins_and_mutable_code_redirection(self):

@@ -26,11 +26,20 @@ import weakref
 
 
 VERSION = 1
-PORTABLE_FORMAT = 2
-EXECUTION_PROTOCOL = 3
+PORTABLE_FORMAT = 3
+EXECUTION_PROTOCOL = 4
 STATES = ("pending", "implementing", "reviewing", "complete")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 TERMINAL_RUNS = ("complete", "failed", "cancelled")
+CHECK_STATES = ('reserved', 'starting', 'running', 'uncertain', 'passed', 'failed', 'stale', 'cancelled')
+TERMINAL_CHECKS = ('passed', 'failed', 'stale', 'cancelled')
+GOAL_INTEGRITY = (
+    'Preserve the complete current user objective and all confirmed acceptance requirements. '
+    'Resolve difficulty through investigation and concrete implementation planning. '
+    'Decompose work while retaining complete acceptance. Change confirmed scope only with '
+    'explicit actual user authority recorded in scope_changes. Formal experiments use '
+    'registered frozen Runs after reviewed integration, validation and worktree cleanup.'
+)
 
 class WorkflowError(Exception):
     def __init__(self, code, message, details=None):
@@ -740,7 +749,7 @@ def commit_event(path, state, previous, operation, actor):
     return event["hash"]
 
 def summary(state):
-    return {"task_id": state["task_id"], "version": state["version"],
+    return {"task_id": state["task_id"], "version": state["version"], "generation": generation(state), "check_counts": {status: sum(c["status"] == status for c in state.get("checks", {}).values()) for status in CHECK_STATES},
             "scope_paths": sorted(set([state["project"]["path"], state["worktree"]["path"]] + [r[key] for r in state["runs"].values() for key in ("directory", "code") if key in r])),
             "counts": {key: sum(i["status"] == key for i in state["items"].values()) for key in STATES},
             "approved": design_is_approved(state),
@@ -893,86 +902,85 @@ def prepare_worktree(args, state, path, store, previous):
     project = Path(state["project"]["path"])
     if git_identity(str(project)) != state["project"]:
         fail("git_identity_changed", "The registered base checkout changed.")
-    if state.get("cleaned"):
-        fail("already_cleaned", "A cleaned task cannot create a replacement worktree.")
+    prepare_generation(args, state)
     common = Path(state["project"]["common_dir"])
-    with lock(common / "task-workflow-integration.lock"), lock(store / "registry.lock"):
-        association = state.get("worktree_preparation")
-        if association:
-            for argument, field in (("branch", "branch"),):
-                supplied = str(absolute_destination(args[argument])) if argument != "branch" and argument in args else args.get(argument)
-                if supplied is not None and supplied != association.get(field):
-                    fail("worktree_association", "This task already reserves a different worktree path or branch.")
-            if args["expected_base"] != association["base"]:
-                fail("revision_conflict", "Retry using the recorded preparation base.", {"path": "arguments.expected_base", "value": args["expected_base"], "recorded_base": association["base"], **observed_base(project), "hint": "Inspect status and the current base checkout. Preserve the recorded reservation; a different base needs the existing authorized workflow."})
-            if association["status"] == "complete":
-                check_identity(state)
-                register_root(Path(state["root"]), state)
-                return {"worktree": state["worktree"], "reused": True}, previous, False
-        else:
-            base = git(project, "rev-parse", "HEAD")
-            if args["expected_base"] != base:
-                fail("revision_conflict", "The expected base commit changed.", {"path": "arguments.expected_base", "value": args["expected_base"], "current_base": base, "hint": "Read the current base commit and task status. Reassess the intended change before explicitly submitting another mutation; this error grants no authority to adopt a new base."})
-            if state["worktree"]["path"] != str(project):
-                check_identity(state)
-                if state["worktree"]["branch"] == state["project"]["branch"]:
-                    fail("worktree_association", "The task must use a distinct development branch.")
-                target = Path(state["worktree"]["path"])
-                branch = state["worktree"]["branch"]
-                root = absolute_destination(str(project / ".worktrees"))
-                if args.get("branch", branch) != branch or target != root / state["task_id"]:
-                    fail("worktree_association", "Reuse the task's explicitly enrolled worktree in place.")
-                state["worktree_preparation"] = {"status": "complete", "path": str(target), "branch": branch,
-                    "worktree_root": str(root), "base": base, "reused": True, "authorization_source": args["authorization_source"]}
-                return {"worktree": state["worktree"], "reused": True}, previous, True
-            if any(item["status"] != "pending" for item in state["items"].values()) or state["runs"] or state["integration"]:
-                fail("worktree_association", "Preparation cannot migrate active evidence or runs to another checkout.")
-            token = uuid.uuid4().hex
+    association = state.get("worktree_preparation")
+    if association:
+        for argument, field in (("branch", "branch"),):
+            supplied = str(absolute_destination(args[argument])) if argument != "branch" and argument in args else args.get(argument)
+            if supplied is not None and supplied != association.get(field):
+                fail("worktree_association", "This task already reserves a different worktree path or branch.")
+        if args["expected_base"] != association["base"]:
+            fail("revision_conflict", "Retry using the recorded preparation base.", {"path": "arguments.expected_base", "value": args["expected_base"], "recorded_base": association["base"], **observed_base(project), "hint": "Inspect status and the current base checkout. Preserve the recorded reservation; a different base needs the existing authorized workflow."})
+        if association["status"] == "complete":
+            check_identity(state)
+            register_root(Path(state["root"]), state)
+            return {"worktree": state["worktree"], "reused": True}, previous, False
+    else:
+        base = git(project, "rev-parse", "HEAD")
+        if args["expected_base"] != base:
+            fail("revision_conflict", "The expected base commit changed.", {"path": "arguments.expected_base", "value": args["expected_base"], "current_base": base, "hint": "Read the current base commit and task status. Reassess the intended change before explicitly submitting another mutation; this error grants no authority to adopt a new base."})
+        if state["worktree"]["path"] != str(project):
+            check_identity(state)
+            if state["worktree"]["branch"] == state["project"]["branch"]:
+                fail("worktree_association", "The task must use a distinct development branch.")
+            target = Path(state["worktree"]["path"])
+            branch = state["worktree"]["branch"]
             root = absolute_destination(str(project / ".worktrees"))
-            name = state["task_id"]
-            target = absolute_destination(str(root / name))
-            branch = args.get("branch", "task/" + name + "-" + token[:8])
-            if target.parent != root or target == project or within(project, target) or within(Path(state["root"]), target) or within(target, store):
-                fail("invalid_path", "Choose a direct child of the declared worktree root, separate from base and task records.")
-            valid = run(["git", "check-ref-format", "--branch", branch])
-            if valid["returncode"] != 0 or valid["stdout"].strip() != branch or branch == state["project"]["branch"]:
-                fail("invalid_branch", "A valid distinct literal task branch is required.")
-            if target.exists() or not branch_absent(project, branch):
-                fail("worktree_exists", "The destination or branch already exists; explicitly enroll a suitable existing worktree instead.")
-            association = {"status": "reserved", "token": token, "path": str(target), "branch": branch,
-                "worktree_root": str(root), "base": base, "authorization_source": args["authorization_source"], "time": now()}
-            state["worktree_preparation"] = association
-            previous = commit_event(path, state, previous, "worktree-prepare-intent", args["actor"])
-        target, root = Path(association["path"]), Path(association["worktree_root"])
-        no_symlinks(target, Path(target.anchor))
-        owner_ref = "refs/task-workflow/worktrees/" + association["token"]
-        owned = run(["git", "-C", str(project), "rev-parse", "--verify", owner_ref])
-        if owned["returncode"] != 0:
-            if target.exists() or not branch_absent(project, association["branch"]):
-                fail("worktree_exists", "An unowned path or branch appeared after reservation; preserve it for manual inspection.")
-            transaction = "start\ncreate refs/heads/" + association["branch"] + " " + association["base"] + "\ncreate " + owner_ref + " " + association["base"] + "\nprepare\ncommit\n"
-            result = run(["git", "-C", str(project), "update-ref", "--stdin"], input_text=transaction)
-            if result["returncode"] != 0:
-                fail("worktree_reservation", "Git refused the atomic branch ownership reservation.")
-        elif owned["stdout"].strip() != association["base"]:
-            fail("worktree_association", "The task's ownership reference changed.")
-        if git(project, "rev-parse", "refs/heads/" + association["branch"]) != association["base"]:
-            fail("worktree_association", "The reserved branch changed before preparation completed.")
-        if not target.exists():
-            root.mkdir(parents=True, exist_ok=True)
-            result = run(["git", "-C", str(project), "worktree", "add", "--", str(target), association["branch"]])
-            if result["returncode"] != 0:
-                fail("worktree_creation", "Git did not complete the reserved worktree; inspect reality and retry this reservation.")
-        identity = git_identity(str(target))
-        if identity != {"path": str(target), "branch": association["branch"], "common_dir": str(common)} or git(target, "rev-parse", "HEAD") != association["base"]:
-            fail("worktree_association", "The reserved destination is not the expected task worktree.")
-        if git(target, "status", "--porcelain=v1", "--untracked-files=all"):
-            fail("dirty_revision", "Preserve and inspect changes in the interrupted preparation before retrying.")
-        state.update(worktree=identity, owned_worktree=True)
-        association["status"] = "complete"
-        previous = commit_event(path, state, previous, "worktree-prepare-complete", args["actor"])
-        register_root(Path(state["root"]), state)
-        return {"worktree": identity, "reused": owned["returncode"] == 0}, previous, False
+            if args.get("branch", branch) != branch or target != root / state["task_id"]:
+                fail("worktree_association", "Reuse the task's explicitly enrolled worktree in place.")
+            state["worktree_preparation"] = {"status": "complete", "path": str(target), "branch": branch,
+                "worktree_root": str(root), "base": base, "reused": True, "authorization_source": args["authorization_source"]}
+            return {"worktree": state["worktree"], "reused": True}, previous, True
+        current_runs = [r for r in state['runs'].values() if r.get('generation', 1) == generation(state)]
+        if any(item["status"] != "pending" for item in state["items"].values()) or current_runs or state["integration"]:
+            fail("worktree_association", "Preparation cannot migrate active evidence or runs to another checkout.")
+        token = uuid.uuid4().hex
+        root = absolute_destination(str(project / ".worktrees"))
+        name = state["task_id"]
+        target = absolute_destination(str(root / name))
+        branch = args.get("branch", "task/" + name + "-" + token[:8])
+        if target.parent != root or target == project or within(project, target) or within(Path(state["root"]), target) or within(target, store):
+            fail("invalid_path", "Choose a direct child of the declared worktree root, separate from base and task records.")
+        valid = run(["git", "check-ref-format", "--branch", branch])
+        if valid["returncode"] != 0 or valid["stdout"].strip() != branch or branch == state["project"]["branch"]:
+            fail("invalid_branch", "A valid distinct literal task branch is required.")
+        if target.exists() or not branch_absent(project, branch):
+            fail("worktree_exists", "The destination or branch already exists; explicitly enroll a suitable existing worktree instead.")
+        association = {"status": "reserved", "token": token, "path": str(target), "branch": branch,
+            "worktree_root": str(root), "base": base, "authorization_source": args["authorization_source"], "time": now()}
+        state["worktree_preparation"] = association
+        previous = commit_event(path, state, previous, "worktree-prepare-intent", args["actor"])
+    target, root = Path(association["path"]), Path(association["worktree_root"])
+    no_symlinks(target, Path(target.anchor))
+    owner_ref = "refs/task-workflow/worktrees/" + association["token"]
+    owned = run(["git", "-C", str(project), "rev-parse", "--verify", owner_ref])
+    if owned["returncode"] != 0:
+        if target.exists() or not branch_absent(project, association["branch"]):
+            fail("worktree_exists", "An unowned path or branch appeared after reservation; preserve it for manual inspection.")
+        transaction = "start\ncreate refs/heads/" + association["branch"] + " " + association["base"] + "\ncreate " + owner_ref + " " + association["base"] + "\nprepare\ncommit\n"
+        result = run(["git", "-C", str(project), "update-ref", "--stdin"], input_text=transaction)
+        if result["returncode"] != 0:
+            fail("worktree_reservation", "Git refused the atomic branch ownership reservation.")
+    elif owned["stdout"].strip() != association["base"]:
+        fail("worktree_association", "The task's ownership reference changed.")
+    if git(project, "rev-parse", "refs/heads/" + association["branch"]) != association["base"]:
+        fail("worktree_association", "The reserved branch changed before preparation completed.")
+    if not target.exists():
+        root.mkdir(parents=True, exist_ok=True)
+        result = run(["git", "-C", str(project), "worktree", "add", "--", str(target), association["branch"]])
+        if result["returncode"] != 0:
+            fail("worktree_creation", "Git did not complete the reserved worktree; inspect reality and retry this reservation.")
+    identity = git_identity(str(target))
+    if identity != {"path": str(target), "branch": association["branch"], "common_dir": str(common)} or git(target, "rev-parse", "HEAD") != association["base"]:
+        fail("worktree_association", "The reserved destination is not the expected task worktree.")
+    if git(target, "status", "--porcelain=v1", "--untracked-files=all"):
+        fail("dirty_revision", "Preserve and inspect changes in the interrupted preparation before retrying.")
+    state.update(worktree=identity, owned_worktree=True)
+    association["status"] = "complete"
+    previous = commit_event(path, state, previous, "worktree-prepare-complete", args["actor"])
+    register_root(Path(state["root"]), state)
+    return {"worktree": identity, "reused": owned["returncode"] == 0}, previous, False
 
 def require_implementation_complete(state):
     rev = revision(state)
@@ -1118,6 +1126,99 @@ def remove_integration_scratch(state, integration):
     if result["returncode"] != 0:
         fail("integration_scratch", "Git refused safe removal of the isolated integration worktree.")
 
+def git_bytes(project, *arguments):
+    result = subprocess.run(['git', '--literal-pathspecs', '-C', str(project), *arguments], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if result.returncode:
+        fail('preservation_inspection', 'Git could not inspect the exact publication footprint.')
+    return result.stdout
+
+
+def encoded_path(value):
+    import base64
+    return base64.b64encode(value).decode('ascii')
+
+
+def path_identity(path):
+    import stat
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return {'type': 'missing'}
+    mode = stat.S_IMODE(info.st_mode)
+    if stat.S_ISREG(info.st_mode):
+        return {'type': 'file', 'mode': mode, 'sha256': sha_file(path)}
+    if stat.S_ISLNK(info.st_mode):
+        return {'type': 'symlink', 'mode': mode, 'target': encoded_path(os.fsencode(os.readlink(path)))}
+    if stat.S_ISDIR(info.st_mode):
+        return {'type': 'directory', 'mode': mode}
+    fail('preservation_collision', 'A special filesystem object crosses the publication footprint.')
+
+
+def publication_preservation(state, base, head, delta=None):
+    """Inspect raw Git paths and only hash tracked dirt plus publication endpoints."""
+    project = Path(state['project']['path'])
+    git_dir = Path(git(project, 'rev-parse', '--path-format=absolute', '--git-dir'))
+    if any((git_dir / name).exists() for name in ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'sequencer')):
+        fail('preservation_collision', 'Settle the existing Git operation before publication.')
+    entries = {}
+    for record in git_bytes(project, 'ls-files', '--stage', '-z').split(b'\0'):
+        if not record:
+            continue
+        metadata, name = record.split(b'\t', 1)
+        mode, object_id, stage = metadata.split()
+        if stage != b'0':
+            fail('preservation_collision', 'Unmerged index entries prevent publication.')
+        entries[name] = {'mode': mode.decode(), 'object': object_id.decode(), 'stage': 0}
+    flags = {record[2:]: record[:1].decode('ascii') for record in git_bytes(project, 'ls-files', '-v', '-z').split(b'\0') if record}
+    changed = set(filter(None, git_bytes(project, 'diff', '--cached', '--no-renames', '--name-only', '-z', 'HEAD').split(b'\0')))
+    changed.update(filter(None, git_bytes(project, 'diff', '--no-renames', '--name-only', '-z').split(b'\0')))
+    changed.update(name for name, flag in flags.items() if flag != 'H')
+    fork = git(project, 'merge-base', base, head)
+    delta = delta if delta is not None else sorted(set(filter(None, git_bytes(project, 'diff', '--no-renames', '--name-only', '-z', fork, head).split(b'\0'))))
+    def overlaps(left, right):
+        return left == right or left.startswith(right + b'/') or right.startswith(left + b'/')
+    for name in changed:
+        if any(overlaps(name, endpoint) for endpoint in delta):
+            fail('preservation_collision', 'Dirty index or tracked work crosses a changed publication path.')
+    preserved = []
+    for name in sorted(changed):
+        debug = git_bytes(project, 'ls-files', '--debug', '-z', '--', os.fsdecode(name))
+        index_flags = re.findall(rb'flags: ([0-9a-fA-F]+)', debug)
+        preserved.append({'path': encoded_path(name), 'index': entries.get(name), 'flag': flags.get(name),
+                          'index_flags': [value.decode() for value in index_flags], 'worktree': path_identity(project / os.fsdecode(name))})
+    frontier = {}
+    dirty_files = [project / os.fsdecode(name) for name in changed]
+    for name in delta:
+        parts = name.split(b'/')
+        for count in range(1, len(parts) + 1):
+            prefix = b'/'.join(parts[:count])
+            path = project / os.fsdecode(prefix)
+            identity = path_identity(path)
+            if count < len(parts) and identity['type'] not in ('directory', 'missing'):
+                fail('preservation_collision', 'A symlink or file parent crosses the publication path.')
+            if entries.get(prefix, {}).get('mode') == '160000':
+                fail('preservation_collision', 'A submodule crosses the publication path.')
+            # Resolve actual case/normalization aliases and hard links without following symlink parents.
+            if count == len(parts) and identity['type'] != 'missing':
+                if identity['type'] == 'directory' or name not in entries or path.lstat().st_nlink > 1:
+                    fail('preservation_collision', 'An untracked, ignored, directory or hard-link occupant crosses a publication endpoint.')
+                aliases = dirty_files
+                for dirty in aliases:
+                    try:
+                        if os.path.samefile(path, dirty):
+                            fail('preservation_collision', 'A filesystem alias crosses dirty work and the publication path.')
+                    except FileNotFoundError:
+                        pass
+            frontier[encoded_path(prefix)] = identity
+    return {'base': base, 'head': head, 'source_tree': git(project, 'rev-parse', head + '^{tree}'),
+            'delta': [encoded_path(name) for name in delta], 'preserved': preserved, 'frontier': frontier}
+
+
+def preservation_delta(manifest):
+    import base64
+    return [base64.b64decode(value) for value in manifest['delta']]
+
+
 def integrate(args, state, path, previous):
     rev = revision(state)
     all_current(state, rev)
@@ -1127,108 +1228,132 @@ def integrate(args, state, path, previous):
     head = rev["commit"]
     if args["expected_head"] != head:
         fail("revision_conflict", "The expected task commit changed.")
-    with lock(Path(state["project"]["common_dir"]) / "task-workflow-integration.lock"):
-        check_identity(state)
-        if revision(state) != rev:
-            fail("revision_conflict", "The task changed during integration checks.")
-        integration = state["integration"]
-        if integration:
-            if (integration.get("method") != "squash" or integration["head"] != head
-                    or integration["base"] != args["expected_base"] or integration["base_branch"] != args["base_branch"]
-                    or ("commit_message" in args and args["commit_message"] != integration["requested_message"])):
-                fail("integration_pending", "Inspect the recorded integration before starting another attempt.")
-            if integration["status"] in ("conflict", "unknown", "empty"):
-                fail("integration_pending", "The recorded integration needs inspection and renewed task review before retrying.")
-        elif git(project, "rev-parse", "HEAD") != args["expected_base"]:
-            fail("revision_conflict", "The expected base commit changed.")
-        if project_status(state):
-            fail("dirty_project", "The base checkout must be clean before integration.")
-        if args.get("dry_run", True):
-            return {"dry_run": True, "head": head, "base": args["expected_base"], "integration": integration}, previous, False
-        if not integration:
-            token = uuid.uuid4().hex
-            scratch = path / ("integration-" + token)
-            if scratch.exists():
-                fail("integration_scratch", "The isolated integration destination already exists.")
-            message = args.get("commit_message", state["title"]).strip()
-            integration = {"method": "squash", "status": "preparing", "token": token, "head": head,
-                "source_tree": rev["tree"], "base": args["expected_base"], "base_branch": args["base_branch"],
-                "scratch": str(scratch), "requested_message": message,
-                "commit_message": message + "\n\nTask-Workflow-Integration: " + token,
-                "authorization_source": args["authorization_source"], "actor": args["actor"], "time": now()}
-            state["integration"] = integration
-            previous = commit_event(path, state, previous, "integrate-intent", args["actor"])
-        if integration["status"] == "complete":
-            if (not integration_commit_matches(project, integration, integration["commit"])
-                    or run(["git", "-C", str(project), "merge-base", "--is-ancestor", integration["commit"], "HEAD"])["returncode"] != 0):
-                fail("integration_changed", "The recorded integration is no longer present in base.")
-            remove_integration_scratch(state, integration)
-            return {"integration": integration, "already_integrated": True}, previous, False
-        scratch = Path(integration["scratch"])
-        if not scratch.exists():
-            if integration["status"] != "preparing":
-                fail("integration_scratch", "The recorded integration worktree is missing.")
-            result = run(["git", "-C", str(project), "worktree", "add", "--detach", "--", str(scratch), integration["base"]])
-            if result["returncode"] != 0:
-                fail("integration_scratch", "Git did not complete the isolated worktree; inspect it before retrying.")
-        check_scratch(state, integration)
-        if integration["status"] == "preparing":
-            if git(scratch, "rev-parse", "HEAD") != integration["base"] or git(scratch, "status", "--porcelain=v1", "--untracked-files=all", "--ignored"):
-                fail("integration_scratch", "An interrupted squash has unrecorded changes; preserve it for inspection.")
-            integration["status"] = "merging"
-            previous = commit_event(path, state, previous, "integrate-merge-intent", args["actor"])
-            result = run(["git", "-C", str(scratch), "merge", "--squash", "--no-commit", "--", head])
-            conflicts = git(scratch, "ls-files", "--unmerged")
-            if conflicts or result["returncode"] != 0:
-                integration.update(status="conflict" if conflicts else "unknown", result=result, conflicts=conflicts)
-                return {"integration": integration}, previous, True
-            tree = git(scratch, "write-tree")
-            if tree == git(project, "rev-parse", integration["base"] + "^{tree}"):
-                integration.update(status="empty", result=result)
-                return {"integration": integration, "no_task_changes": True}, previous, True
-            integration.update(status="committing", tree=tree)
-            previous = commit_event(path, state, previous, "integrate-commit-intent", args["actor"])
-        if integration["status"] == "merging":
-            # A squash has no MERGE_HEAD. The index is the authoritative conflict evidence.
-            conflicts = git(scratch, "ls-files", "--unmerged")
-            integration.update(status="conflict" if conflicts else "unknown", conflicts=conflicts)
+    check_identity(state)
+    if revision(state) != rev:
+        fail("revision_conflict", "The task changed during integration checks.")
+    integration = state["integration"]
+    if integration:
+        if (integration.get("method") != "squash" or integration["head"] != head
+                or integration["base"] != args["expected_base"] or integration["base_branch"] != args["base_branch"]
+                or ("commit_message" in args and args["commit_message"] != integration["requested_message"])):
+            fail("integration_pending", "Inspect the recorded integration before starting another attempt.")
+        if integration["status"] in ("conflict", "unknown", "empty"):
+            fail("integration_pending", "The recorded integration needs inspection and renewed task review before retrying.")
+    elif git(project, "rev-parse", "HEAD") != args["expected_base"]:
+        fail("revision_conflict", "The expected base commit changed.")
+    preserve = args.get('preserve_unrelated_dirty', False)
+    if integration and bool(integration.get('preservation')) != preserve:
+        fail('integration_pending', 'Preserve the existing integration publication mode.')
+    preservation = publication_preservation(state, args['expected_base'], head) if preserve else None
+    if project_status(state) and not preserve:
+        fail("dirty_project", "The base checkout must be clean before integration.")
+    if args.get("dry_run", True):
+        return {"dry_run": True, "head": head, "base": args["expected_base"], "integration": integration,
+                'preservation': preservation, 'preservation_digest': digest(preservation) if preserve else None}, previous, False
+    if preserve:
+        expected = integration.get('preservation_digest') if integration else digest(preservation)
+        if args.get('expected_preservation_digest') != expected:
+            fail('preservation_changed', 'Use the exact current preservation digest from the integration preview.')
+        if integration and preservation['preserved'] != integration['preservation']['preserved']:
+            fail('preservation_changed', 'The unrelated tracked work changed after the reviewed preview.')
+    if not integration:
+        token = uuid.uuid4().hex
+        scratch = path / ("integration-" + token)
+        if scratch.exists():
+            fail("integration_scratch", "The isolated integration destination already exists.")
+        message = args.get("commit_message", state["title"]).strip()
+        integration = {"method": "squash", "status": "preparing", "token": token, "head": head,
+            "source_tree": rev["tree"], "base": args["expected_base"], "base_branch": args["base_branch"],
+            "scratch": str(scratch), "requested_message": message,
+            "commit_message": message + "\n\nTask-Workflow-Integration: " + token,
+            "authorization_source": args["authorization_source"], "actor": args["actor"], "time": now()}
+        if preserve:
+            integration.update(preservation=preservation, preservation_digest=digest(preservation))
+        state["integration"] = integration
+        previous = commit_event(path, state, previous, "integrate-intent", args["actor"])
+    if integration["status"] == "complete":
+        if (not integration_commit_matches(project, integration, integration["commit"])
+                or run(["git", "-C", str(project), "merge-base", "--is-ancestor", integration["commit"], "HEAD"])["returncode"] != 0):
+            fail("integration_changed", "The recorded integration is no longer present in base.")
+        remove_integration_scratch(state, integration)
+        return {"integration": integration, "already_integrated": True}, previous, False
+    scratch = Path(integration["scratch"])
+    if not scratch.exists():
+        if integration["status"] != "preparing":
+            fail("integration_scratch", "The recorded integration worktree is missing.")
+        result = run(["git", "-C", str(project), "worktree", "add", "--detach", "--", str(scratch), integration["base"]])
+        if result["returncode"] != 0:
+            fail("integration_scratch", "Git did not complete the isolated worktree; inspect it before retrying.")
+    check_scratch(state, integration)
+    if integration["status"] == "preparing":
+        if git(scratch, "rev-parse", "HEAD") != integration["base"] or git(scratch, "status", "--porcelain=v1", "--untracked-files=all", "--ignored"):
+            fail("integration_scratch", "An interrupted squash has unrecorded changes; preserve it for inspection.")
+        integration["status"] = "merging"
+        previous = commit_event(path, state, previous, "integrate-merge-intent", args["actor"])
+        result = run(["git", "-C", str(scratch), "merge", "--squash", "--no-commit", "--", head])
+        conflicts = git(scratch, "ls-files", "--unmerged")
+        if conflicts or result["returncode"] != 0:
+            integration.update(status="conflict" if conflicts else "unknown", result=result, conflicts=conflicts)
             return {"integration": integration}, previous, True
-        if integration["status"] == "committing":
-            candidate = git(scratch, "rev-parse", "HEAD")
-            if candidate == integration["base"]:
-                if commit_policy(project) != commit_policy(scratch):
-                    fail("integration_policy", "Base and isolated checkout have different commit hook, signing or author configuration; reconcile the explicit repository policy before committing.")
-                if (git(scratch, "ls-files", "--unmerged") or git(scratch, "write-tree") != integration["tree"]
-                        or run(["git", "-C", str(scratch), "diff", "--quiet"])["returncode"] != 0
-                        or git(scratch, "ls-files", "--others", "--exclude-standard")):
-                    fail("integration_scratch", "The prepared squash changed before commit; preserve it for inspection.")
-                result = run(["git", "-C", str(scratch), "commit", "-m", integration["commit_message"]])
-                candidate = git(scratch, "rev-parse", "HEAD")
-                if result["returncode"] != 0 and candidate == integration["base"]:
-                    integration.update(status="unknown", result=result)
-                    return {"integration": integration}, previous, True
-            if not integration_commit_matches(project, integration, candidate) or git(scratch, "status", "--porcelain=v1", "--untracked-files=all", "--ignored"):
-                fail("integration_scratch", "The actual commit does not match the recorded squash tree, parent and token.")
-            integration.update(status="publishing", commit=candidate)
-            previous = commit_event(path, state, previous, "integrate-publish-intent", args["actor"])
-        if integration["status"] == "publishing":
-            candidate = integration["commit"]
-            if not integration_commit_matches(project, integration, candidate) or git(scratch, "rev-parse", "HEAD") != candidate:
-                fail("integration_scratch", "The recorded integration candidate changed.")
-            base_now = git(project, "rev-parse", "HEAD")
-            if base_now != candidate:
-                if base_now != integration["base"] or project_status(state) or revision(state) != rev:
-                    fail("revision_conflict", "Base or task changed before publication; the candidate is preserved.")
-                result = run(["git", "-C", str(project), "merge", "--ff-only", "--no-overwrite-ignore", "--no-edit", "--", candidate])
-                if result["returncode"] != 0:
-                    integration.update(result=result)
-                    return {"integration": integration}, previous, True
-            if git(project, "rev-parse", "HEAD") != candidate or project_status(state):
-                fail("revision_conflict", "Base changed during publication; inspect the recorded candidate before retrying.")
-            integration["status"] = "complete"
-            previous = commit_event(path, state, previous, "integrate-complete", args["actor"])
-            remove_integration_scratch(state, integration)
+        tree = git(scratch, "write-tree")
+        if tree == git(project, "rev-parse", integration["base"] + "^{tree}"):
+            integration.update(status="empty", result=result)
+            return {"integration": integration, "no_task_changes": True}, previous, True
+        integration.update(status="committing", tree=tree)
+        previous = commit_event(path, state, previous, "integrate-commit-intent", args["actor"])
+    if integration["status"] == "merging":
+        # A squash has no MERGE_HEAD. The index is the authoritative conflict evidence.
+        conflicts = git(scratch, "ls-files", "--unmerged")
+        integration.update(status="conflict" if conflicts else "unknown", conflicts=conflicts)
         return {"integration": integration}, previous, True
+    if integration["status"] == "committing":
+        candidate = git(scratch, "rev-parse", "HEAD")
+        if candidate == integration["base"]:
+            if commit_policy(project) != commit_policy(scratch):
+                fail("integration_policy", "Base and isolated checkout have different commit hook, signing or author configuration; reconcile the explicit repository policy before committing.")
+            if (git(scratch, "ls-files", "--unmerged") or git(scratch, "write-tree") != integration["tree"]
+                    or run(["git", "-C", str(scratch), "diff", "--quiet"])["returncode"] != 0
+                    or git(scratch, "ls-files", "--others", "--exclude-standard")):
+                fail("integration_scratch", "The prepared squash changed before commit; preserve it for inspection.")
+            result = run(["git", "-C", str(scratch), "commit", "-m", integration["commit_message"]])
+            candidate = git(scratch, "rev-parse", "HEAD")
+            if result["returncode"] != 0 and candidate == integration["base"]:
+                integration.update(status="unknown", result=result)
+                return {"integration": integration}, previous, True
+        if not integration_commit_matches(project, integration, candidate) or git(scratch, "status", "--porcelain=v1", "--untracked-files=all", "--ignored"):
+            fail("integration_scratch", "The actual commit does not match the recorded squash tree, parent and token.")
+        integration.update(status="publishing", commit=candidate)
+        previous = commit_event(path, state, previous, "integrate-publish-intent", args["actor"])
+    if integration["status"] == "publishing":
+        candidate = integration["commit"]
+        if not integration_commit_matches(project, integration, candidate) or git(scratch, "rev-parse", "HEAD") != candidate:
+            fail("integration_scratch", "The recorded integration candidate changed.")
+        base_now = git(project, "rev-parse", "HEAD")
+        if base_now != candidate:
+            if base_now != integration["base"] or (project_status(state) and not preserve) or revision(state) != rev:
+                fail("revision_conflict", "Base or task changed before publication; the candidate is preserved.")
+            if preserve:
+                actual = publication_preservation(state, integration['base'], candidate)
+                intended = integration['preservation']
+                if actual['delta'] != intended['delta'] or actual['preserved'] != intended['preserved'] or actual['frontier'] != intended['frontier']:
+                    fail('preservation_changed', 'The candidate footprint or preserved material changed before publication.')
+            result = run(["git", "-C", str(project), "merge", "--ff-only", "--no-autostash", "--no-overwrite-ignore", "--no-edit", "--", candidate])
+            if result["returncode"] != 0:
+                integration.update(result=result)
+                return {"integration": integration}, previous, True
+        if git(project, "rev-parse", "HEAD") != candidate or (project_status(state) and not preserve):
+            fail("revision_conflict", "Base changed during publication; inspect the recorded candidate before retrying.")
+        if preserve:
+            after = publication_preservation(state, integration['base'], head, preservation_delta(integration['preservation']))
+            if after['preserved'] != integration['preservation']['preserved']:
+                integration.update(status='unknown', preservation_after=after)
+                previous = commit_event(path, state, previous, 'integrate-preservation-unknown', args['actor'])
+                fail('preservation_changed', 'Publication completed but unrelated work changed; inspect the retained actual state.')
+            integration['preservation_after'] = after
+        integration["status"] = "complete"
+        previous = commit_event(path, state, previous, "integrate-complete", args["actor"])
+        remove_integration_scratch(state, integration)
+    return {"integration": integration}, previous, True
 
 def env_fingerprint(path, forbidden=()):
     logical = Path(path).expanduser()
@@ -1669,6 +1794,8 @@ def check_startup_inputs(state, current):
 
 
 def execution_argv_digest(current):
+    if current.get("lifecycle_contract"):
+        return digest({"generation": current["generation"], "integration_commit": current["integration_commit"], "lifecycle_contract": current["lifecycle_contract"], "inputs": {key: current[key] for key in ("snapshot_contract", "argv", "validation_argv", "snapshot_scope", "code_store", "startup_inputs", "environment", "manifest_digest")}})
     if current.get('snapshot_contract') == 3:
         return digest({key: current[key] for key in ('snapshot_contract', 'argv', 'validation_argv', 'snapshot_scope', 'code_store', 'startup_inputs', 'environment', 'manifest_digest')})
     return digest(current['argv'])
@@ -1750,7 +1877,7 @@ def startup_environment(current):
     return environment
 
 
-def perform_startup_validation(current):
+def perform_startup_validation(current, timeout=None):
     """Run the same startup gate for frozen Runs and explicit verification baselines."""
     directory = Path(current['directory'])
     log_path = directory / 'startup.log'
@@ -1765,7 +1892,9 @@ def perform_startup_validation(current):
         try:
             process = subprocess.Popen(command, cwd=current['code'], env=startup_environment(current), stdin=subprocess.DEVNULL,
                 stdout=log, stderr=log, shell=False, start_new_session=True)
-            code = process.wait()
+            code = wait_with_timeout(lambda seconds: process.wait(timeout=seconds), timeout)
+        except subprocess.TimeoutExpired:
+            code, error = 124, 'timeout'
         except OSError:
             error = 'startup_spawn_failed'
         finally:
@@ -1796,7 +1925,9 @@ def perform_startup_validation(current):
 
 
 def prepare_verification_snapshot(state, *, commit, directory, environment_id, snapshot_scope,
-                                  fixed_references, validation_argv, origin_checks, authorization_source):
+                                  fixed_references, validation_argv, origin_checks, authorization_source,
+                                  actor=None, expected_version=None, check_id=None, resource_id=None,
+                                  requirements=None, timeout=None):
     """Create and validate one explicitly recorded development baseline, with no integration claim.
 
     Project verification callers that need an independent code baseline use this
@@ -1833,10 +1964,23 @@ def prepare_verification_snapshot(state, *, commit, directory, environment_id, s
     current['manifest_digest'] = digest(current['manifest'])
     current['startup_inputs'] = freeze_startup_inputs(args, state, Path(current['code']), environment)
     atomic_json(directory / 'baseline.json', current)
-    claim = directory / 'execution.claim'
-    claim.mkdir()
-    atomic_json(claim / 'owner.json', {'token': current['token'], 'pid': os.getpid(), 'host': socket.gethostname(), 'time': now()})
-    receipt = perform_startup_validation(current)
+    arguments = {'root': state['root'], 'task_id': state['task_id'], 'actor': actor or state['coordinator'],
+                 'expected_version': expected_version or state['version'], 'check_id': check_id or 'baseline-' + uuid.uuid4().hex,
+                 'kind': 'baseline', 'baseline_path': str(directory / 'baseline.json'), 'argv': current['validation_argv']}
+    if resource_id is not None:
+        arguments['resource_id'] = resource_id
+    if requirements is not None:
+        arguments['requirements'] = requirements
+    if timeout is not None:
+        arguments['timeout'] = timeout
+    result = dispatch('check-dispatch', arguments)
+    if resource_id:
+        return {'baseline': current, 'startup': {'status': 'reserved'}, 'check': result}
+    runner_result = run(result['runner_argv'], cwd=state['root'])
+    fresh, _ = load_events(task_dir(Path(state['root']) / '.task-workflow', state['task_id']))
+    outcome = dispatch('check-reconcile', {'root': state['root'], 'task_id': state['task_id'], 'actor': arguments['actor'],
+                                         'expected_version': fresh['version'], 'check_id': arguments['check_id']})
+    receipt = outcome['check']['receipt'].get('startup', {'status': 'failed', 'result': runner_result})
     # Validation can run for any duration. Recheck all actual input identities afterward.
     if receipt['status'] == 'passed':
         try:
@@ -1847,7 +1991,7 @@ def prepare_verification_snapshot(state, *, commit, directory, environment_id, s
         except WorkflowError as failure:
             receipt.update(status='failed', error=failure.code)
             atomic_json(directory / 'startup-receipt.json', receipt)
-    return {'baseline': current, 'startup': receipt}
+    return {'baseline': current, 'startup': receipt, 'check': outcome}
 
 
 def source_has_prefix(source, prefix):
@@ -1885,8 +2029,10 @@ def plan_run(args, state, store, status="planned"):
     if args["run_id"] in state["runs"]:
         fail("already_exists", "Run identifiers cannot be reused; changed code or configuration requires a new run.")
     association = run_association(args, state)
-    validate_resource_reference(store, state, association)
+    validate_resource_reference(store, state, {**association, "run_id": args["run_id"]})
+    admit_new_resource(store, state, association)
     planned = {"run_id": args["run_id"], "status": status, "created": now(), **association}
+    planned['retention_hold_id'] = bind_resource_retention(state, association, args['actor'])
     state["runs"][args["run_id"]] = planned
     if association["experiment_id"]:
         get_experiment(state, association["experiment_id"])["run_ids"].append(args["run_id"])
@@ -1954,6 +2100,10 @@ def close_scope(args, state, experiment_id=None):
     if args["outcome"] not in ("completed", "stopped", "abandoned") or not args["evidence"]:
         fail("acceptance_required", "Closure needs an explicit completed, stopped or abandoned outcome and evidence references.")
     runs = [r for r in state["runs"].values() if not experiment_id or r.get("experiment_id") == experiment_id]
+    active_checks = [check['id'] for check in state.get('checks', {}).values() if check['status'] not in TERMINAL_CHECKS
+                     and (not experiment_id or state['runs'].get(check.get('selectors', {}).get('run_id'), {}).get('experiment_id') == experiment_id)]
+    if active_checks:
+        fail('checks_incomplete', 'Settle reserved, active and uncertain checks before closing their scope.', {'check_ids': active_checks})
     if any(r["status"] not in TERMINAL_RUNS for r in runs):
         fail("runs_incomplete", "Resolve all planned, prepared, queued, running and uncertain runs before closing the aggregate scope.")
     if args['outcome'] == 'completed' and any(current['status'] == 'complete' and not accepted_run_proof(state, current) for current in runs):
@@ -1981,6 +2131,10 @@ def close_scope(args, state, experiment_id=None):
                 all_current(state, current_revision)
                 if current_revision["tree"] != git(state["project"]["path"], "rev-parse", "HEAD^{tree}"):
                     fail("unpublished_changes", "A task that excludes integration cannot close successfully with unpublished code changes.")
+    for hold in state.get('resource_holds', {}).values():
+        ref = {'kind': 'experiment' if experiment_id else 'task', 'id': experiment_id or state['task_id']}
+        if hold.get('program_owned') and hold['status'] == 'retained' and hold['work_refs'] == [ref]:
+            hold.update(status='resolved', resolved_at=now(), resolution={'outcome': args['outcome'], 'evidence': args['evidence'], 'actor': args['actor']})
     scope.update(status="complete", closure={"id": uuid.uuid4().hex, "outcome": args["outcome"], "notes": args["notes"],
                  "evidence": args["evidence"], "actor": args["actor"], "time": now(), "generation": scope["generation"]})
     return {"experiment" if experiment_id else "task_lifecycle": scope}
@@ -2022,7 +2176,7 @@ def accept_run(args, state):
 
 def prepare_run_staged(args, root, store):
     path = task_dir(store, args["task_id"])
-    with lifecycle_lock(store), lock(path / "write.lock"):
+    with mutation_locks(store, args, operation if 'operation' in locals() else "run-prepare"):
         state, previous = load_events(path)
         if state["version"] != args["expected_version"]:
             fail("revision_conflict", "The task changed; reread status before preparation.")
@@ -2040,7 +2194,8 @@ def prepare_run_staged(args, root, store):
             if not args['validation_argv'] or any(not isinstance(value, str) or not value or '\x00' in value for value in args['validation_argv']):
                 fail('startup_validation_required', 'Record an executable startup validator that produces the structured origin and reference report.')
         frozen_intent = {key: args.get(key) for key in ('argv', 'artifacts', 'environment_id', 'lockfiles', 'output_dir', 'dependency_declaration') + (() if legacy else SCOPED_INPUTS)}
-        frozen_intent.update(commit=state.get('integration', {}).get('commit'), design_digest=state['design']['digest'])
+        original_proof = (current or {}).get('preparation_intent', {}).get('integration_verification', state.get('integration', {}).get('verification'))
+        frozen_intent.update(commit=state.get('integration', {}).get('commit'), design_digest=state['design']['digest'], integration_verification=copy.deepcopy(original_proof))
         current = state["runs"].get(args["run_id"])
         if current and current.get('preparation_intent') and current['preparation_intent'] != frozen_intent:
             fail('preparation_changed', 'Prepared inputs are immutable; use a new run identity.')
@@ -2050,7 +2205,7 @@ def prepare_run_staged(args, root, store):
             association = run_association({**current, **args}, state)
             if any(association[key] != current.get(key) for key in association):
                 fail("planned_run_changed", "A planned run's frozen intent cannot be replaced; create a new run.")
-            validate_resource_reference(store, state, association)
+            validate_resource_reference(store, state, {**association, "run_id": args["run_id"]})
             current["status"] = "preparing"
         else:
             plan_run(args, state, store, "preparing")
@@ -2084,10 +2239,17 @@ def prepare_run(args, state, root):
     integration = state['integration']
     if integration.get('status') != 'complete':
         fail('integration_required', 'An explicitly integrated task revision is required before experiment snapshots.')
-    check_identity(state)
-    verified = integration.get('verification', {})
+    check_base_identity(state)
+    verified = (planned or {}).get('preparation_intent', {}).get('integration_verification', integration.get('verification', {}))
+    if state.get('workflow_format') == 3:
+        proof = state.get('checks', {}).get(verified.get('check_id'), {})
+        if (proof.get('status') != 'passed' or proof.get('receipt_digest') != verified.get('receipt_digest')
+                or proof.get('generation') != generation(state) or verified.get('integration_token') != integration.get('token')):
+            fail('integration_verification_required', 'Freeze requires the actual matching generation integration check receipt.')
     if not verified.get('passed') or verified.get('commit') != integration['commit'] or verified.get('design_digest') != state['design']['digest']:
         fail('integration_verification_required', 'The integrated commit requires actual successful integration-verify evidence.')
+    if integration.get('preservation') and verified.get('source_mode') != 'fixed_commit':
+        fail('fixed_verification_required', 'Freeze preserved integration only after matching fixed-commit verification.')
     commit = integration['commit']
     if run(['git', '-C', state['project']['path'], 'merge-base', '--is-ancestor', commit, 'HEAD'])['returncode']:
         fail('integration_changed', 'The integrated commit is no longer present in the registered base branch.')
@@ -2144,6 +2306,7 @@ def prepare_run(args, state, root):
     startup_inputs = freeze_startup_inputs(args, state, code, environment)
     code_manifest = {name: item['sha256'] for name, item in store['identity']['files'].items()}
     current = {**association, 'run_id': run_id, 'status': 'prepared', 'commit': commit,
+        'integration_verification': copy.deepcopy(verified),
         'design_digest': state['design']['digest'], 'frozen_approval': copy.deepcopy(state['approval']),
         'independent_snapshot': True, 'snapshot_contract': 3, 'snapshot_scope': args['snapshot_scope'],
         'code_store': store, 'provenance': {'commit': commit, 'objects': objects}, 'startup_inputs': startup_inputs,
@@ -2153,6 +2316,9 @@ def prepare_run(args, state, root):
         'origin_checks': args['origin_checks'], 'fixed_references': args['fixed_references'],
         'artifacts': args['artifacts'], 'token': 'tw-' + uuid.uuid4().hex, 'created': now(),
         'preparation_token': ownership['token'], 'preparation_intent': ownership['intent']}
+    current['retention_hold_id'] = planned.get('retention_hold_id')
+    if state.get('workflow_format') == 3:
+        current.update(lifecycle_contract=1, generation=generation(state), integration_commit=commit)
     current['runtime'] = pin_runtime(state)
     atomic_json(destination / 'snapshot.json', current)
     state['runs'][run_id] = current
@@ -2337,9 +2503,9 @@ def require_execution_protocol(state, current):
     if not runtime:
         fail('legacy_runtime', message)
     runtime = check_runtime(state, current)
-    if runtime.get('execution_protocol') not in (2, EXECUTION_PROTOCOL) or set(runtime['files']) != {'workflow.py', 'runner.py'}:
+    if runtime.get('execution_protocol') not in (2, 3, EXECUTION_PROTOCOL) or set(runtime['files']) != {'workflow.py', 'runner.py'}:
         fail('legacy_runtime', message)
-    if current.get('snapshot_contract') == 3 and runtime['execution_protocol'] != 3:
+    if current.get('snapshot_contract') == 3 and runtime['execution_protocol'] not in (3, 4):
         fail('legacy_runtime', 'Scoped Runs require the protocol3 startup gate in their pinned runtime.')
     for name in runtime['files']:
         content = (Path(runtime['directory']) / name).read_bytes()
@@ -2424,9 +2590,12 @@ def cleanup(args, state, store):
         fail("not_owned", "Only a distinct explicitly owned task worktree can be removed.")
     if state["integration"].get("status") != "complete":
         fail("integration_required", "Worktree cleanup requires a completed integration.")
+    require_cleanup_inputs(state)
     target = Path(state["worktree"]["path"])
     if state.get("cleaned") and not target.exists():
         return {"already_cleaned": True}
+    if state.get("cleanup_intent") and not target.exists():
+        return finish_cleanup(args, state)
     check_identity(state)
     cleanup_task_references(state, store)
     for experiment in state["runs"].values():
@@ -2451,23 +2620,25 @@ def cleanup(args, state, store):
     cleanup_integration_proof(state, head)
     if args.get("dry_run", True):
         return {"dry_run": True, "removable": str(target), "environment_links_only": safe_env_links}
-    with lock(Path(state["project"]["common_dir"]) / "task-workflow-integration.lock"):
-        check_identity(state)
-        cleanup_task_references(state, store)
-        cleanup_integration_proof(state, head)
-        if git(target, "rev-parse", "HEAD") != head or git(target, "status", "--porcelain=v1", "--untracked-files=all", "--ignored") != dirty:
-            fail("revision_conflict", "The worktree changed after cleanup checks.")
-        for name in safe_env_links:
-            link = target / name
-            if link.is_symlink() and not within(link.resolve(), target):
-                link.unlink()  # Remove only the checkout entrypoint, never its external environment.
-            else:
-                fail("revision_conflict", "An environment entrypoint changed during cleanup.")
-        result = run(["git", "-C", state["project"]["path"], "worktree", "remove", "--", str(target)])
-        if result["returncode"] != 0:
-            fail("cleanup_failed", "Git refused safe worktree removal; files were not force removed.")
-    state["cleaned"] = {"time": now(), "actor": args["actor"]}
-    return {"removed": str(target)}
+    state["cleanup_intent"] = state.get("cleanup_intent") or {"token": uuid.uuid4().hex, "generation": generation(state), "head": head, "path": str(target), "time": now()}
+    task_path = task_dir(store, state["task_id"])
+    _, parent = load_events(task_path)
+    commit_event(task_path, state, parent, "cleanup-intent", args["actor"])
+    check_identity(state)
+    cleanup_task_references(state, store)
+    cleanup_integration_proof(state, head)
+    if git(target, "rev-parse", "HEAD") != head or git(target, "status", "--porcelain=v1", "--untracked-files=all", "--ignored") != dirty:
+        fail("revision_conflict", "The worktree changed after cleanup checks.")
+    for name in safe_env_links:
+        link = target / name
+        if link.is_symlink() and not within(link.resolve(), target):
+            link.unlink()  # Remove only the checkout entrypoint, never its external environment.
+        else:
+            fail("revision_conflict", "An environment entrypoint changed during cleanup.")
+    result = run(["git", "-C", state["project"]["path"], "worktree", "remove", "--", str(target)])
+    if result["returncode"] != 0:
+        fail("cleanup_failed", "Git refused safe worktree removal; files were not force removed.")
+    return finish_cleanup(args, state)
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -2497,7 +2668,7 @@ def lifecycle_lock(store):
         yield
 
 def require_portable_state(state):
-    if state.get('workflow_format') != PORTABLE_FORMAT:
+    if state.get('workflow_format') not in (2, PORTABLE_FORMAT):
         fail('legacy_read_only', 'Legacy records remain readable; enroll a new project task for this workflow.')
 
 def bootstrap_project(project):
@@ -2558,6 +2729,12 @@ def bootstrap_project(project):
         return {'path': str(target), 'sha256': record['after_sha256'], 'audit': str(audit), 'reused': False}
 
 def register_root(root, state, select_session=False):
+    store = root / '.task-workflow'
+    with lock(store / 'registry-projection.lock'):
+        return write_root_projection(root, state, select_session)
+
+
+def write_root_projection(root, state, select_session=False):
     store = root / '.task-workflow'
     path = store / 'registry.json'
     data = read_json(path) if path.exists() else {'format': VERSION, 'root': str(root), 'project': state['project'], 'tasks': []}
@@ -2703,7 +2880,7 @@ def init(args, root, store):
     for name, value in args.get('environment_registry', {}).items():
         identifier(name)
         environments[name] = environment_reference(value)
-    with lifecycle_lock(store), lock(Path(project['common_dir']) / 'task-workflow-integration.lock'), lock(store / 'registry.lock'):
+    with lock(Path(project['common_dir']) / 'task-workflow-integration.lock'), lock(store / 'registry.lock'):
         binding_path = Path(project['common_dir']) / 'task-workflow-root.json'
         if binding_path.exists() and read_json(binding_path) != {'root': str(root), 'common_dir': project['common_dir']}:
             fail('project_mismatch', 'This project already has a different authoritative state root.')
@@ -2717,7 +2894,7 @@ def init(args, root, store):
             'project': project, 'worktree': worktree, 'owned_worktree': args.get('owned_worktree', False),
             'environment_registry': environments, 'managed_paths': args['_managed_paths'], 'design': None, 'approval': None,
             'integration_required': args.get('integration_required', True), 'items': {'overall': make_item('Overall verification', True)},
-            'decisions': [], 'runs': {}, 'experiments': {}, 'integration': {}, 'task_lifecycle': {'status': 'open', 'generation': 1, 'history': []}}
+            'decisions': [], 'runs': {}, 'checks': {}, 'resource_holds': {}, 'generation': 1, 'generation_history': [], 'experiments': {}, 'integration': {}, 'task_lifecycle': {'status': 'open', 'generation': 1, 'history': []}}
         process = new_process()
         if process is not None:
             state['process'] = process
@@ -2857,27 +3034,40 @@ def resource_projection(store, resource):
         refs.append({'task_id': state['task_id'], 'run_id': run_id, 'status': current['status'],
                      'release_blocking': blocking,
                      'exit_receipt_digest': current.get('execution', {}).get('receipt_digest') if exited else None})
-    live = any(reference['release_blocking'] for reference in refs)
+    uses = [dict(reference, kind='run') for reference in refs]
+    holds = []
+    for folder in sorted((store / 'tasks').iterdir()):
+        state, _ = load_events(folder)
+        for check_id, current in state.get('checks', {}).items():
+            if current.get('resource_id') == resource['resource_id']:
+                uses.append({'task_id': state['task_id'], 'check_id': check_id, 'kind': 'check', 'status': current['status'],
+                             'release_blocking': current['status'] not in TERMINAL_CHECKS})
+        for hold_id, hold in state.get('resource_holds', {}).items():
+            if hold['resource_id'] == resource['resource_id']:
+                holds.append({'task_id': state['task_id'], 'hold_id': hold_id, 'status': hold['status'],
+                              'retention': hold['retention'], 'work_refs': hold['work_refs'], 'release_blocking': hold['status'] == 'retained'})
+    live = any(reference['release_blocking'] for reference in uses)
+    retained = any(reference['release_blocking'] for reference in holds)
     key = digest({'resource_id': resource['resource_id'], 'resource_version': resource['version'],
-                  'refs': refs})
+                  'refs': uses, 'retention': holds})
     released = resource.get('release', {}).get('status') == 'released'
     uncertain = resource.get('release', {}).get('status') in ('releasing', 'unknown')
     current = observation_current(resource)
     permitted = resource.get('can_release') is True
-    eligible = bool(permitted and not live and current and resource['observed_state'] == 'available' and not released and not uncertain)
+    eligible = bool(permitted and not live and not retained and current and resource['observed_state'] == 'available' and not released and not uncertain)
     reason = ('released' if released else 'release_unknown' if uncertain else 'release_permission_required' if not permitted else
-              'live_references' if live else 'observation_required' if not current or resource['observed_state'] != 'available' else 'eligible')
+              'live_references' if live else 'retained_work' if retained else 'observation_required' if not current or resource['observed_state'] != 'available' else 'eligible')
     derived = ('released' if released else 'unknown' if uncertain else 'in_use' if live else 'releasable' if eligible else
                'available' if current and resource['observed_state'] == 'available' else 'unknown')
     return {**copy.deepcopy(resource), 'derived_state': derived, 'observed_at': resource['observation']['time'],
-            'eligibility': {'eligible': eligible, 'reason': reason, 'key': key}, 'run_refs': refs}
+            'eligibility': {'eligible': eligible, 'reason': reason, 'key': key}, 'run_refs': refs, 'use_refs': uses, 'retention_refs': holds}
 
 def resource_status(root, resource_id):
     _, store = store_dir(str(root))
     resource, _ = read_resource(store, resource_id)
     return {'ok': True, 'resource': resource_projection(store, resource)}
 
-def validate_resource_reference(store, state, association, require_available=False):
+def validate_resource_reference(store, state, association, require_available=False, capacity=False):
     resource_id = association.get('resource_id')
     if not resource_id:
         if association.get('requirements'):
@@ -2893,6 +3083,23 @@ def validate_resource_reference(store, state, association, require_available=Fal
         offered = resource['capabilities'].get(key)
         if (type(needed) is int and (type(offered) is not int or offered < needed)) or (type(needed) is not int and (type(offered) is not type(needed) or offered != needed)):
             fail('resource_mismatch', 'The observed resource capabilities do not meet this run requirement.')
+    numeric = {key: value for key, value in association.get('requirements', {}).items() if type(value) is int}
+    if state.get('workflow_format') != 3 or not numeric or not (require_available or capacity):
+        return
+    used = {key: 0 for key in numeric}
+    for folder in sorted((store / 'tasks').iterdir()):
+        other, _ = load_events(folder)
+        for kind, records, terminal in (('run', other['runs'], TERMINAL_RUNS), ('check', other.get('checks', {}), TERMINAL_CHECKS)):
+            for use_id, use in records.items():
+                same = other['task_id'] == state['task_id'] and use_id == association.get('run_id' if kind == 'run' else 'check_id', association.get('id') if kind == 'check' else None)
+                if same or use.get('resource_id') != resource_id or use['status'] in terminal or (kind == 'run' and use['status'] not in ('queued', 'starting', 'running', 'unknown')):
+                    continue
+                for key in numeric:
+                    amount = use.get('requirements', {}).get(key, 0)
+                    if type(amount) is int:
+                        used[key] += amount
+    if any(used[key] + needed > resource['capabilities'][key] for key, needed in numeric.items()):
+        fail('resource_capacity', 'Concurrent managed uses exceed the observed resource capacity.', {'used': used, 'requested': numeric})
 
 def register_resource(args, state, store):
     require_coordinator(args, state)
@@ -2962,7 +3169,7 @@ def release_resource(args, root, store):
     """Record permission and intent before one explicit external release action."""
     path = task_dir(store, args['task_id'])
     resource_path = resource_dir(store, args['resource_id'])
-    with lifecycle_lock(store), lock(path / 'write.lock'):
+    with mutation_locks(store, args, 'run-dispatch' if 'external' in locals() else 'resource-release'):
         state, _ = load_events(path)
         require_portable_state(state)
         if state['version'] != args['expected_version']:
@@ -2987,7 +3194,7 @@ def release_resource(args, root, store):
     result = run(command, cwd=str(root), timeout=args.get('timeout'))
     receipt = {'token': token, 'resource_id': args['resource_id'], 'argv_digest': digest(command), 'result': result, 'time': now()}
     atomic_json(resource_path / 'release-receipt.json', receipt)
-    with lifecycle_lock(store):
+    with lock(resource_path / 'write.lock'):
         resource, previous = read_resource(store, args['resource_id'])
         if resource['release']['token'] != token:
             fail('release_identity', 'The release intent changed; preserve the external receipt.')
@@ -3018,6 +3225,737 @@ def reconcile_release(args, state, store):
     return {'resource': resource_projection(store, resource)}
 
 
+def generation(state):
+    return state.get('generation', 1)
+
+
+def check_base_identity(state):
+    if git_identity(state['project']['path']) != state['project']:
+        fail('git_identity_changed', 'The registered base checkout changed.')
+
+
+def mutation_resource_ids(state, args, operation):
+    ids = {args.get('resource_id')}
+    for key, collection in (('run_id', 'runs'), ('check_id', 'checks')):
+        if args.get(key):
+            ids.add(state.get(collection, {}).get(args[key], {}).get('resource_id'))
+    if operation == 'lifecycle-upgrade':
+        ids.update(use.get('resource_id') for collection in ('runs', 'checks', 'resource_holds') for use in state.get(collection, {}).values())
+    ids.discard(None)
+    return ids
+
+
+def mutation_needs_git(state, args, operation):
+    if operation == 'check-started':
+        return False
+    if operation in ('integrate', 'worktree-prepare', 'cleanup', 'recover'):
+        return True
+    current = state.get('checks', {}).get(args.get('check_id'), {})
+    return bool(current.get('source_checkout') or (operation in ('integration-verify', 'check-dispatch') and args.get('source_mode') == 'fixed_commit'))
+
+
+@contextlib.contextmanager
+def mutation_locks(store, args, operation):
+    """Revalidate applicable lock coverage after the task lock is acquired."""
+    path = task_dir(store, args['task_id'])
+    while True:
+        initial, _ = load_events(path)
+        ids = mutation_resource_ids(initial, args, operation)
+        legacy = bool(ids and any(legacy_resource_uses(store, name) for name in ids))
+        git_lock = mutation_needs_git(initial, args, operation)
+        with contextlib.ExitStack() as stack:
+            if legacy:
+                stack.enter_context(lifecycle_lock(store))
+            if git_lock:
+                stack.enter_context(lock(Path(initial['project']['common_dir']) / 'task-workflow-integration.lock'))
+            if operation == 'worktree-prepare':
+                stack.enter_context(lock(store / 'registry.lock'))
+            if operation in ('resource-register', 'experiment-create', 'environment-register', 'cleanup'):
+                stack.enter_context(lock(store / 'catalog.lock'))
+            for name in sorted(ids):
+                folder = resource_dir(store, name)
+                if folder.is_dir():
+                    stack.enter_context(lock(folder / 'write.lock'))
+            stack.enter_context(lock(path / 'write.lock'))
+            actual, _ = load_events(path)
+            actual_ids = mutation_resource_ids(actual, args, operation)
+            if actual_ids != ids or (not git_lock and mutation_needs_git(actual, args, operation)) or (not legacy and any(legacy_resource_uses(store, name) for name in actual_ids)):
+                continue
+            yield
+            return
+
+
+def legacy_resource_uses(store, resource_id):
+    uses = []
+    for folder in sorted((store / 'tasks').iterdir()):
+        other, _ = load_events(folder)
+        for run_id, current in other.get('runs', {}).items():
+            if (current.get('resource_id') == resource_id and current['status'] not in TERMINAL_RUNS
+                    and (other.get('workflow_format') == 2 or current.get('runtime', {}).get('execution_protocol', 4) < 4)):
+                if current['status'] != 'awaiting_artifacts' or not exited_resource_reference(current):
+                    uses.append({'task_id': other['task_id'], 'run_id': run_id, 'status': current['status']})
+    return uses
+
+
+def admit_new_resource(store, state, association):
+    name = association.get('resource_id')
+    if not name:
+        return
+    resource, previous = read_resource(store, name)
+    if state.get('workflow_format') == 2:
+        if resource.get('coordination_protocol') == 2:
+            fail('legacy_resource_transition', 'This resource requires current lifecycle coordination; settle existing legacy work before upgrading.')
+        return
+    legacy = legacy_resource_uses(store, name)
+    if legacy:
+        fail('legacy_resource_busy', 'Retained legacy admission must settle before this resource enters current coordination.', {'legacy_uses': legacy})
+    if resource.get('coordination_protocol') != 2:
+        if resource.get('release'):
+            fail('resource_unavailable', 'Reconcile the existing release before resource transition.')
+        resource.update(coordination_protocol=2, coordination_transition={'task_id': state['task_id'], 'time': now()})
+        commit_event(resource_dir(store, name), resource, previous, 'resource-coordination-transition', state['coordinator'])
+
+
+def upgrade_lifecycle(args, state, store):
+    require_coordinator(args, state)
+    text_value(args['authorization_source'])
+    if state.get('workflow_format') == 3:
+        return {'already_upgraded': True}
+    outstanding = [r['run_id'] for r in state['runs'].values() if r['status'] not in TERMINAL_RUNS
+                   and not (r['status'] == 'awaiting_artifacts' and exited_resource_reference(r))]
+    if outstanding or any(c['status'] not in TERMINAL_CHECKS for c in state.get('checks', {}).values()):
+        fail('legacy_admission_pending', 'Settle retained legacy reservations and uncertain execution before upgrade.', {'run_ids': outstanding})
+    for resource in project_resources(store):
+        if resource['owner_task_id'] == state['task_id'] and resource.get('release', {}).get('status') in ('releasing', 'unknown'):
+            fail('resource_release_unknown', 'Reconcile the pending release before lifecycle upgrade.')
+    state.update(workflow_format=3, generation=generation(state))
+    state.setdefault('generation_history', [])
+    state.setdefault('checks', {})
+    state.setdefault('resource_holds', {})
+    state['lifecycle_upgrade'] = {'actor': args['actor'], 'authorization_source': args['authorization_source'], 'time': now()}
+    return {'upgraded': True}
+
+
+def apply_scope_changes(process, args, old):
+    if any(not isinstance(entry, dict) or not isinstance(entry.get('id'), str) for entry in args['requirements']):
+        fail('invalid_process', 'Each requirement needs its existing structured identity and source.')
+    incoming = {r['id']: r for r in args['requirements']}
+    changes = args.get('scope_changes', [])
+    by_id = {}
+    for change in changes:
+        process_object(change, ('requirement_id', 'previous_digest', 'action', 'reason', 'authorization_source'), ('replacement_ids',))
+        key = change['requirement_id']
+        if key in by_id or key not in old or old[key]['status'] != 'confirmed' or digest(old[key]) != change['previous_digest']:
+            fail('stale_scope_change', 'A disposition must name one current confirmed requirement and its exact digest.')
+        process_source(change['authorization_source'], user=True)
+        text_value(change['reason'])
+        action, updated = change['action'], incoming.get(key)
+        valid = ((action == 'remove' and updated is None) or
+                 (action == 'replace' and updated is None and bool(change.get('replacement_ids')) and all(k in incoming for k in change['replacement_ids'])) or
+                 (action == 'demote' and updated is not None and updated['status'] == 'proposed') or
+                 (action == 'revise' and updated is not None and updated['status'] == 'confirmed' and any(updated[k] != old[key][k] for k in ('text', 'kind'))))
+        if not valid or (action != 'replace' and 'replacement_ids' in change):
+            fail('invalid_scope_change', 'The disposition must match the actual requirement change.')
+        if action == 'replace':
+            for replacement in change['replacement_ids']:
+                if incoming[replacement]['status'] != 'confirmed':
+                    fail('confirmation_required', 'Confirm each replacement requirement with its actual user authority.')
+        if updated and updated['status'] == 'confirmed' and updated.get('confirmation_source') != change['authorization_source']:
+            fail('confirmation_required', 'A revised confirmed requirement needs its explicit scope-change confirmation.')
+        by_id[key] = change
+    for key, previous in old.items():
+        if previous['status'] != 'confirmed':
+            continue
+        updated = incoming.get(key)
+        changed = updated is None or any(updated[k] != previous[k] for k in ('text', 'kind', 'status'))
+        if changed and key not in by_id:
+            fail('scope_change_required', 'Preserve confirmed requirements or record explicit actual user scope-change authority.', {'requirement_id': key, 'previous_digest': digest(previous)})
+    for key, change in by_id.items():
+        process.setdefault('requirement_history', []).append({'previous': copy.deepcopy(old[key]), 'disposition': copy.deepcopy(change), 'time': now()})
+
+
+def prepare_generation(args, state):
+    current = generation(state)
+    if args.get('expected_generation', current) != current:
+        fail('revision_conflict', 'The development generation changed.')
+    if not state.get('cleaned'):
+        return
+    if state.get('workflow_format') != 3:
+        fail('lifecycle_upgrade_required', 'Upgrade the quiescent task before creating another development generation.')
+    require_approved(state)
+    if state.get('process') and not plan_is_approved(state):
+        fail('plan_approval_required', 'Approve the current implementation Plan before recreating the worktree.')
+    previous = state.get('generation_history', [])[-1] if state.get('generation_history') else None
+    if previous and state.get('process') and previous.get('plan_digest') == state['process']['plan']['digest']:
+        fail('new_plan_required', 'A later generation requires its newly approved Plan.')
+    if any(c['status'] not in TERMINAL_CHECKS for c in state.get('checks', {}).values() if c['generation'] == current):
+        fail('active_check', 'Settle generation checks before recreating its worktree.')
+    state['generation'] = current + 1
+    state.update(worktree=copy.deepcopy(state['project']), owned_worktree=False, integration={})
+    for key in ('cleaned', 'cleanup_intent', 'worktree_preparation'):
+        state.pop(key, None)
+    for item in state['items'].values():
+        item.update(status='pending', implementer=None, submitted=None, verifications=[], review=None, acceptance=None)
+
+
+def require_cleanup_inputs(state):
+    active = [c['id'] for c in state.get('checks', {}).values() if c['generation'] == generation(state) and c['status'] not in TERMINAL_CHECKS]
+    if active:
+        fail('active_check', 'An active or uncertain check still owns this development generation.', {'check_ids': active})
+    for current in state['runs'].values():
+        if current.get('lifecycle_contract') and current['generation'] == generation(state) and current['status'] != 'cancelled':
+            if current['status'] in ('planned', 'preparing'):
+                fail('run_preparation_required', 'Complete or cancel pending Run preparation before cleanup.')
+            proof = current.get('startup_validation', {})
+            check = state.get('checks', {}).get(proof.get('check_id'), {})
+            if check.get('status') != 'passed' or proof.get('contract_digest') != execution_argv_digest(current):
+                fail('startup_validation_required', 'Validate each frozen formal Run before worktree cleanup.')
+            check_run(state, current)
+
+
+def finish_cleanup(args, state):
+    intent = state.get('cleanup_intent')
+    target = Path(state['worktree']['path'])
+    if not intent or intent.get('generation') != generation(state) or target.exists() or git_registered_worktree(state['project']['path'], target, 'refs/heads/' + state['worktree']['branch']):
+        fail('cleanup_unknown', 'Worktree removal needs matching intent and actual Git removal evidence.')
+    state['cleaned'] = {'time': now(), 'actor': args['actor'], 'token': intent['token'], 'generation': generation(state)}
+    receipt = {'generation': generation(state), 'worktree': copy.deepcopy(state['worktree']), 'owned_worktree': state['owned_worktree'],
+               'source_commit': intent['head'], 'source_tree': state['integration']['source_tree'], 'items': copy.deepcopy(state['items']),
+               'integration': copy.deepcopy(state['integration']), 'design': copy.deepcopy(state['design']), 'approval': copy.deepcopy(state['approval']),
+               'plan_digest': state.get('process', {}).get('plan', {}).get('digest'), 'plan_approval': copy.deepcopy(state.get('process', {}).get('plan_approval')),
+               'runs': {k: {'contract_digest': execution_argv_digest(r), 'startup_validation': copy.deepcopy(r.get('startup_validation'))} for k, r in state['runs'].items() if r.get('lifecycle_contract') and r['generation'] == generation(state) and r['status'] != 'cancelled'},
+               'cleanup': copy.deepcopy(state['cleaned']), 'cleanup_intent': copy.deepcopy(intent), 'removed': str(target)}
+    history = state.setdefault('generation_history', [])
+    if not any(r['generation'] == generation(state) for r in history):
+        history.append(receipt)
+    return {'removed': str(target), 'generation_receipt': receipt}
+
+
+def require_generation_dispatch(state, current):
+    if not current.get('lifecycle_contract'):
+        return
+    receipts = [r for r in state.get('generation_history', []) if r['generation'] == current['generation']]
+    proof = receipts[0] if len(receipts) == 1 else {}
+    startup = current.get('startup_validation', {})
+    validated = state.get('checks', {}).get(startup.get('check_id'), {})
+    frozen = proof.get('runs', {}).get(current['run_id'], {})
+    if (proof.get('integration', {}).get('commit') != current['integration_commit'] or
+            frozen.get('contract_digest') != execution_argv_digest(current) or frozen.get('startup_validation') != startup or
+            startup.get('contract_digest') != execution_argv_digest(current) or validated.get('status') != 'passed'):
+        fail('generation_cleanup_required', 'Formal dispatch requires the frozen Run in its completed generation cleanup receipt.')
+
+
+def bind_resource_retention(state, association, actor):
+    """Bind every managed use to durable scope retention under admission locks."""
+    name = association.get('resource_id')
+    if not name or state.get('workflow_format') != 3:
+        return None
+    scope = {'kind': 'experiment', 'id': association['experiment_id']} if association.get('experiment_id') else {'kind': 'task', 'id': state['task_id']}
+    task_ref = {'kind': 'task', 'id': state['task_id']}
+    holds = state.setdefault('resource_holds', {})
+    for hold_id, hold in holds.items():
+        if (hold['resource_id'] == name and hold['status'] == 'retained'
+                and (scope in hold['work_refs'] or task_ref in hold['work_refs'])):
+            return hold_id
+    hold_id = 'managed-' + uuid.uuid4().hex
+    # Enrollment is the actual recorded task authority; this is a program choice,
+    # not a new assertion of user release permission or a fabricated user choice.
+    authority = copy.deepcopy(state['enrollment'])
+    holds[hold_id] = {'resource_id': name, 'hold_id': hold_id, 'purpose': 'Complete the authorized scope',
+                     'work_refs': [scope], 'retention': 'until_work_resolved', 'status': 'retained',
+                     'program_owned': True, 'authorization_source': authority, 'actor': actor, 'time': now()}
+    return hold_id
+
+
+def apply_resource_hold(operation, args, state, store):
+    require_coordinator(args, state)
+    text_value(args['authorization_source'])
+    if state.get('workflow_format') != 3:
+        fail('lifecycle_upgrade_required', 'Upgrade the quiescent task before recording retention holds.')
+    holds = state.setdefault('resource_holds', {})
+    name = identifier(args['hold_id'])
+    if operation == 'resource-hold':
+        if name in holds:
+            fail('already_exists', 'Hold identifiers cannot be reused.')
+        if args['retention'] not in ('until_work_resolved', 'persistent') or not args['work_refs']:
+            fail('invalid_hold', 'Retention needs a supported choice and actual pending-work references.')
+        for ref in args['work_refs']:
+            process_object(ref, ('kind', 'id'))
+            known = {'task': {state['task_id']}, 'item': state['items'], 'check': state.get('checks', {}), 'run': state['runs'], 'experiment': state.get('experiments', {})}
+            if ref['kind'] not in known or ref['id'] not in known[ref['kind']]:
+                fail('unknown_reference', 'Resolve retention references in the owning task.')
+        association = {'resource_id': args['resource_id'], 'requirements': {}}
+        validate_resource_reference(store, state, association)
+        admit_new_resource(store, state, association)
+        holds[name] = {key: copy.deepcopy(args[key]) for key in ('resource_id', 'hold_id', 'purpose', 'work_refs', 'retention', 'authorization_source')}
+        holds[name].update(status='retained', actor=args['actor'], time=now())
+    else:
+        if name not in holds or holds[name]['resource_id'] != args['resource_id']:
+            fail('not_found', 'The named resource hold does not exist.')
+        if args['outcome'] not in ('resolved', 'cancelled') or not args['evidence']:
+            fail('hold_evidence_required', 'Resolve retention with its actual outcome and evidence.')
+        if holds[name]['status'] != 'retained':
+            return {'hold': holds[name], 'already_resolved': True}
+        holds[name].update(status=args['outcome'], resolution={key: copy.deepcopy(args[key]) for key in ('outcome', 'evidence', 'authorization_source')}, resolved_at=now())
+    return {'hold': holds[name]}
+
+
+def check_source(state, kind, args):
+    selectors = {'verification': 'item_id', 'integration': None, 'startup': 'run_id', 'baseline': 'baseline_path'}
+    if kind not in selectors:
+        fail('invalid_check_kind', 'Use verification, integration, startup or baseline.')
+    selected = selectors[kind]
+    if any(k in args and k != selected for k in ('item_id', 'run_id', 'baseline_path')) or (selected and not args.get(selected)):
+        fail('check_source_required', 'Supply the exact source selector required by this check kind.')
+    if kind != 'integration' and any(key in args for key in ('source_mode', 'expected_integration_commit')):
+        fail('check_source_required', 'Integration source options require an integration check.')
+    base = {'generation': generation(state), 'kind': kind}
+    if kind == 'verification':
+        require_approved(state)
+        item = get_item(state, args['item_id'])
+        if item['status'] not in ('implementing', 'reviewing') or not item.get('implementer'):
+            fail('invalid_transition', 'Verification requires an active item.')
+        return {**base, 'item_id': args['item_id'], 'binding': binding(state, revision(state), item)}, state['worktree']['path'], None
+    if kind == 'integration':
+        check_base_identity(state)
+        integration = state['integration']
+        mode = args.get('source_mode', 'live_checkout')
+        if mode not in ('live_checkout', 'fixed_commit'):
+            fail('invalid_source_mode', 'Use live_checkout or fixed_commit for integration checks.')
+        if integration.get('status') != 'complete' or args.get('expected_integration_commit', integration.get('commit')) != integration.get('commit'):
+            fail('integration_required', 'Assert the exact recorded integrated commit.')
+        if integration.get('preservation') and mode != 'fixed_commit':
+            fail('fixed_verification_required', 'Preserved dirty work requires exact fixed-commit integration verification.')
+        if mode == 'live_checkout' and (git(state['project']['path'], 'rev-parse', 'HEAD') != integration['commit'] or project_status(state)):
+            fail('integration_required', 'Verify the exact clean integrated base commit.')
+        if run(['git', '-C', state['project']['path'], 'merge-base', '--is-ancestor', integration['commit'], 'HEAD'])['returncode']:
+            fail('integration_changed', 'The recorded integration must remain reachable from main.')
+        return {**base, 'source_mode': mode, 'commit': integration['commit'], 'tree': git(state['project']['path'], 'rev-parse', integration['commit'] + '^{tree}'),
+                'design_digest': state['design']['digest'], 'approval': copy.deepcopy(state['approval']), 'integration_token': integration.get('token')}, state['project']['path'], None
+    if kind == 'startup':
+        current = get_run(state, args['run_id'])
+        if current['status'] != 'prepared' or args['argv'] != current['validation_argv']:
+            fail('prepared_run_required', 'Startup checking uses a prepared Run and its exact frozen validator.')
+        check_run(state, current)
+        return {**base, 'run_id': args['run_id'], 'contract_digest': execution_argv_digest(current)}, current['code'], copy.deepcopy(current)
+    baseline_path = Path(args['baseline_path'])
+    allowed = Path(state['root']) / '.experiments/verification' / state['task_id'] / 'baselines'
+    no_symlinks(baseline_path, allowed)
+    current = read_json(baseline_path)
+    if current.get('purpose') != 'development-verification' or current.get('validation_argv') != args['argv']:
+        fail('baseline_changed', 'Use the exact registered baseline validator.')
+    check_code_store(current['code_store'])
+    check_startup_inputs(state, current)
+    return {**base, 'baseline_path': str(baseline_path), 'baseline_digest': digest(current)}, current['code'], current
+
+
+def check_checkout_identity(state, current):
+    owned = current['source_checkout']
+    target = Path(owned['path'])
+    if (owned['commit'] != current['source_binding']['commit'] or owned['tree'] != current['source_binding']['tree']
+            or owned['common_dir'] != state['project']['common_dir']
+            or target != Path(current['directory']) / 'source' or owned['token'] != current['token']
+            or not target.is_dir() or target.is_symlink()
+            or Path(git(target, 'rev-parse', '--show-toplevel')).resolve() != target
+            or Path(git(target, 'rev-parse', '--path-format=absolute', '--git-common-dir')).resolve() != Path(owned['common_dir'])
+            or not git_registered_worktree(state['project']['path'], target)
+            or git(target, 'rev-parse', 'HEAD') != owned['commit'] or git(target, 'rev-parse', 'HEAD^{tree}') != owned['tree']
+            or git(target, 'status', '--porcelain=v1', '--untracked-files=all', '--ignored')):
+        fail('check_checkout_changed', 'Preserve the changed or uncertain owned verification checkout.')
+
+
+def check_execution_environment(state, current):
+    environment = dict(os.environ)
+    if not current.get('source_checkout'):
+        return environment
+    environment.pop('PYTHONPATH', None)
+    environment.pop('PYTHONHOME', None)
+    environment['PYTHONDONTWRITEBYTECODE'] = '1'
+    source = Path(current['cwd'])
+    mutable = [Path(state['project']['path']), *(Path(tree['path']) for tree in registered_task_trees(state))]
+    for index, value in enumerate(current['argv']):
+        if index and current['argv'][index - 1] == '-c':
+            continue
+        token = value.partition('=')[2] if value.startswith('-') and '=' in value else value
+        if not token or token.startswith('-'):
+            continue
+        candidate = Path(token).expanduser()
+        candidate = candidate if candidate.is_absolute() else source / candidate
+        resolved = candidate.resolve()
+        if any((within(candidate.absolute(), tree) or within(resolved, tree.resolve())) and not within(resolved, source) for tree in mutable):
+            fail('mutable_check_source', 'A fixed integration check cannot execute or read an explicit mutable-checkout argument.')
+    return environment
+
+
+def ensure_check_checkout(state, current):
+    if not current.get('source_checkout'):
+        return
+    target = Path(current['cwd'])
+    if not target.exists():
+        if git_registered_worktree(state['project']['path'], target):
+            fail('check_checkout_changed', 'Reconcile the registered missing check checkout before execution.')
+        result = run(['git', '-C', state['project']['path'], 'worktree', 'add', '--detach', '--', str(target), current['source_checkout']['commit']])
+        if result['returncode']:
+            fail('check_checkout_changed', 'Inspect interrupted verification checkout registration.')
+    check_checkout_identity(state, current)
+
+
+def cleanup_check_checkout(state, current):
+    target = Path(current['cwd'])
+    if not target.exists() and not git_registered_worktree(state['project']['path'], target):
+        current['checkout_cleanup'] = {'status': 'removed', 'time': now()}
+        return
+    try:
+        check_checkout_identity(state, current)
+        result = run(['git', '-C', state['project']['path'], 'worktree', 'remove', '--', str(target)])
+        if result['returncode']:
+            fail('check_checkout_changed', 'Git refused safe verification checkout removal.')
+        current['checkout_cleanup'] = {'status': 'removed', 'time': now()}
+    except WorkflowError as failure:
+        current['checkout_cleanup'] = {'status': 'cleanup_pending', 'reason': failure.code, 'time': now()}
+
+
+def check_contract(current):
+    return digest({**{k: current[k] for k in ('id', 'kind', 'token', 'generation', 'source_binding', 'argv', 'cwd', 'resource_id', 'requirements', 'timeout', 'runtime', 'directory')},
+                   'source_checkout': current.get('source_checkout'), 'frozen_inputs': current.get('frozen_inputs')})
+
+
+def check_current(state, current):
+    try:
+        actual, _, _ = check_source(state, current['kind'], {**current['selectors'], 'argv': current['argv']})
+        return actual == current['source_binding']
+    except (WorkflowError, OSError):
+        return False
+
+
+def check_response(state, current, **extra):
+    return {'ok': True, 'state': state, 'summary': summary(state), 'settlement_target': settlement_target(current, 'check'), 'check_id': current['id'], 'status': current['status'],
+            'check': current, 'runner_argv': current['runner_argv'], 'source_binding': current['source_binding'],
+            'resource_use': {'resource_id': current['resource_id'], 'status': current['status']},
+            'receipt_path': str(Path(current['directory']) / 'check-receipt.json'), **extra}
+
+
+def settlement_runtime(state, current, kind):
+    if (current.get('runtime', {}).get('execution_protocol') != 4 or
+            (kind == 'run' and current.get('lifecycle_contract') != 1) or
+            (kind == 'check' and state.get('workflow_format') != 3)):
+        fail('settlement_unsupported', 'Retained legacy execution keeps its original reconciliation contract.')
+    require_execution_protocol(state, current)
+    contract = check_contract(current) if kind == 'check' else execution_argv_digest(current)
+    if kind == 'check' and contract != current.get('contract_digest'):
+        fail('execution_conflict', 'The immutable check contract changed before settlement.')
+    command = current.get('runner_argv') if kind == 'check' else current.get('execution_intent', {}).get('runner_argv')
+    if not command:
+        fail('execution_conflict', 'Settlement requires the original exact dispatch intent.')
+    return contract, command
+
+
+def execution_claim(current):
+    directory = Path(current['directory'])
+    claim = directory / 'execution.claim'
+    no_symlinks(claim, directory)
+    identity = {'exists': claim.exists(), 'path_identity': path_identity(claim), 'owner_sha256': None, 'owner': None,
+                'recorded_owner': current.get('claim') or current.get('execution_owner')}
+    if claim.is_dir():
+        identity['entries'] = {encoded_path(os.fsencode(entry.name)): path_identity(entry) for entry in sorted(claim.iterdir())}
+    owner_path = claim / 'owner.json'
+    no_symlinks(owner_path, directory)
+    if owner_path.is_file():
+        identity['owner_sha256'] = sha_file(owner_path)
+        try:
+            owner = read_json(owner_path)
+            if isinstance(owner, dict):
+                identity['owner'] = owner
+        except WorkflowError:
+            pass  # Preserve malformed or partial bytes for actual controller observation.
+    return identity
+
+
+def strong_local_owner(owner):
+    host = lock_host_identity()
+    return bool(isinstance(owner, dict) and host.get('identity') and owner.get('host') == host
+                and owner.get('uid') == lock_uid() and type(owner.get('pid')) is int and owner['pid'] > 0)
+
+
+def reject_live_owned_execution(current, owner):
+    if not strong_local_owner(owner):
+        return
+    probes = [(os.kill, owner['pid'])]
+    process_id = current.get('workload_pid') or current.get('start_validated', {}).get('pid')
+    if type(process_id) is int and process_id > 0:
+        probes.append((os.killpg, process_id))
+    for probe, process_id in probes:
+        try:
+            probe(process_id, 0)
+        except ProcessLookupError:
+            continue
+        except OSError:
+            fail('settlement_live', 'The known local owned execution cannot be proved terminal.')
+        fail('settlement_live', 'A matching local runner or owned process group is still live.')
+
+
+def settlement_target(current, kind):
+    command = current.get('runner_argv') if kind == 'check' else current.get('execution_intent', {}).get('runner_argv')
+    return {'kind': kind, 'id': current['id'] if kind == 'check' else current['run_id'], 'token': current['token'],
+            'contract_digest': check_contract(current) if kind == 'check' else execution_argv_digest(current),
+            'runner_argv_digest': digest(command), 'claim_digest': digest(execution_claim(current))}
+
+
+def execution_settlement_targets(state):
+    result = {'checks': {}, 'runs': {}}
+    for kind, collection in (('check', 'checks'), ('run', 'runs')):
+        for name, current in state.get(collection, {}).items():
+            if (current.get('runtime', {}).get('execution_protocol') != 4 or
+                    (kind == 'run' and (current.get('lifecycle_contract') != 1 or not current.get('execution_intent')))):
+                continue
+            try:
+                result[collection][name] = settlement_target(current, kind)
+            except (WorkflowError, KeyError, OSError) as failure:
+                result[collection][name] = {'unavailable': True, 'reason': getattr(failure, 'code', 'claim_unavailable')}
+    return result
+
+
+def cancel_unstarted_claim(args, state, current, kind):
+    contract, command = settlement_runtime(state, current, kind)
+    identity = execution_claim(current)
+    owner = identity['owner']
+    pre_admission = (current['status'] == 'reserved' and not current.get('claim') if kind == 'check'
+                     else current['status'] == 'queued' and not current.get('start_validated'))
+    if (not pre_admission or not strong_local_owner(owner) or owner.get('token') != current['token']
+            or owner.get('contract_digest') != contract or not dead_lock_owner(owner)):
+        fail('cancellation_denied', 'A partial, live, foreign or admitted claim needs actual controller terminal settlement.')
+    current['settlement'] = {'kind': 'proven_unstarted', 'outcome': 'cancelled', 'not_started': True,
+        'claim': identity, 'claim_digest': digest(identity), 'contract_digest': contract,
+        'runner_argv_digest': digest(command), 'actor': args['actor'], 'reason': args['reason'], 'time': now()}
+
+
+def settle_execution(args, state, current, kind):
+    require_coordinator(args, state)
+    if 'receipt_path' in args or not args.get('evidence'):
+        fail('execution_evidence_required', 'Use one settlement path with nonempty actual observation evidence.')
+    contract, command = settlement_runtime(state, current, kind)
+    observation_path = Path(args['settlement_path'])
+    if not observation_path.is_absolute():
+        fail('unsafe_path', 'A settlement observation path must be absolute.')
+    no_symlinks(observation_path, Path(observation_path.anchor))
+    observation = read_json(observation_path)
+    process_object(observation, ('kind', 'target', 'outcome', 'observed_at', 'observer', 'terminal', 'controller_receipt', 'evidence'))
+    identity = execution_claim(current)
+    expected = settlement_target(current, kind)
+    if observation['kind'] != 'execution-settlement' or observation['target'] != expected or observation['outcome'] not in ('failed', 'cancelled'):
+        fail('settlement_invalid', 'Settlement must bind the exact intent and actual claim, with a non-success outcome.')
+    if observation['terminal'] != {'runner': True, 'owned_workloads': True, 'process_groups': True} or any(type(value) is not bool for value in observation['terminal'].values()):
+        fail('settlement_invalid', 'Actual terminal evidence must cover the runner and all owned workloads and process groups.')
+    process_strings(observation['evidence'], True)
+    process_object(observation['observer'], ('identity', 'method', 'host'))
+    for key in ('identity', 'method'):
+        text_value(observation['observer'][key])
+    observer_host = observation['observer']['host']
+    if (not isinstance(observer_host, dict) or not isinstance(observer_host.get('hostname'), str)
+            or not observer_host['hostname'].strip() or not isinstance(observer_host.get('identity'), dict)
+            or not isinstance(observer_host['identity'].get('boot'), str) or not observer_host['identity']['boot'].strip()):
+        fail('settlement_invalid', 'Record the actual observer host identity and method.')
+    try:
+        timestamp = dt.datetime.fromisoformat(observation['observed_at'])
+        if timestamp.tzinfo is None:
+            raise ValueError
+    except (TypeError, ValueError):
+        fail('settlement_invalid', 'Record the actual observation time with its time zone.')
+    process_object(observation['controller_receipt'], ('path', 'sha256'))
+    text_value(observation['controller_receipt']['path']); text_value(observation['controller_receipt']['sha256'])
+    raw = Path(observation['controller_receipt']['path'])
+    if not raw.is_absolute() or raw == observation_path:
+        fail('unsafe_path', 'Retain a separate absolute raw controller receipt path.')
+    no_symlinks(raw, Path(raw.anchor))
+    if not raw.is_file() or sha_file(raw) != observation['controller_receipt']['sha256']:
+        fail('settlement_invalid', 'The actual raw controller receipt is missing or changed.')
+    previous = current.get('settlement')
+    if previous:
+        if previous.get('observation_digest') != digest(observation):
+            fail('execution_conflict', 'The settlement differs from the recorded terminal observation.')
+        return {'already_recorded': True, 'settlement': previous}
+    receipt = Path(current['directory']) / ('check-receipt.json' if kind == 'check' else 'execution-receipt.json')
+    if current.get('receipt' if kind == 'check' else 'execution') or receipt.exists():
+        fail('execution_receipt_available', 'Reconcile the actual workload receipt instead of replacing it with settlement.')
+    allowed = ('reserved', 'starting', 'running', 'uncertain') if kind == 'check' else ('queued', 'starting', 'running', 'unknown', 'failed')
+    if current['status'] not in allowed:
+        fail('invalid_transition', 'Only unsettled current execution can receive terminal observation evidence.')
+    owner = identity['owner']
+    if owner and (owner.get('token') != current['token'] or owner.get('contract_digest', contract) != contract):
+        fail('settlement_invalid', 'The preserved claim belongs to a different execution intent.')
+    reject_live_owned_execution(current, identity['recorded_owner'])
+    reject_live_owned_execution(current, owner)
+    settlement = {'kind': 'controller_terminal', 'outcome': observation['outcome'], 'observation': observation,
+                  'observation_path': str(observation_path), 'observation_sha256': sha_file(observation_path),
+                  'observation_digest': digest(observation), 'claim': identity, 'actor': args['actor'],
+                  'evidence': args['evidence'], 'time': now()}
+    current.update(status=observation['outcome'], settlement=settlement, finished=now())
+    if kind == 'check' and current.get('source_checkout'):
+        cleanup_check_checkout(state, current)
+    return {'settlement': settlement}
+
+
+def reconcile_check(args, state):
+    current = state.get('checks', {}).get(args['check_id'])
+    if not current:
+        fail('not_found', 'The check does not exist.')
+    if 'settlement_path' in args:
+        return settle_execution(args, state, current, 'check')
+    if current.get('settlement'):
+        fail('execution_conflict', 'Preserve the recorded non-success settlement; workload receipts cannot replace it.')
+    directory = Path(current['directory'])
+    receipt_path = Path(args.get('receipt_path', str(directory / 'check-receipt.json')))
+    if 'receipt_path' in args and not args.get('evidence'):
+        fail('execution_evidence_required', 'An external receipt needs actual evidence references.')
+    if not receipt_path.is_absolute():
+        fail('unsafe_path', 'A check receipt path must be absolute.')
+    no_symlinks(receipt_path, Path(receipt_path.anchor))
+    receipt = read_json(receipt_path)
+    claim_path = directory / 'execution.claim' / 'owner.json'
+    no_symlinks(claim_path, directory)
+    owner = read_json(claim_path)
+    if (current.get('claim') != owner or current['status'] == 'reserved' or owner.get('token') != current['token']
+            or owner.get('contract_digest') != current['contract_digest'] or type(owner.get('pid')) is not int
+            or owner['pid'] < 1 or type(owner.get('uid')) is not int or not isinstance(owner.get('host'), dict)
+            or receipt.get('owned_process_identity') != owner or receipt.get('actual_host') != owner['host']
+            or receipt.get('started_at') != owner.get('time')):
+        fail('check_receipt_invalid', 'The receipt must match the actual admitted claim and owned process identity.')
+    log = directory / 'check.log'
+    no_symlinks(log, directory)
+    if (receipt.get('token') != current['token'] or receipt.get('contract_digest') != current['contract_digest']
+            or receipt.get('source_binding') != current['source_binding'] or type(receipt.get('returncode')) is not int
+            or receipt.get('log') != str(log) or not log.is_file() or sha_file(log) != receipt.get('log_sha256')
+            or not isinstance(receipt.get('actual_host'), dict) or not receipt.get('owned_process_identity')):
+        fail('check_receipt_invalid', 'The receipt does not match the claimed check, source and actual log.')
+    for key, name, hash_key in (('stderr_log', 'stderr.log', 'stderr_sha256'), ('output', 'output.json', 'output_sha256')):
+        expected = directory / name
+        no_symlinks(expected, directory)
+        if receipt.get(key) != str(expected) or not expected.is_file() or sha_file(expected) != receipt.get(hash_key):
+            fail('check_receipt_invalid', 'The complete check output differs from its durable receipt.')
+    if current.get('receipt'):
+        if current['receipt_digest'] != digest(receipt):
+            fail('execution_conflict', 'The receipt differs from the recorded result.')
+        return {'already_recorded': True}
+    unchanged = check_current(state, current)
+    if current.get('source_checkout'):
+        cleanup_check_checkout(state, current)
+    current.update(receipt=receipt, receipt_digest=digest(receipt), status='stale' if not unchanged else 'passed' if receipt['returncode'] == 0 else 'failed', finished=now())
+    evidence = {'check_id': current['id'], 'argv': current['argv'], 'actor': current['actor'], 'time': now(),
+                'passed': current['status'] == 'passed', 'unchanged': unchanged, 'result': {'returncode': receipt['returncode']},
+                'log': receipt['output'], 'log_sha256': receipt['output_sha256']}
+    if current['kind'] == 'verification':
+        evidence.update(current['source_binding']['binding'])
+        get_item(state, current['selectors']['item_id'])['verifications'].append(evidence)
+    elif current['kind'] == 'integration' and unchanged:
+        evidence.update(commit=current['source_binding']['commit'], design_digest=current['source_binding']['design_digest'], source_mode=current['source_binding'].get('source_mode', 'live_checkout'), receipt_digest=current['receipt_digest'], generation=current['generation'], integration_token=current['source_binding'].get('integration_token'))
+        state['integration']['verification'] = evidence
+    elif current['kind'] == 'startup' and current['status'] == 'passed':
+        run_state = get_run(state, current['selectors']['run_id'])
+        run_state['startup_validation'] = {'check_id': current['id'], 'contract_digest': current['source_binding']['contract_digest'], 'receipt_digest': current['receipt_digest']}
+    return {'verification': evidence}
+
+
+def dispatch_check(operation, args, root, store):
+    path = task_dir(store, args['task_id'])
+    direct = operation in ('verify', 'integration-verify')
+    arguments = copy.deepcopy(args)
+    if operation in ('verify', 'integration-verify'):
+        arguments['kind'] = 'verification' if operation == 'verify' else 'integration'
+        arguments.setdefault('check_id', 'check-' + uuid.uuid4().hex)
+    with mutation_locks(store, arguments, operation):
+        state, previous = load_events(path)
+        if state['version'] != args['expected_version']:
+            fail('revision_conflict', 'The task changed before check admission.')
+        if operation in ('check-reconcile', 'check-cancel'):
+            current = state.get('checks', {}).get(args['check_id'])
+            if not current:
+                fail('not_found', 'The check does not exist.')
+            if operation == 'check-cancel':
+                require_coordinator(args, state)
+                if current['status'] != 'reserved':
+                    fail('cancellation_denied', 'A claimed or uncertain check requires actual reconciliation.')
+                if (Path(current['directory']) / 'execution.claim').exists():
+                    cancel_unstarted_claim(args, state, current, 'check')
+                current.update(status='cancelled', reason=text_value(args['reason']), finished=now())
+                if current.get('source_checkout'):
+                    cleanup_check_checkout(state, current)
+                result = {}
+            elif 'settlement_path' in args:
+                result = reconcile_check(args, state)
+            else:
+                try:
+                    result = reconcile_check(args, state)
+                except WorkflowError:
+                    if current.get('claim') and current['status'] in ('starting', 'running', 'uncertain'):
+                        current['status'] = 'uncertain'
+                        commit_event(path, state, previous, 'check-result-unknown', args['actor'])
+                    raise
+            commit_event(path, state, previous, operation, args['actor'])
+            return check_response(state, current, **result)
+        require_task_open(state)
+        if state.get('workflow_format') != 3:
+            fail('lifecycle_upgrade_required', 'Settle legacy execution and explicitly upgrade before creating current checks.')
+        if operation == 'run-validate':
+            current_run = get_run(state, args['run_id'])
+            arguments.update(kind='startup', argv=current_run['validation_argv'], resource_id=current_run.get('resource_id'), requirements=current_run.get('requirements', {}))
+        kind, name = arguments['kind'], identifier(arguments['check_id'])
+        existing = state.setdefault('checks', {}).get(name)
+        if existing:
+            if (existing['resource_id'] != arguments.get('resource_id') or existing['requirements'] != arguments.get('requirements', {}) or existing['timeout'] != arguments.get('timeout')):
+                fail('check_intent_changed', 'Preserve the existing immutable check resource and timeout intent.')
+            if existing['argv'] != arguments['argv'] or existing['kind'] != kind or existing['selectors'] != {k: arguments[k] for k in ('item_id', 'run_id', 'baseline_path', 'source_mode', 'expected_integration_commit') if k in arguments}:
+                fail('check_intent_changed', 'Preserve the existing immutable check intent.')
+            return check_response(state, existing, already_dispatched=True)
+        source, cwd, frozen = check_source(state, kind, arguments)
+        association = {'resource_id': arguments.get('resource_id'), 'requirements': arguments.get('requirements', {})}
+        if kind == 'startup' and frozen.get('experiment_id'):
+            association['experiment_id'] = frozen['experiment_id']
+        validate_resource_reference(store, state, {**association, 'check_id': name}, require_available=True)
+        admit_new_resource(store, state, association)
+        directory = path / 'checks' / name
+        no_symlinks(directory, path)
+        directory.mkdir(parents=True)
+        token = uuid.uuid4().hex
+        current = {'id': name, 'kind': kind, 'token': token, 'generation': generation(state), 'source_binding': source,
+                   'selectors': {k: arguments[k] for k in ('item_id', 'run_id', 'baseline_path', 'source_mode', 'expected_integration_commit') if k in arguments},
+                   'argv': list(arguments['argv']), 'cwd': cwd, **association, 'timeout': arguments.get('timeout'),
+                   'directory': str(directory), 'runtime': pin_runtime(state), 'status': 'reserved', 'actor': args['actor'],
+                   'execution_host': {'hostname': socket.gethostname(), 'uid': lock_uid(), 'release_supported': False}, 'created': now()}
+        if kind == 'integration' and source.get('source_mode') == 'fixed_commit':
+            current['cwd'] = str(directory / 'source')
+            current['source_checkout'] = {'path': current['cwd'], 'token': token, 'commit': source['commit'], 'tree': source['tree'], 'common_dir': state['project']['common_dir']}
+        if frozen:
+            current['frozen_inputs'] = frozen
+        current['contract_digest'] = check_contract(current)
+        current['runner_argv'] = [sys.executable, str(Path(current['runtime']['directory']) / 'runner.py'), '--root', str(root), '--task-id', args['task_id'], '--check-id', name, '--token', token]
+        current['retention_hold_id'] = bind_resource_retention(state, association, args['actor'])
+        state['checks'][name] = current
+        commit_event(path, state, previous, 'check-dispatch-intent', args['actor'])
+    # Public dispatch and managed Run validation return commands for the caller's controller.
+    if not direct and (operation != 'run-validate' or current.get('resource_id')):
+        return check_response(state, current, reconciliation_required=True)
+    command = current['runner_argv']
+    if args.get('detached'):
+        with open(Path(current['directory']) / 'runner.log', 'xb') as log:
+            process = subprocess.Popen(command, cwd=str(root), stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        threading.Thread(target=process.wait, daemon=True).start()
+        return check_response(state, current, runner_pid=process.pid, reconciliation_required=True)
+    runner_result = run(command, cwd=str(root))
+    with mutation_locks(store, arguments, 'check-reconcile'):
+        state, previous = load_events(path)
+        current = state['checks'][name]
+        try:
+            result = reconcile_check({**args, 'check_id': name}, state)
+        except WorkflowError:
+            if (Path(current['directory']) / 'execution.claim').exists():
+                current['status'] = 'uncertain'
+            current['runner_result'] = runner_result
+            commit_event(path, state, previous, 'check-result-unknown', args['actor'])
+            raise
+        commit_event(path, state, previous, 'check-result', args['actor'])
+        return check_response(state, current, **result)
+
+
 def _dispatch(operation, arguments):
     validate(operation, arguments)
     args = copy.deepcopy(arguments)
@@ -3035,6 +3973,8 @@ def _dispatch(operation, arguments):
         return execute_run(args, root, store, external=operation == "run-dispatch")
     if operation == "resource-release":
         return release_resource(args, root, store)
+    if operation in ("verify", "integration-verify", "check-dispatch", "check-reconcile", "check-cancel", "run-validate"):
+        return dispatch_check(operation, args, root, store)
     if operation == "run-prepare":
         return prepare_run_staged(args, root, store)
     if operation in ("status", "list", "context"):
@@ -3043,6 +3983,8 @@ def _dispatch(operation, arguments):
             result = {"ok": True, "state": state, "summary": summary(state), "session_bindings": session_bindings(store)}
             if operation != "context":
                 result["resources"] = project_resources(store)
+            if operation == 'status':
+                result['settlement_targets'] = execution_settlement_targets(state)
             return result
         tasks = []
         for path in sorted((store / "tasks").iterdir()):
@@ -3053,7 +3995,7 @@ def _dispatch(operation, arguments):
     path = task_dir(store, args["task_id"])
     if not path.is_dir():
         fail("not_found", "The requested task does not exist.")
-    with lifecycle_lock(store), lock(path / "write.lock"):
+    with mutation_locks(store, args, operation if 'operation' in locals() else "run-prepare"):
         state, previous = load_events(path)
         if state["version"] != args["expected_version"]:
             fail("revision_conflict", "The task changed; reread status and use the current version.")
@@ -3061,12 +4003,11 @@ def _dispatch(operation, arguments):
             fail("root_changed", "This task belongs to a different storage root.")
         require_portable_state(state)
         result = {}
-        if operation not in ("recover", "bind-session", "task-reopen", "cleanup", "resource-observe", "resource-release-reconcile", "run-reconcile"):
+        if operation not in ("resource-hold-resolve", "lifecycle-upgrade", "recover", "bind-session", "task-reopen", "cleanup", "resource-observe", "resource-release-reconcile", "run-reconcile"):
             require_task_open(state)
         if operation == "recover":
             project_state(path, state)
-            with lock(Path(state["project"]["common_dir"]) / "task-workflow-integration.lock"):
-                register_root(root, state)
+            register_root(root, state)
             return {"ok": True, "state": state, "summary": summary(state), "recovered": True}
         if operation == "bind-session":
             require_coordinator(args, state)
@@ -3096,7 +4037,9 @@ def _dispatch(operation, arguments):
             require_coordinator(args, state)
             current = get_run(state, args["run_id"])
             if current["status"] == "queued" and (Path(current["directory"]) / "execution.claim").exists():
-                fail("cancellation_denied", "A claimed execution requires reconciliation before cancellation.")
+                if current.get('lifecycle_contract') != 1 or current.get('runtime', {}).get('execution_protocol') != 4:
+                    fail('cancellation_denied', 'A claimed execution requires reconciliation before cancellation.')
+                cancel_unstarted_claim(args, state, current, 'run')
             if current["status"] not in ("planned", "preparing", "prepared", "queued") and not (current["status"] == "awaiting_artifacts" and current.get("execution")):
                 fail("cancellation_denied", "Cancel only an unclaimed reservation or explicitly dispose an exited workload's unaccepted artifacts; running and uncertain executions require reconciliation.")
             current.update(status="cancelled", cancellation={"reason": args["reason"], "actor": args["actor"], "time": now()})
@@ -3109,6 +4052,10 @@ def _dispatch(operation, arguments):
                 return {'ok': True, 'state': state, 'summary': summary(state), **result}
         elif operation == "run-accept":
             result = accept_run(args, state)
+        elif operation == "lifecycle-upgrade":
+            result = upgrade_lifecycle(args, state, store)
+        elif operation in ("resource-hold", "resource-hold-resolve"):
+            result = apply_resource_hold(operation, args, state, store)
         elif operation == "resource-register":
             result = register_resource(args, state, store)
         elif operation == "resource-observe":
@@ -3192,6 +4139,8 @@ def _dispatch(operation, arguments):
             result = prepare_run(args, state, root)
         else:
             fail("unsupported", "The operation is not implemented.")
+        if operation == "cleanup":
+            _, previous = load_events(path)
         commit_event(path, state, previous, operation, args["actor"])
         if operation == 'bind-session':
             register_root(root, state, select_session=True)
@@ -3276,6 +4225,29 @@ COMMANDS.update({
 })
 
 
+COMMANDS.update({
+    'check-dispatch': mutation('Reserve a durable check and return its pinned runner argv for private execution; this operation launches no workload.',
+        {'check_id': 'string', 'kind': 'string', 'argv': 'array'},
+        {'item_id': 'string', 'run_id': 'string', 'baseline_path': 'string', 'resource_id': 'string', 'requirements': 'object', 'detached': 'boolean', 'timeout': 'integer'}),
+    'check-reconcile': mutation('Reconcile an exact check receipt or separate actual non-success controller settlement without replay.', {'check_id': 'string'}, {'receipt_path': 'string', 'settlement_path': 'string', 'evidence': 'array'}),
+    'check-cancel': mutation('Cancel an unclaimed check reservation or a proven local unstarted claim.', {'check_id': 'string', 'reason': 'string'}),
+    'run-validate': mutation('Validate prepared frozen Run inputs as a durable check; managed execution returns its exact runner argv.', {'run_id': 'string', 'check_id': 'string'}, {'detached': 'boolean', 'timeout': 'integer'}),
+    'resource-hold': mutation('Retain a resource for named future work independently of active capacity.',
+        {'resource_id': 'string', 'hold_id': 'string', 'purpose': 'string', 'work_refs': 'array', 'retention': 'string', 'authorization_source': 'string'}),
+    'resource-hold-resolve': mutation('Resolve retained future work with actual completion or cancellation authority.',
+        {'resource_id': 'string', 'hold_id': 'string', 'outcome': 'string', 'evidence': 'array', 'authorization_source': 'string'}),
+    'lifecycle-upgrade': mutation('Explicitly upgrade quiescent legacy lifecycle metadata without replacing old Run or runtime bytes.', {'authorization_source': 'string'}),
+})
+COMMANDS['worktree-prepare']['optional']['expected_generation'] = 'integer'
+COMMANDS['run-reconcile']['optional']['settlement_path'] = 'string'
+COMMANDS['run-reconcile']['description'] = 'Reconcile a matching execution receipt or current non-success controller settlement without repeating execution.'
+COMMANDS['integrate']['optional'].update(preserve_unrelated_dirty='boolean', expected_preservation_digest='string')
+for _operation in ('integration-verify', 'check-dispatch'):
+    COMMANDS[_operation]['optional'].update(source_mode='string', expected_integration_commit='string')
+for _name in ('verify', 'integration-verify'):
+    COMMANDS[_name]['optional'].update(check_id='string', resource_id='string', requirements='object', detached='boolean')
+
+
 def new_process():
     """New enrollments use the structured contract; existing event streams stay legacy."""
     return {"protocol_version": 2, "stage": "exploration", "intent": None, "exploration": None,
@@ -3331,6 +4303,7 @@ def dialogue_contract(state):
         "required_recording_steps": [], "reply_fields": [], "wait_for": None,
         "turn_exit": "Continue only the current authorized action.", "approval_target": None,
         "allowed_next_operations": ["context", "status"],
+        "goal_integrity": GOAL_INTEGRITY,
         "operation_scope": "allowed_next_operations guides dialogue and context steps for the current phase. It is not an exhaustive list of task, review, run, resource, integration or lifecycle operations. Those operations follow the current schema, actual program guards and existing user authorization. A closed task still requires authorized reopening before its work can change.",
         "templates": ["templates/conversation.md", "templates/record.md"],
         "applicability": "Apply this stage contract to related workflow work. The current user request determines scope. For a progress or status question, inspect and answer only; do not advance the stage or force a design question.",
@@ -3965,6 +4938,7 @@ def apply_process(operation, args, state):
         if not entries:
             fail("requirements_required", "Record structured requirements.")
         old = {entry["id"]: entry for entry in process["requirements"]}
+        apply_scope_changes(process, args, old)
         provenance = process["provenance"]
         ids = set()
         for entry in entries:
@@ -3974,7 +4948,19 @@ def apply_process(operation, args, state):
                 fail("invalid_process", "Requirement identifiers, kind or status are invalid.")
             ids.add(entry["id"])
             prior = old.get(entry["id"], provenance["requirement_origins"].get(entry["id"]))
-            preserve_origin(prior, entry, provenance["confirmed_requirements"].get(entry["id"]))
+            historical = provenance["confirmed_requirements"].get(entry["id"])
+            if historical and entry['status'] == 'confirmed' and old.get(entry['id'], {}).get('status') != 'confirmed':
+                authority = entry.get('confirmation_source')
+                latest = next((record['disposition']['authorization_source'] for record in reversed(process.get('requirement_history', []))
+                               if record['disposition']['requirement_id'] == entry['id']), None)
+                obsolete = [historical['source'], historical.get('confirmation_source'), latest]
+                if not authority or authority in obsolete:
+                    fail('confirmation_required', 'Restoring a retired or demoted confirmed requirement needs fresh actual user confirmation.')
+                process_source(authority, user=True)
+                process.setdefault('requirement_history', []).append({'previous': copy.deepcopy(historical),
+                    'disposition': {'requirement_id': entry['id'], 'previous_digest': digest(historical), 'action': 'reconfirm',
+                                    'reason': 'Fresh actual user confirmation restored this requirement.', 'authorization_source': copy.deepcopy(authority)}, 'time': now()})
+            preserve_origin(prior, entry, historical)
             process_confirmation(entry)
             provenance["requirement_origins"].setdefault(entry["id"], {"source": copy.deepcopy(entry["source"])})
             if entry["status"] == "confirmed":
@@ -4098,6 +5084,7 @@ PROCESS_COMMANDS = {
 }
 COMMANDS.update({name: mutation(description, fields) for name, (fields, description) in PROCESS_COMMANDS.items()})
 COMMANDS["process-answer"]["optional"].update({"choice_id": "string", "question_digest": "string"})
+COMMANDS['process-requirements']['optional']['scope_changes'] = 'array'
 
 
 def process_schema(fields, optional=()):
@@ -4133,7 +5120,11 @@ PROCESS_SCHEMAS = {
     "process-exploration": {"exploration": process_schema({"current_behavior": _TEXT, "evidence": _STRINGS, "unknowns": _STRINGS})},
     "process-question": {"question": _QUESTION}, "process-reenter": {"question": _QUESTION},
     "process-answer": {"source": _SOURCE}, "process-playback": {"confirmation_source": _USER_SOURCE},
-    "process-requirements": {"requirements": {"type": "array", "items": _REQUIREMENT}},
+    "process-requirements": {"requirements": {"type": "array", "items": _REQUIREMENT},
+        'scope_changes': {'type': 'array', 'items': process_schema({
+            'requirement_id': _TEXT, 'previous_digest': _TEXT,
+            'action': {'type': 'string', 'enum': ['remove', 'replace', 'revise', 'demote']},
+            'reason': _TEXT, 'authorization_source': _USER_SOURCE, 'replacement_ids': _STRINGS}, ('replacement_ids',))}},
     "process-decision": {"decision": _DECISION},
     "process-design": {"design": process_schema({"behavior": _TEXT, "components": {"type": "array", "items": _COMPONENT},
         "decisions": _STRINGS, "rationale": _TEXT, "impact": _TEXT, "current_impact": _TEXT,
@@ -4158,6 +5149,13 @@ PROCESS_SCHEMAS['run-prepare'] = {
 for _key in SCOPED_INPUTS:
     PROCESS_SCHEMAS['run-prepare'][_key]['description'] = ('Required for new preparations; only preexisting legacy preparing records may omit this field. '
         + PROCESS_SCHEMAS['run-prepare'][_key].get('description', ''))
+
+PROCESS_SCHEMAS['check-dispatch'] = {'kind': {'type': 'string', 'enum': ['verification', 'integration', 'startup', 'baseline']}}
+PROCESS_SCHEMAS['resource-hold'] = {
+    'retention': {'type': 'string', 'enum': ['until_work_resolved', 'persistent']},
+    'work_refs': {'type': 'array', 'minItems': 1, 'items': process_schema({
+        'kind': {'type': 'string', 'enum': ['task', 'item', 'check', 'run']}, 'id': _TEXT})}}
+PROCESS_SCHEMAS['resource-hold-resolve'] = {'outcome': {'type': 'string', 'enum': ['resolved', 'cancelled']}}
 
 
 
@@ -4399,6 +5397,10 @@ def process_record_text(state):
         execution_items[item_id] = projected
     section("Execution and review", {"items": execution_items, "worktree_preparation": state.get("worktree_preparation")})
     section("Experiments and runs", {"experiments": state["experiments"], "runs": state["runs"]})
+    section("Checks", state.get("checks", {}))
+    section("Resource retention", state.get("resource_holds", {}))
+    section("Development generations", state.get("generation_history", []))
+    section("Requirement dispositions", process.get("requirement_history", []))
     section("Delivery", {"integration": state["integration"], "task_lifecycle": state.get("task_lifecycle"), "cleaned": state.get("cleaned", False)})
     record_questions = copy.deepcopy(process["questions"])
     for question in record_questions:
@@ -4420,6 +5422,10 @@ def project_resources(store):
 def reconcile_execution(args, state):
     require_coordinator(args, state)
     current = get_run(state, args['run_id'])
+    if 'settlement_path' in args:
+        return {'run': current, **settle_execution(args, state, current, 'run')}
+    if current.get('settlement'):
+        fail('execution_conflict', 'Preserve the recorded non-success settlement; workload receipts cannot replace it.')
     if current['status'] not in ('starting', 'running', 'unknown', 'awaiting_artifacts', 'failed', 'complete') or not current.get('start_validated'):
         fail('execution_receipt_invalid', 'A matching execution intent is required for reconciliation.')
     receipt_path = Path(current['directory']) / 'execution-receipt.json'
@@ -4463,13 +5469,14 @@ def reconcile_execution(args, state):
 
 def execute_run(args, root, store, external=False):
     path = task_dir(store, args['task_id'])
-    with lifecycle_lock(store), lock(path / 'write.lock'):
+    with mutation_locks(store, args, 'run-dispatch' if 'external' in locals() else 'resource-release'):
         state, previous = load_events(path)
         require_task_open(state)
         require_coordinator(args, state)
         if state['version'] != args['expected_version']:
             fail('revision_conflict', 'The task changed before execution.')
         current = get_run(state, args['run_id'])
+        require_generation_dispatch(state, current)
         require_execution_protocol(state, current)
         intent = current.get('execution_intent')
         if external and intent:
@@ -4479,12 +5486,13 @@ def execute_run(args, root, store, external=False):
                     'runner_argv': intent['runner_argv'], 'already_dispatched': True, 'reconciliation_required': True}
         if current['status'] != 'prepared':
             fail('execution_denied', 'Only an unstarted prepared run can execute.')
-        validate_resource_reference(store, state, {**current, 'run_id': args['run_id']}, require_available=not external)
+        validate_resource_reference(store, state, {**current, 'run_id': args['run_id']}, require_available=not external, capacity=True)
         check_run(state, current)
         runner = Path(current['runtime']['directory']) / 'runner.py'
         command = [sys.executable, str(runner), '--root', str(root), '--task-id', args['task_id'], '--run-id', args['run_id'], '--token', current['token']]
         if 'timeout' in args:
             command += ['--timeout', str(args['timeout'])]
+        current['retention_hold_id'] = bind_resource_retention(state, current, args['actor'])
         current.update(status='queued', execution_intent={'runner_argv': command, 'timeout': args.get('timeout'),
                        'mode': 'external' if external else 'local', 'actor': args['actor'], 'time': now()})
         commit_event(path, state, previous, 'run-dispatch-intent', args['actor'])
@@ -4500,7 +5508,7 @@ def execute_run(args, root, store, external=False):
         return {'ok': True, 'state': state, 'summary': summary(state), 'run': current, 'runner_pid': process.pid, 'reconciliation_required': True}
     # The runner owns the optional workload timeout and process-group cleanup.
     result = run(command, cwd=str(root), timeout=None)
-    with lifecycle_lock(store), lock(path / 'write.lock'):
+    with mutation_locks(store, args, 'run-dispatch' if 'external' in locals() else 'resource-release'):
         state, previous = load_events(path)
         try:
             response = reconcile_execution(args, state)

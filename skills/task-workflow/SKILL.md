@@ -25,6 +25,9 @@ old state do not grant authorization.
 This skill, the bundled hooks, and the workflow program supply workflow context.
 Use the user's instructions already loaded by the host to resolve optional
 private conventions. Pass those resolved values as explicit program arguments.
+The current dialogue contract's `goal_integrity` field is the shared policy
+anchor. The prompt hook and generated stage context carry the same guidance;
+use refreshed context so a stage-specific excerpt cannot weaken it.
 The plugin does not read, parse, edit, or require `AGENTS.md`. Do not add an entry
 to that file. The plugin has no user configuration file, execution profiles,
 root-selection wizard, or global task registry.
@@ -57,6 +60,18 @@ Maintain one program-generated `record.md` per task for intent, exploration,
 requirements, sourced decisions, design, plan, progress, and evidence. Use the
 fixed sections in [templates/record.md](templates/record.md). Keep all authored
 deliverables in English.
+
+The complete current user objective and every confirmed acceptance requirement
+remain the target through discussion, design, planning, implementation, review,
+integration, verification, runs, and closure. Resolve difficulty through
+investigation and concrete implementation planning. Decompose work while
+retaining complete acceptance. Change confirmed scope only with explicit actual
+user authority recorded in `scope_changes`. Keep confirmed requirements
+source-backed and visible across reentry and revised requirements; do not drop,
+rename, demote, or replace them by omission or identifier changes. Preserve the
+user's authorized provider, model, and resource choices. Apply actual user
+permissions and private resource policies without inventing limits or promising
+that physical constraints can be removed.
 Summarize decisions from other conversation languages in English and reference
 the original source. Preserve externally supplied raw data and behavior-critical
 literal values.
@@ -131,13 +146,18 @@ recorded. Do not ask the user for facts the available context already answers.
 
 ### 2. Acknowledge, record, explore, and ask
 
-After an answer, first state what it settles and any consequence. Before asking
-a dependent question or moving forward, record it with `process-answer` using
-its actual source. Update affected requirements through `process-requirements`
-and important choices through `process-decision`, with answer/decision links,
-status, rationale, and exact delegation scope. An agent proposal stays proposed
-until confirmed or explicitly delegated. A broad “go ahead” covers only the
-content the user saw.
+After an answer, first state what it settles and any consequence. Before asking a
+dependent question or moving forward, record it with `process-answer` using its
+actual source. Update affected requirements through `process-requirements` and
+important choices through `process-decision`, with answer/decision links, status,
+rationale, and exact delegation scope. Preserve every existing confirmed
+requirement unless an actual user-authorized scope change is recorded with its
+prior digest and disposition. An agent proposal stays proposed until confirmed
+or explicitly delegated. A broad “go ahead” covers only the content the user
+saw. Discuss material behavior, acceptance, dependencies, and genuine unknowns;
+do not reopen confirmed scope because work is large, costly, or difficult. Do not
+repeatedly offer a smaller subset, prototype, or deferment as a substitute for
+investigating and planning the confirmed goal.
 
 Explore again when the answer exposes a factual gap. Record new observations
 before relying on them. Then ask the next important question, recorded before
@@ -230,9 +250,12 @@ question. Follow [templates/phases.md](templates/phases.md) and
 [templates/conversation.md](templates/conversation.md) as required phase contracts.
 
 The program checks declared state, source links, versions, and operation guards.
-It cannot verify the semantic truth of natural language or guarantee that a model
-follows these instructions. The coordinator must compare the record with actual
-messages, project facts, diffs, and evidence.
+It cannot verify the semantic truth of natural language or guarantee that a
+model follows these instructions. The coordinator must compare the record with
+actual messages, project facts, diffs, and evidence. A task is complete only
+when the full confirmed completion contract and all applicable review,
+integration, verification, run, artifact, reference, and cleanup requirements
+are satisfied with accepted evidence.
 
 ## Native question handoff
 
@@ -355,15 +378,76 @@ persisted record before continuing authorized work.
 Implementation approval and Git integration authorization are separate facts.
 Use the guarded integration operation only within recorded authorization. It
 creates one ordinary squash commit on the selected base with normal Git hooks
-and signing. Verify the integrated revision before freezing dependent runs.
-Cleanup requires accepted integration, snapshots, and reference-safety checks.
+and signing. Integration requires a clean base by default. Use
+`preserve_unrelated_dirty: true` only when the authorized integration must retain
+unrelated dirty tracked work. First preview the exact base, task source, and
+preservation digest. Publish with the same revision arguments and exact
+`expected_preservation_digest`; preserve staged and unstaged tracked material
+without a stash, reset, forced checkout, or unrelated commit. Collision checks
+cover candidate paths and ancestors. Untracked and ignored trees outside that
+collision frontier stay outside the publication footprint.
+
+Verify the integrated revision before freezing dependent Runs. Integration
+verification defaults to `source_mode: live_checkout`, which requires the
+current clean integrated checkout. Preserved dirty integration requires
+`source_mode: fixed_commit`; optionally pass `expected_integration_commit` to
+assert the exact recorded commit. It is never an arbitrary source selector.
+That check uses an owned detached checkout of the exact integrated commit and
+cleans it only after claim settlement and receipt validation. The fixed runner
+removes `PYTHONPATH` and `PYTHONHOME`, disables bytecode writes, and rejects
+explicit command paths into mutable registered checkouts. An opaque validator
+must itself inspect the bound source. Cancel an unclaimed fixed check only
+through its guarded operation; it removes only a proven-owned clean checkout.
+Preserve unexpected content or uncertain references and report
+`cleanup_pending`; do not replay the check.
+Development checks bind their evidence to the actual worktree revision and can
+use an authorized managed resource, including a GPU, before merge. Integration
+verification runs against the exact integrated commit after merge and can also
+use an authorized managed resource, including a GPU. Each check binds evidence
+to the revision it actually checks. Long checks run outside shared project and
+task write locks; reserve and
+reconcile their source-bound evidence in short transactions. Use external
+`check-dispatch` to save a durable check intent and return its exact `runner_argv`
+for the private controller. `verify` and `integration-verify` run the pinned
+local check runner. Reconcile an actual receipt before retry; never relaunch an
+existing intent. A proven local protocol-4 pre-admission claim can be cancelled
+only after the matching runner is confirmed dead on the same boot, host, and
+user identity. For a partial claim, a possibly started workload, or a foreign
+owner, require actual terminal evidence for the runner, all owned workloads, and
+all process groups. Get the program-derived target from fresh status and copy it
+exactly into the observation; do not calculate claim or intent digests. Use
+`check-reconcile` or `run-reconcile` with `settlement_path` and nonempty evidence
+for a failed or cancelled execution. The observation must include an actual
+controller receipt path and SHA-256. `settlement_path` and `receipt_path` are
+mutually exclusive. A settlement records non-success; it cannot create a
+successful receipt, startup success, or acceptance.
+
+Each new formal Run follows accepted item and overall review, one ordinary
+squash integration, successful verification of that integrated revision,
+independent frozen inputs, successful startup validation, reference checks, and
+safe cleanup of the owned worktree before guarded dispatch. The cleanup receipt
+binds the generation, integration proof, Run startup proofs, and removal. A
+later approved revision recreates the fixed worktree from current main as a new
+generation; preserve earlier Runs and evidence.
+
+`run-prepare` freezes from the recorded integrated Git commit. Its immutable
+preparation intent and Run snapshot retain the exact integration verification
+proof, including the check receipt and source mode. Preserved dirty integration
+requires matching fixed-commit verification before freeze; unrelated live
+checkout contents do not become Run code. Recovery retains that original proof
+even when a later check passes against the same source.
 
 Record who provided each resource and its observed availability. Derived states
 are `available`, `in_use`, `releasable`, `released`, and `unknown`. Record ownership,
-run references, and release permission explicitly. A persistent retention choice
-is separate from the owner's permission to release and from authorization for
-an actual release action. Do not infer any of these from a successful run or
-from each other. Resolve private provisioning and execution conventions from
+actual check and Run uses, retention holds, and release permission explicitly.
+A hold names future work or a persistent choice; it does not consume execution
+capacity. A terminal use releases only its own capacity. A persistent retention
+choice is separate from the owner's permission to release and from authorization
+for an actual release action. Do not infer any of these from a successful run or
+from each other. The program resolves a program-owned hold only when its exact
+task or experiment scope closes. A manually created persistent hold needs an
+explicit `resource-hold-resolve` operation after closure. Resolve private
+provisioning and execution conventions from
 the user's already loaded instructions, then pass concrete parameters to the
 program. A state query does not provision or release a resource. Reuse only
 after checking recorded ownership, fit, references, and actual availability.

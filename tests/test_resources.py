@@ -5,10 +5,10 @@ from pathlib import Path
 import sys
 import subprocess
 from unittest import mock
-from test_workflow import Fixture, w
+from test_workflow import Fixture, LegacyFixture, w
 
 
-class ResourceTests(Fixture):
+class ResourceTests(LegacyFixture):
     def register(self, valid_for_seconds=3600, **fields):
         return self.op('resource-register', resource_id='resource', handle='opaque-fixture-1', provided_by='user',
             can_release=True, authorization_source='User granted release permission', ownership_evidence=['Fixture owner receipt'],
@@ -321,3 +321,120 @@ class ResourceTests(Fixture):
             gate.touch()
             if process.poll() is None:
                 process.communicate(timeout=30)
+
+
+class CurrentResourceTests(Fixture):
+    """Format3 admission automatically retains future work and tracks capacity."""
+    register = ResourceTests.register
+    resource = ResourceTests.resource
+    release = ResourceTests.release
+
+    def active(self):
+        self.tree(); self.approved()
+        self.op('item-start', item_id='overall', actor='implementer')
+        self.op('item-submit', item_id='overall', actor='implementer')
+
+    def test_normal_verify_automatically_retains_full_scope_until_actual_closure(self):
+        self.active(); self.register()
+        self.assertFalse(self.state['resource_holds'])
+        outcome = self.op('verify', item_id='overall', resource_id='resource', requirements={'units': 2},
+                          argv=[sys.executable, '-c', 'print("Actual managed verification")'])
+        self.assertEqual(outcome['status'], 'passed')
+        hold_id = outcome['check']['retention_hold_id']
+        hold = self.state['resource_holds'][hold_id]
+        self.assertTrue(hold['program_owned'])
+        self.assertEqual(hold['authorization_source'], self.state['enrollment'])
+        projection = self.resource()
+        self.assertFalse(projection['use_refs'][0]['release_blocking'])
+        self.assertEqual(projection['eligibility']['reason'], 'retained_work')
+        self.error('release_denied', lambda: self.release(projection, [sys.executable, '-c', 'pass']))
+        again = self.op('verify', item_id='overall', resource_id='resource', requirements={'units': 2}, argv=[sys.executable, '-c', 'pass'])
+        self.assertEqual(again['check']['retention_hold_id'], hold_id)
+        self.op('task-complete', outcome='stopped', notes='The authorized work was stopped.', evidence=['Actual scope outcome'])
+        self.assertEqual(self.state['resource_holds'][hold_id]['status'], 'resolved')
+        self.assertTrue(self.resource()['eligibility']['eligible'])
+
+    def test_persistent_choice_is_reused_and_survives_closure(self):
+        self.active(); self.register()
+        self.op('resource-hold', resource_id='resource', hold_id='persistent', purpose='User retained worker',
+                work_refs=[{'kind':'task', 'id':'task'}], retention='persistent', authorization_source='Actual persistent user choice')
+        result = self.op('verify', item_id='overall', resource_id='resource', argv=[sys.executable, '-c', 'pass'])
+        self.assertEqual(result['check']['retention_hold_id'], 'persistent')
+        self.assertEqual(len(self.state['resource_holds']), 1)
+        self.op('task-complete', outcome='stopped', notes='Actual task stopped.', evidence=['Scope outcome'])
+        self.assertEqual(self.state['resource_holds']['persistent']['status'], 'retained')
+        self.op('resource-hold-resolve', resource_id='resource', hold_id='persistent', outcome='resolved',
+                evidence=['Actual permission to end persistent choice'], authorization_source='User released the persistent hold')
+        self.assertTrue(self.resource()['eligibility']['eligible'])
+
+    def test_capacity_counts_reserved_checks_and_frees_only_terminal_use(self):
+        self.active(); self.register()
+        fields = {'kind':'verification', 'item_id':'overall', 'resource_id':'resource', 'requirements':{'units':2},
+                  'argv':[sys.executable, '-c', 'pass']}
+        first = self.op('check-dispatch', check_id='first', **fields)
+        self.error('resource_capacity', lambda: self.op('check-dispatch', check_id='second', **fields))
+        self.op('resource-register', resource_id='independent', handle='other-worker', provided_by='user', can_release=False,
+                authorization_source='User supplied independent worker', ownership_evidence=['Owner'], capabilities={'units':2},
+                observed_state='available', evidence=['Availability'])
+        self.op('check-dispatch', check_id='independent', **{**fields, 'resource_id':'independent'})
+        result = subprocess.run(first['runner_argv'], capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.refresh(); self.op('check-reconcile', check_id='first')
+        self.op('check-dispatch', check_id='second', **fields)
+        self.assertEqual(self.resource()['eligibility']['reason'], 'live_references')
+        self.op('check-cancel', check_id='second', reason='Actual check cancellation')
+        self.assertEqual(self.resource()['eligibility']['reason'], 'retained_work')
+
+    def test_resource_coverage_is_retried_after_task_lock_rescan(self):
+        import contextlib
+        self.active(); self.register()
+        self.op('check-dispatch', check_id='rescan', kind='verification', item_id='overall', resource_id='resource', argv=[sys.executable, '-c', 'pass'])
+        store = self.root / '.task-workflow'; path = w.task_dir(store, 'task')
+        actual_load, actual_lock = w.load_events, w.lock
+        calls, acquisitions = [0], []
+        def changed_after_pre_read(folder):
+            state, previous = actual_load(folder)
+            if folder == path:
+                calls[0] += 1
+                if calls[0] == 1:
+                    state = copy.deepcopy(state); state['checks'] = {}
+            return state, previous
+        @contextlib.contextmanager
+        def traced_lock(target):
+            acquisitions.append(str(target))
+            with actual_lock(target):
+                yield
+        with mock.patch.object(w, 'load_events', side_effect=changed_after_pre_read), mock.patch.object(w, 'lock', traced_lock):
+            with w.mutation_locks(store, {'task_id':'task', 'check_id':'rescan'}, 'check-reconcile'):
+                pass
+        self.assertEqual(acquisitions, [str(path / 'write.lock'), str(w.resource_dir(store, 'resource') / 'write.lock'), str(path / 'write.lock')])
+
+    def test_two_actual_tasks_race_for_exact_declared_capacity(self):
+        from test_workflow import SCRIPT
+        self.active(); self.register()
+        other = self.enroll({'root':str(self.root), 'project':str(self.repo), 'task_id':'other', 'title':'Concurrent resource task', 'actor':'owner', 'authorization_source':'Independent actual request'})['state']
+        def other_op(operation, **fields):
+            nonlocal other
+            result = w.dispatch(operation, {'root':str(self.root), 'task_id':'other', 'actor':'owner', 'expected_version':other['version'], **fields})
+            other = result['state']; return result
+        other_op('worktree-prepare', expected_base=self.git(self.repo, 'rev-parse', 'HEAD'), authorization_source='Independent worktree')
+        other_op('design', content='Verify on declared resource')
+        other_op('approve', design_digest=other['design']['digest'], authorization_source='Actual fixture approval')
+        other_op('item-start', item_id='overall', actor='implementer')
+        other_op('item-submit', item_id='overall', actor='implementer')
+        script = 'import importlib.util,json,sys; s=importlib.util.spec_from_file_location("race",sys.argv[1]); w=importlib.util.module_from_spec(s); s.loader.exec_module(w); a=json.loads(sys.argv[2]); sys.stdin.readline()\ntry:\n r=w.dispatch("check-dispatch",a); print(json.dumps({"ok":True,"check_id":r["check_id"]}))\nexcept w.WorkflowError as e: print(json.dumps({"error":e.code}))\n'
+        processes = []
+        for task in (self.state, other):
+            args = {'root':str(self.root), 'task_id':task['task_id'], 'actor':'owner', 'expected_version':task['version'],
+                    'check_id':'race', 'kind':'verification', 'item_id':'overall', 'resource_id':'resource', 'requirements':{'units':2}, 'argv':[sys.executable, '-c', 'pass']}
+            processes.append(subprocess.Popen([sys.executable, '-c', script, str(SCRIPT), json.dumps(args)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True))
+        for process in processes:
+            process.stdin.write('\n'); process.stdin.flush()
+        outcomes = []
+        for process in processes:
+            output, errors = process.communicate(timeout=20)
+            self.assertEqual(process.returncode, 0, errors); outcomes.append(json.loads(output))
+        self.assertEqual(sum(item.get('ok') is True for item in outcomes), 1, outcomes)
+        self.assertIn(next(item['error'] for item in outcomes if 'error' in item), ('locked', 'resource_capacity'))
+        projection = self.resource()
+        self.assertEqual(sum(use['release_blocking'] for use in projection['use_refs']), 1)

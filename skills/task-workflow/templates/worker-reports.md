@@ -19,7 +19,9 @@ Suggested next action:
 
 ```text
 Design revision reviewed:
-Requirement and decision sources checked:
+Complete requirement ledger and decision sources checked:
+Omitted, renamed, demoted, or replaced confirmed requirements:
+Scope-change authority verified, if applicable:
 Verdict: gaps found | no material gaps found
 Builder readiness: concrete plan possible | important guesses remain
 Gaps: [question | Spec section | evidence | effect on plan | needed resolution]
@@ -51,8 +53,8 @@ Requirements verdict: pass | fail | blocked
 Requirements evidence: [ID | verdict | change evidence | verification evidence]
 Quality verdict: pass | fail | blocked
 Quality findings: [severity | file location | observed consequence | evidence | fix]
-Missing behavior or verification:
-Required remediation:
+Missing behavior or verification, including any confirmed requirement omitted from coverage:
+Required remediation to restore complete goal coverage:
 ```
 
 ## Overall review report
@@ -62,6 +64,7 @@ Complete change revision and plan reviewed:
 Item requirements verdict references:
 Item quality verdict references:
 Cross-item checks and evidence:
+Complete confirmed-goal and requirement coverage:
 Design and plan alignment:
 Verdict: pass | fail | blocked
 Remaining work or material limitation:

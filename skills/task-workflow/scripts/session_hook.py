@@ -64,7 +64,7 @@ def context_for(event):
     if not isinstance(current_selection, dict) or (session_id in current_selection and current_selection[session_id] != task_id):
         return None
     facts = {'task_id': task_id}
-    for key in ('version', 'active_runs', 'open_experiments'):
+    for key in ('version', 'active_runs', 'open_experiments', 'generation'):
         number = status.get(key)
         if type(number) is int and 0 <= number:
             facts[key] = number
@@ -75,6 +75,7 @@ def context_for(event):
             facts[key] = status[key]
     facts['counts'] = safe_counts(status.get('counts'), ITEM_STATES)
     facts['run_counts'] = safe_counts(status.get('run_counts'), RUN_STATES)
+    facts['check_counts'] = safe_counts(status.get('check_counts'), workflow.CHECK_STATES)
     stages = ('exploration', 'discussion', 'design', 'design_review', 'design_confirmation',
               'plan', 'plan_confirmation', 'implementation', 'delivery')
     if status.get('process_protocol') == 2 and status.get('stage') in stages:
@@ -85,7 +86,7 @@ def context_for(event):
     templates = ['templates/conversation.md', 'templates/record.md']
     if facts.get('stage') in ('implementation', 'delivery'):
         templates += ['templates/worker-briefs.md', 'templates/worker-reports.md']
-    context_data = {'root': str(root), 'session_id': session_id, 'status_tool': 'context', 'task': facts,
+    context_data = {'goal_integrity': workflow.GOAL_INTEGRITY, 'root': str(root), 'session_id': session_id, 'status_tool': 'context', 'task': facts,
          'templates': templates,
          'recovery_guidance': 'Restore the recorded phase and its template. Read current task context before continuing authorized work. Hook delivery does not authorize work.'}
     if isinstance(result.get('dialogue_contract'), dict):

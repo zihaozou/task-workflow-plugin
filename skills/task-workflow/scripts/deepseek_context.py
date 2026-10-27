@@ -40,6 +40,7 @@ def stage_guidance(contract, context=None):
     selected = sections[CONVERSATION_SECTIONS[mode]] if mode in CONVERSATION_SECTIONS else ""
     result = {
         "mode": mode,
+        "goal_integrity": workflow.GOAL_INTEGRITY,
         "source_paths": [str(source)],
         "conversation_template": parts[0] + selected,
         "title_language_rule": "The English template labels identify semantic sections. Render headings, questions and option text in the current conversation language while preserving recorded meaning and question/choice identities. Persist authored record summaries in English with original source references.",

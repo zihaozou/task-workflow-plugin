@@ -43,6 +43,12 @@ and existing user authority. Direct status replies preserve the current wait.
 
 Examples below illustrate format only. Their JSON report behavior is not a
 requirement for another task. Replace every detail with actual task evidence.
+Preserve the complete confirmed objective and acceptance through every stage.
+Discuss real semantic choices and factual unknowns; do not repeatedly offer a
+smaller subset, prototype, or deferment because confirmed work is difficult or
+costly. Phase work to handle dependencies while keeping full acceptance visible.
+Change scope only when the user asks or evidence establishes a material
+constraint; record actual user authority before changing confirmed scope.
 
 ## First discussion reply
 
@@ -79,8 +85,10 @@ then **Question**. Omit groups with no new content.
 > Does that array structure fit the receiving script?
 
 Record the answer and update source-linked requirements/decisions before the
-next dependent question or action. Record that question before sending.
-Explore factual gaps first. No question count or alternative count is required.
+next dependent question or action. Preserve prior confirmed requirements across
+updates; omission or an ID rewrite does not remove them. Record the next question
+before sending it. Explore factual gaps first. No question count or alternative
+count is required.
 
 ## Playback
 
@@ -166,8 +174,31 @@ Use **Result**, **Checks**, relevant **Needs attention**, then **Next**.
 > - Independent item review is pending.
 
 Record evidence and actual transitions before reporting them. A worker claim
-alone does not establish acceptance. Distinguish requirements, quality, and
-overall verdicts where relevant. Continue routine authorized work.
+alone does not establish acceptance. Compare results with the complete confirmed
+requirement ledger and completion contract. Reviewers must identify omitted
+confirmed behavior even when it is difficult or expensive. Distinguish
+requirements, quality, and overall verdicts where relevant. Continue routine
+authorized work.
+
+## Goal-preserving examples
+
+**Complete goal, hard requirement**
+
+> The user confirmed a complete importer, including support for a legacy text
+> encoding. Later investigation shows that encoding support needs more work.
+> Investigate the actual encoding behavior, dependencies, and acceptance checks;
+> plan the complete importer. Ask about scope only if evidence shows a real
+> compatibility or permission constraint that changes the confirmed result.
+
+Incorrect: repeatedly ask to defer legacy encoding, deliver a prototype, or
+charge an invented per-operation budget because implementation is difficult.
+
+**Gap found in review**
+
+> A Spec omits the confirmed legacy encoding requirement. The independent reviewer
+> flags the missing requirement-to-behavior and acceptance mapping. Revise the
+> Spec and plan before approval, unless the user explicitly changes scope and
+> the actual authority is recorded.
 
 ## Status and reentry
 

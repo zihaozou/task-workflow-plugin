@@ -2,9 +2,14 @@
 
 A Spec is the existing Design revision, not another phase or document. Store it
 inside the one record's Design section through `process-design`. Use the same
-revision, independent review, digest binding, and approval. New submissions use
-the current schema. Existing stored envelopes remain readable and approvable
-without rewriting their content or digest.
+revision, independent review, digest binding, and approval. The Spec states the
+complete user-confirmed objective and maps every confirmed requirement to
+behavior and acceptance. Keep confirmed scope intact through revisions; an
+omission, renamed ID, demotion, or replacement does not remove a requirement.
+Only an explicit actual user scope change, recorded with its prior digest and
+disposition, changes the confirmed goal. New submissions use the current schema.
+Existing stored envelopes remain readable and approvable without rewriting their
+content or digest.
 
 Present the actual revision using concise bold labels and grouped bullets or
 tables. Keep source links in the record and show them beside user-facing facts
@@ -83,8 +88,12 @@ Do you approve Spec Dn for implementation planning?
 
 ## Independent builder gap review
 
-Give the reviewer the exact Spec revision, confirmed requirements, decision
-sources, delegation boundaries, and exploration evidence. Ask whether a competent
+Give the reviewer the exact Spec revision, complete source-backed confirmed
+requirement ledger, recorded scope changes, decision sources, delegation
+boundaries, and exploration evidence. Flag any omitted or reduced confirmed
+requirement, including one missing after an update or ID change. Approval waits
+until complete coverage is restored or an actual user-authorized scope change is
+recorded. Ask whether a competent
 builder could make a concrete implementation plan without guessing important
 behavior. Return consequential unanswered questions, affected sections, evidence,
 and how a wrong choice changes the plan, in order of consequence. Check coverage,

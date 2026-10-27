@@ -8,9 +8,12 @@ approvable without rewriting their envelopes.
 
 ## Plan content
 
-Start with the plan revision/title, approved Spec reference, goal, shared
-constraints, dependencies, and review focus. Map exact files and responsibilities
-before defining tasks. Give each task a checkable deliverable that an independent
+Start with the plan revision/title, approved Spec reference, complete user
+objective, shared constraints, dependencies, and review focus. Preserve the
+confirmed requirement ledger and map every acceptance requirement, including
+difficult or expensive behavior, to concrete tasks and checks. Use phases to
+order dependencies without reducing the completion contract. Map exact files
+and responsibilities before defining tasks. Give each task a checkable deliverable that an independent
 reviewer can assess. Setup and documentation belong with the deliverable that
 needs them. Lifecycle phases may summarize the process; Prepare, Implement,
 Verify, Review, and Integrate alone are not implementation tasks.
@@ -36,12 +39,44 @@ freeze through the program, and validate startup before the main workload. Name
 the validation command, expected import and asset checks, required code origins,
 and evidence returned by the startup report. Plan immutable code/scope reuse with
 separate run outputs and provenance. Name ownership and reference checks before
-cleanup. For pre-change project verification, use the same frozen baseline helpers;
-do not create a formal Run integration bypass.
+cleanup. For the full formal lifecycle, require accepted implementation and
+overall review, one ordinary squash integration, integrated revision verification,
+independent scoped freeze, successful Run startup validation, and reference-safe
+owned worktree cleanup before formal dispatch. Development checks may use
+authorized managed resources, including GPUs, before merge. Integration
+verification runs against the exact integrated commit after merge and may also
+use authorized managed resources. Both bind evidence to the revision actually
+checked. Direct verification wrappers execute their local runners; external
+`check-dispatch` returns exact pinned `runner_argv` for the private controller.
+`run-validate` uses the Run's frozen validation arguments
+and selected resource/controller path. For pre-change project verification, use the same
+frozen baseline helpers; do not create a formal Run integration bypass. A later
+approved same-experiment revision starts a new worktree generation from current
+main and creates a new immutable Run while preserving earlier evidence.
+
+Integration requires a clean base by default. If an authorized integration must
+preserve unrelated dirty tracked work, plan a dry-run preservation manifest and
+digest, then pass that exact digest with the same base and task revisions to the
+real integration. Preserve existing staged and unstaged work; never stash, reset,
+force checkout, or commit unrelated changes. After publication, verify the exact
+integrated commit with `source_mode: fixed_commit`; optionally pass
+`expected_integration_commit` to assert the recorded commit. The owned detached
+verification checkout must settle and clean safely before a formal Run. Freeze
+that Run from the verified
+integrated Git objects with the matching check receipt and source mode bound in
+its immutable preparation intent. For an opaque integration validator, make the
+check assert that it reads the bound checkout. Recovery must preserve the
+original preparation proof instead of replacing it with a later check.
 
 Include applicable integration authority, independent reviews, and recovery.
 Review coverage against every approved requirement and check interface names,
-types, dependencies, and verification references across tasks. Replace vague
+types, dependencies, and verification references across tasks. Distinguish
+resource capacity for actual check/Run uses from retention holds for named future
+work or persistent choices; a hold is not active capacity, and a completed use
+releases only its own capacity. Preserve actual ownership, release permission,
+and per-action authority. Include recovery for uncertain checks, cleanup,
+dispatch, legacy runtime quiescence, and worktree recreation without replaying
+completed work or deleting retained inputs. Replace vague
 steps such as "handle errors" or "add tests" with actual behavior and checks.
 
 ## Human-facing approval presentation

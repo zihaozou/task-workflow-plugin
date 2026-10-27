@@ -1,5 +1,8 @@
 """Isolated Git and evidence contract checks."""
 import importlib.util
+import base64
+import hashlib
+import zlib
 import json
 import os
 from pathlib import Path
@@ -110,6 +113,38 @@ class Fixture(unittest.TestCase):
         with self.assertRaises(w.WorkflowError) as caught:
             function()
         self.assertEqual(caught.exception.code, code)
+
+
+def retained_runtime(directory):
+    """Materialize the hash-verified published 0.1.14 source fixture."""
+    archive = json.loads((Path(__file__).parent / 'fixtures/runtime014.json').read_text())
+    directory.mkdir(exist_ok=True)
+    for name, item in archive['files'].items():
+        content = zlib.decompress(base64.b64decode(item['zlib_base64']))
+        assert hashlib.sha256(content).hexdigest() == item['sha256']
+        (directory / name).write_bytes(content)
+    spec = importlib.util.spec_from_file_location('retained014_' + directory.parent.name, directory / 'workflow.py')
+    module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+    return module
+
+
+class LegacyFixture(Fixture):
+    """Explicit retained format2 premises for pre-cleanup execution regression tests."""
+    def enroll(self, arguments):
+        if not hasattr(self, 'retained'):
+            self.retained = retained_runtime(self.base / 'published014')
+        with mock.patch.object(self.retained, 'new_process', return_value=None):
+            return self.retained.dispatch('init', arguments)
+
+    def op(self, operation, **fields):
+        if operation not in ('verify', 'integration-verify'):
+            return super().op(operation, **fields)
+        try:
+            result = self.retained.dispatch(operation, {'root': str(self.root), 'task_id': 'task', 'actor': 'owner',
+                'expected_version': self.state['version'], **fields})
+        finally:
+            self.refresh()
+        return result
 
 
 class WorkflowTests(Fixture):
@@ -281,6 +316,7 @@ class UnrestrictedCoreTests(Fixture):
         with mock.patch.object(w, 'run', side_effect=capture), mock.patch.object(w.subprocess, 'run', side_effect=capture_direct):
             self.integrated()
             self.prepare()
+            self.op('run-validate', run_id='run', check_id='startup')
             self.op('cleanup', dry_run=False)
 
     def test_large_blob_exports_as_disk_paths_and_chunked_streams(self):

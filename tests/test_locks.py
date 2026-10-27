@@ -273,3 +273,30 @@ _,status=os.waitpid(child,0);sys.exit(os.waitstatus_to_exitcode(status))
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MutationOrderTests(__import__('test_workflow').Fixture):
+    def test_git_catalog_resources_and_task_lock_order_and_locked_retry(self):
+        import contextlib
+        store = self.root / '.task-workflow'
+        task = w.task_dir(store, 'task')
+        common = Path(self.state['project']['common_dir'])
+        actual = w.lock; acquisitions = []
+        @contextlib.contextmanager
+        def traced(target):
+            acquisitions.append(str(target))
+            with actual(target):
+                yield
+        with mock.patch.object(w, 'lock', traced):
+            self.tree()
+        self.assertEqual(acquisitions[:3], [str(common / 'task-workflow-integration.lock'), str(store / 'registry.lock'), str(task / 'write.lock')])
+        original = self.state['version']
+        # A contended task lock must release the already-acquired Git/catalog locks.
+        with actual(task / 'write.lock'):
+            self.error('locked', lambda:self.op('cleanup', dry_run=False))
+        self.assertEqual(self.state['version'], original)
+        for target in (common / 'task-workflow-integration.lock', store / 'catalog.lock', task / 'write.lock'):
+            with actual(target):
+                pass
+        self.approved()
+        self.assertEqual(self.state['version'], original + 2)

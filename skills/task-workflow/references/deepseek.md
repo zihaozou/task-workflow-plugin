@@ -1,7 +1,10 @@
 # DeepSeek Harness integration
 
 Task Workflow uses the same Python operations, records, guards, and skill on
-Codex and DeepSeek Harness. The native DeepSeek package is `@local/task-workflow`.
+Codex and DeepSeek Harness. The current dialogue contract exposes the shared
+`goal_integrity` policy. The UserPromptSubmit hook and generated stage context
+carry the same policy so a selected template excerpt cannot reintroduce scope
+bargaining. The native DeepSeek package is `@local/task-workflow`.
 Its first supported target is DeepSeek Harness `0.2.1-rc.3`, with the official
 `@deepseek-ai/dsh-hooks-codex` and `@deepseek-ai/dsh-hook-protocol` packages pinned
 to that exact version. Do not substitute an npm distribution tag for these pins.
@@ -59,6 +62,10 @@ native request assembly, including a request after same-turn compaction without
 a new human prompt. It reads the actual committed Session working directory
 through `workingDirectory.get(session)` and the exact native Session identity.
 It does not select a task by recency or infer a new session binding.
+The refreshed context includes `goal_integrity` alongside the current stage
+guidance. Preserve the complete objective and confirmed acceptance when
+following that guidance; an unavailable or stale context requires status
+inspection before dependent work.
 
 For currently allowed `process-plan` and `process-decision` operations, current
 stage guidance includes read-only argument drafts bound to the actual selected

@@ -6,10 +6,10 @@ from pathlib import Path
 import subprocess
 import sys
 from unittest import mock
-from test_workflow import Fixture, w
+from test_workflow import Fixture, LegacyFixture, w
 
 
-class LifecycleTests(Fixture):
+class LifecycleTests(LegacyFixture):
     def test_real_frozen_execution_and_artifact_acceptance(self):
         self.integrated()
         self.op('experiment-create', experiment_id='study', goal='Verify frozen execution')
@@ -260,3 +260,51 @@ class LifecycleTests(Fixture):
         self.prepare(run_id='current')
         self.assertEqual(self.state['runs']['current']['runtime']['execution_protocol'], w.EXECUTION_PROTOCOL)
         self.assertEqual(self.op('run-execute', run_id='current')['run']['execution']['returncode'], 0)
+
+
+class Published014CompatibilityTests(LegacyFixture):
+    """Exercise actual published bytes through retained process admission and upgrade."""
+    def test_actual_014_queued_runner_survives_until_quiescent_upgrade(self):
+        self.integrated()
+        self.op('resource-register', resource_id='legacy-capacity', handle='retained-worker', provided_by='user', can_release=False,
+                authorization_source='Actual fixture resource authority', ownership_evidence=['Fixture owner'],
+                capabilities={'units': 1}, observed_state='available', evidence=['Fixture available'])
+        arguments = {'root': str(self.root), 'task_id': 'task', 'actor': 'owner', 'expected_version': self.state['version'],
+                     'run_id': 'retained', 'environment_id': 'runtime', 'lockfiles': ['uv.lock'],
+                     'argv': ['python', '-c', 'from pathlib import Path; Path("../retained-output.txt").write_text("once")'],
+                     'artifacts': [], 'resource_id': 'legacy-capacity', 'requirements': {'units': 1},
+                     'dependency_declaration': 'no-external-local-dependencies', **self.startup_fields()}
+        run = self.retained.dispatch('run-prepare', arguments)['run']; self.refresh()
+        self.assertEqual(run['runtime']['execution_protocol'], 3)
+        frozen = {name: (Path(run['runtime']['directory']) / name).read_bytes() for name in run['runtime']['files']}
+        dispatched = self.op('run-dispatch', run_id='retained')
+        self.error('settlement_unsupported', lambda:self.op('run-reconcile', run_id='retained',
+            settlement_path=str(self.base / 'unused-controller-observation.json'), evidence=['Legacy execution remains unchanged']))
+        self.error('legacy_admission_pending', lambda: self.op('lifecycle-upgrade', authorization_source='Actual upgrade request'))
+        self.assertEqual(self.state['workflow_format'], 2)
+        # A new unrelated format3 task cannot transition the occupied exact handle.
+        new = w.dispatch('init', {'root': str(self.root), 'project': str(self.repo), 'task_id': 'current',
+            'title': 'Current task', 'actor': 'owner', 'authorization_source': 'Independent current task'})['state']
+        self.assertEqual(new['workflow_format'], 3)
+        transition = {'root':str(self.root), 'task_id':'current', 'actor':'owner', 'expected_version':new['version'],
+                      'resource_id':'legacy-capacity', 'hold_id':'current-work', 'purpose':'Authorized current work',
+                      'work_refs':[{'kind':'task', 'id':'current'}], 'retention':'until_work_resolved',
+                      'authorization_source':'Actual current resource authority'}
+        self.error('legacy_resource_busy', lambda:w.dispatch('resource-hold', transition))
+        # This actual retained subprocess indirectly calls its own format2 guard.
+        result = subprocess.run(dispatched['runner_argv'], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.refresh()
+        self.assertEqual(self.state['workflow_format'], 2)
+        self.error('legacy_admission_pending', lambda: self.op('lifecycle-upgrade', authorization_source='Wait for receipt reconciliation'))
+        self.op('run-reconcile', run_id='retained')
+        self.op('lifecycle-upgrade', authorization_source='Actual user authorizes quiescent metadata upgrade')
+        self.assertEqual(self.state['workflow_format'], 3)
+        self.assertEqual(self.state['runs']['retained']['runtime'], run['runtime'])
+        self.assertEqual(w.dispatch('resource-hold', transition)['hold']['status'], 'retained')
+        projected = w.dispatch('resource-status', {'root':str(self.root), 'resource_id':'legacy-capacity'})['resource']
+        self.assertEqual(projected['coordination_protocol'], 2)
+        duplicate = subprocess.run(dispatched['runner_argv'], capture_output=True)
+        self.assertNotEqual(duplicate.returncode, 0)
+        for name, content in frozen.items():
+            self.assertEqual((Path(run['runtime']['directory']) / name).read_bytes(), content)

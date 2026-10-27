@@ -97,7 +97,7 @@ class ProcessTests(Fixture):
         self.assertEqual(self.state['process']['decisions'][0]['source'], AGENT)
         reqs = copy.deepcopy(self.requirements)
         reqs[0].update(source=AGENT, status='proposed')
-        self.error('origin_changed', lambda: self.op('process-requirements', requirements=reqs))
+        self.error('scope_change_required', lambda: self.op('process-requirements', requirements=reqs))
 
     def test_single_question_multi_round_and_reexploration(self):
         self.discussion()
@@ -195,9 +195,10 @@ class ProcessTests(Fixture):
     def test_fresh_confirmation_and_current_delegation_required(self):
         self.discussion()
         revised = copy.deepcopy(self.requirements); revised[0]['text'] = 'Change additional behavior'
-        self.error('confirmation_required', lambda: self.op('process-requirements', requirements=revised))
+        self.error('scope_change_required', lambda: self.op('process-requirements', requirements=revised))
         revised[0]['confirmation_source'] = {'kind': 'user', 'reference': 'Conversation turn: user confirms revised behavior'}
-        self.op('process-requirements', requirements=revised)
+        disposition = {'requirement_id': 'R1', 'previous_digest': w.digest(self.requirements[0]), 'action': 'revise', 'reason': 'Actual revised scope', 'authorization_source': revised[0]['confirmation_source']}
+        self.op('process-requirements', requirements=revised, scope_changes=[disposition])
         self.error('playback_required', lambda: self.op('process-design', design=self.design_content()))
         authority = {'id': 'authority', 'title': 'Authority', 'choice': 'Delegate code choices', 'rationale': 'Scope settled',
             'scope': ['R1'], 'status': 'confirmed', 'source': USER, 'delegates': True}
@@ -213,7 +214,8 @@ class ProcessTests(Fixture):
     def test_confirmation_cannot_be_bypassed_by_downgrade_or_reused_id(self):
         self.discussion()
         downgraded = copy.deepcopy(self.requirements); downgraded[0]['status'] = 'proposed'
-        self.op('process-requirements', requirements=downgraded)
+        demotion = {'requirement_id':'R1', 'previous_digest':w.digest(self.requirements[0]), 'action':'demote', 'reason':'User explicitly demoted this requirement', 'authorization_source':{'kind':'user', 'reference':'Actual demotion request'}}
+        self.op('process-requirements', requirements=downgraded, scope_changes=[demotion])
         edited = copy.deepcopy(downgraded); edited[0]['text'] = 'Authorize a different behavior'
         self.op('process-requirements', requirements=edited)
         promoted = copy.deepcopy(edited); promoted[0]['status'] = 'confirmed'
@@ -292,7 +294,7 @@ class ProcessTests(Fixture):
         record = (self.root / '.task-workflow/tasks/task/record.md').read_text()
         headings = [line for line in record.splitlines() if line.startswith('## ')]
         self.assertEqual(headings, ['## ' + name for name in ('Current state', 'Intent', 'Exploration', 'Confirmed requirements',
-            'Sourced decisions', 'Design', 'Implementation plan', 'Execution and review', 'Experiments and runs', 'Delivery', 'Decision history')])
+            'Sourced decisions', 'Design', 'Implementation plan', 'Execution and review', 'Experiments and runs', 'Checks', 'Resource retention', 'Development generations', 'Requirement dispositions', 'Delivery', 'Decision history')])
         for heading in ('behavior', 'assumption', 'item', 'step'):
             self.assertIn('  ## Embedded ' + heading + ' heading', record)
         self.op('recover')
@@ -318,7 +320,7 @@ class ProcessTests(Fixture):
         self.approved()
         record = (self.root / '.task-workflow/tasks/task/record.md').read_text()
         for chapter in ('Current state', 'Intent', 'Exploration', 'Confirmed requirements', 'Sourced decisions', 'Design',
-                        'Implementation plan', 'Execution and review', 'Experiments and runs', 'Delivery', 'Decision history'):
+                        'Implementation plan', 'Execution and review', 'Experiments and runs', 'Checks', 'Resource retention', 'Development generations', 'Requirement dispositions', 'Delivery', 'Decision history'):
             self.assertIn('## ' + chapter, record)
         self.assertNotIn('```json', record)
         self.assertIn('**Goal:** Update fixture behavior', record)

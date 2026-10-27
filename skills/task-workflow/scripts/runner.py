@@ -10,16 +10,18 @@ import socket
 import subprocess
 import workflow as w
 
-EXECUTION_PROTOCOL = 3
+EXECUTION_PROTOCOL = 4
 
 
 def execute(root, task_id, run_id, token, timeout=None):
     _, store = w.store_dir(root)
     path = w.task_dir(store, task_id)
-    with w.lifecycle_lock(store), w.lock(path / 'write.lock'):
+    arguments = {'task_id': task_id, 'run_id': run_id}
+    with w.mutation_locks(store, arguments, 'run-dispatch'):
         state, previous = w.load_events(path)
         w.require_task_open(state)
         current = w.get_run(state, run_id)
+        w.require_generation_dispatch(state, current)
         intent = current.get('execution_intent')
         if current['status'] != 'queued' or current.get('token') != token or not intent or timeout != intent['timeout']:
             w.fail('execution_denied', 'A matching uncompleted dispatch intent is required.')
@@ -36,7 +38,9 @@ def execute(root, task_id, run_id, token, timeout=None):
             claim.mkdir()
         except FileExistsError:
             w.fail('execution_claimed', 'This execution was already claimed; reconcile its durable receipts.')
-        w.atomic_json(claim / 'owner.json', {'pid': os.getpid(), 'token': token, 'time': w.now(), 'host': socket.gethostname()})
+        owner = {'pid': os.getpid(), 'token': token, 'time': w.now(), 'host': w.lock_host_identity(),
+                 'uid': w.lock_uid(), 'contract_digest': w.execution_argv_digest(current)}
+        w.atomic_json(claim / 'owner.json', owner)
         w.sync_dir(claim)
         w.sync_dir(directory)
         environment = w.startup_environment(current)
@@ -48,7 +52,7 @@ def execute(root, task_id, run_id, token, timeout=None):
         execution_log = directory / 'execution.log'
         log = open(execution_log, 'xb')
         try:
-            current.update(status='starting', workload_started=False,
+            current.update(status='starting', workload_started=False, execution_owner=owner,
                 start_validated={'time': w.now(), 'manifest_digest': current['manifest_digest'], 'runner_pid': os.getpid(), 'host': socket.gethostname()},
                 startup={'status': 'starting', 'token': token, 'contract_digest': contract, 'time': w.now()})
             w.commit_event(path, state, previous, 'run-startup-intent', intent['actor'])
@@ -63,7 +67,7 @@ def execute(root, task_id, run_id, token, timeout=None):
         raise
     process, code, workload_error = None, 125, None
     with log:
-        with w.lifecycle_lock(store), w.lock(path / 'write.lock'):
+        with w.mutation_locks(store, arguments, 'run-dispatch'):
             state, previous = w.load_events(path)
             actual = w.get_run(state, run_id)
             try:
@@ -73,6 +77,7 @@ def execute(root, task_id, run_id, token, timeout=None):
                 if startup['status'] != 'passed':
                     w.fail(startup.get('error', 'startup_failed'), 'Startup validation did not pass.')
                 w.require_execution_protocol(state, actual)
+                w.require_generation_dispatch(state, actual)
                 w.check_run(state, actual)
                 w.validate_resource_reference(store, state, {**actual, 'run_id': run_id}, require_available=True)
                 # Re-read the report under the final admission locks.
@@ -127,15 +132,107 @@ def stop_process(process):
     process.wait()
 
 
+def execute_check(root, task_id, check_id, token):
+    """Execute a previously reserved check once, outside workflow state locks."""
+    _, store = w.store_dir(root)
+    path = w.task_dir(store, task_id)
+    arguments = {'task_id': task_id, 'check_id': check_id}
+    with w.mutation_locks(store, arguments, 'check-dispatch'):
+        state, previous = w.load_events(path)
+        w.require_task_open(state)
+        current = state.get('checks', {}).get(check_id)
+        if not current or current['status'] != 'reserved' or current['token'] != token or w.check_contract(current) != current['contract_digest']:
+            w.fail('execution_denied', 'A matching unclaimed check intent is required.')
+        w.check_runtime(state, current)
+        if Path(__file__).resolve().parent != Path(current['runtime']['directory']):
+            w.fail('runtime_changed', 'Use the exact pinned check runner.')
+        if not w.check_current(state, current):
+            w.fail('stale_check', 'The check source changed before admission.')
+        w.validate_resource_reference(store, state, current, require_available=True)
+        current['retention_hold_id'] = w.bind_resource_retention(state, current, current['actor'])
+        w.ensure_check_checkout(state, current)
+        check_environment = w.check_execution_environment(state, current)
+        directory = Path(current['directory'])
+        claim = directory / 'execution.claim'
+        try:
+            claim.mkdir()
+        except FileExistsError:
+            w.fail('execution_claimed', 'This check was already claimed; reconcile its receipt.')
+        owner = {'pid': os.getpid(), 'host': w.lock_host_identity(), 'uid': w.lock_uid(), 'token': token,
+                 'contract_digest': current['contract_digest'], 'time': w.now()}
+        w.atomic_json(claim / 'owner.json', owner)
+        log_path = directory / 'check.log'
+        log = open(log_path, 'xb')
+        stderr_path = directory / 'stderr.log'
+        stderr_log = open(stderr_path, 'xb')
+        current.update(status='starting', claim=owner)
+        w.commit_event(path, state, previous, 'check-claimed', current['actor'])
+    process, code, error, startup = None, 125, None, None
+    with log, stderr_log:
+        try:
+            if current.get('frozen_inputs'):
+                frozen = current['frozen_inputs']
+                # A check owns its separate report and receipt namespace.
+                validation = {**frozen, 'directory': str(directory), 'token': token}
+                startup = w.perform_startup_validation(validation, timeout=current['timeout'])
+                code = 0 if startup['status'] == 'passed' else 125
+                log.write(w.canonical(startup) + b'\n')
+            else:
+                process = subprocess.Popen(current['argv'], cwd=current['cwd'], env=check_environment, stdin=subprocess.DEVNULL,
+                                           stdout=log, stderr=stderr_log, shell=False, start_new_session=True)
+                code = None
+                with w.mutation_locks(store, arguments, 'check-started'):
+                    state, previous = w.load_events(path)
+                    actual = state['checks'][check_id]
+                    if actual['token'] != token or actual['status'] != 'starting':
+                        w.fail('execution_denied', 'The check claim changed before process publication.')
+                    actual.update(status='running', workload_pid=process.pid)
+                    w.commit_event(path, state, previous, 'check-started', current['actor'])
+                code = w.wait_with_timeout(lambda seconds: process.wait(timeout=seconds), current['timeout'])
+        except subprocess.TimeoutExpired:
+            code, error = 124, 'timeout'
+        except OSError:
+            code, error = 127, 'spawn_failed'
+        finally:
+            stop_process(process)
+        log.flush()
+        os.fsync(log.fileno())
+        stderr_log.flush()
+        os.fsync(stderr_log.fileno())
+    if current.get('source_checkout'):
+        try:
+            w.check_checkout_identity(state, current)
+        except w.WorkflowError:
+            code, error = 125, 'check_checkout_changed'
+    output_path = directory / 'output.json'
+    w.atomic_json(output_path, {'stdout_tail': log_path.read_text(errors='replace'), 'stderr_tail': stderr_path.read_text(errors='replace')})
+    receipt = {'protocol': 4, 'token': token, 'contract_digest': current['contract_digest'],
+               'source_binding': current['source_binding'], 'returncode': code, 'error': error,
+               'log': str(log_path), 'log_sha256': w.sha_file(log_path), 'started_at': owner['time'],
+               'finished_at': w.now(), 'actual_host': owner['host'], 'owned_process_identity': owner}
+    receipt.update(stderr_log=str(stderr_path), stderr_sha256=w.sha_file(stderr_path), output=str(output_path), output_sha256=w.sha_file(output_path))
+    if startup:
+        receipt['startup'] = startup
+    w.atomic_json(directory / 'check-receipt.json', receipt)
+    w.sync_dir(directory)
+    return receipt
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for key in ('root', 'task-id', 'run-id', 'token'):
+    for key in ('root', 'task-id', 'token'):
         parser.add_argument('--' + key, required=True)
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument('--run-id')
+    target.add_argument('--check-id')
     parser.add_argument('--timeout', type=int, default=None)
     args = parser.parse_args()
     if args.timeout is not None and args.timeout < 1:
         parser.error('timeout must be positive seconds')
-    execute(args.root, args.task_id, args.run_id, args.token, args.timeout)
+    if args.check_id:
+        execute_check(args.root, args.task_id, args.check_id, args.token)
+    else:
+        execute(args.root, args.task_id, args.run_id, args.token, args.timeout)
 
 
 if __name__ == '__main__':

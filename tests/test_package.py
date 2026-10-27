@@ -40,7 +40,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.14')
+        self.assertEqual(manifest['version'], '0.1.15')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -78,7 +78,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(packages), 1)
         package = packages[0]
         self.assertEqual(package['name'], '@local/task-workflow')
-        self.assertEqual(package['version'], '0.1.14')
+        self.assertEqual(package['version'], '0.1.15')
         paths = [entry['path'] for entry in package['files']]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(set(paths), NATIVE_RELEASE_FILES)
@@ -142,8 +142,8 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(replies[0]['result']['serverInfo']['name'], 'task-workflow')
             tools = replies[1]['result']['tools']
             expected = session_hook.workflow.command_schemas()
-            self.assertEqual(len(tools), 54)
-            self.assertEqual(len(expected), 54)
+            self.assertEqual(len(tools), 61)
+            self.assertEqual(len(expected), 61)
             self.assertEqual([{key: tool[key] for key in schema}
                               for tool, schema in zip(tools, expected)], expected)
             self.assertFalse(replies[2]['result']['isError'])
@@ -488,7 +488,7 @@ class ContextTests(unittest.TestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 folder = Path(temporary)
                 (folder / name).write_bytes((SCRIPTS / name).read_bytes())
-                (folder / "workflow.py").write_text("from pathlib import Path\ndef find_registered_root(path): return path\ndef dispatch(op, args):\n    return {'tasks': [{'task_id': 't', 'session_id': 's'}]} if op == 'list' else {'summary': {'task_id': 't', 'session_id': 's'}}\n")
+                (folder / "workflow.py").write_text("from pathlib import Path\nGOAL_INTEGRITY = 'Preserve the complete fixture goal.'\nCHECK_STATES = ()\ndef find_registered_root(path): return path\ndef dispatch(op, args):\n    return {'tasks': [{'task_id': 't', 'session_id': 's'}]} if op == 'list' else {'summary': {'task_id': 't', 'session_id': 's'}}\n")
                 result = subprocess.run([sys.executable, str(folder / name)], input=json.dumps(event), text=True,
                                         capture_output=True, timeout=10)
                 self.assertEqual(result.returncode, 0, result.stderr)

@@ -27,11 +27,11 @@ Task worktree (actual absolute path or recorded base placeholder):
 Canonical record (actual absolute record.md path):
 Protocol and current state version:
 Role, actor, and exact plan item or review target:
-Objective:
+Complete user objective and completion contract:
 Exact Spec revision, digest, status, and source, if applicable:
 Exact Plan revision, digest, status, and source, if applicable:
 User request and approval source references:
-Confirmed requirements and decision sources:
+Complete confirmed requirement ledger and decision sources (including difficult requirements):
 Delegated choices and exact scope:
 Permitted operations and owned paths or evidence scope:
 Current context read (actual tool/runtime and root/task_id arguments):
@@ -60,8 +60,11 @@ actual authority permits a binding operation. Use the supplied root and task ID
 for the authorized read-only context call; do not
 bind the child to the parent's session or enroll a replacement task to obtain
 context. The brief is scoped coordinator delegation, not a new human request or
-approval. Trace behavior and write authority to the actual user sources and
-approved item. If context, sources, or pointers are unavailable or inconsistent,
+approval. It must carry the complete objective, all confirmed acceptance
+requirements, and relevant decisions. Cost or difficulty does not authorize a
+smaller substitute. Trace behavior and write authority to the actual user sources
+and approved item. Flag any source or plan omission to the coordinator before
+dependent work. If context, sources, or pointers are unavailable or inconsistent,
 return that gap to the coordinator before dependent action.
 
 For an ordinary request outside an enrolled workflow, preserve ordinary scope
@@ -109,15 +112,20 @@ requirements or design. Do not select product behavior on the user's behalf.
 
 ```text
 Design digest and content reference:
-Confirmed requirement and decision references:
+Complete confirmed requirement ledger and decision references:
+Recorded scope changes and user authority, if any:
 Exploration evidence:
 Review scope: builder readiness, coverage, interfaces, failure conditions, acceptance, recovery
 Return unanswered important questions, affected Spec sections, consequences, and evidence:
 Stop at user choice or missing fact:
 ```
 
-Independently compare the exact Spec (Design) revision with confirmed
-requirements, decision sources, delegation scope, and exploration evidence.
+Independently compare the exact Spec (Design) revision with the complete
+source-backed confirmed requirement ledger, recorded scope changes, decision
+sources, delegation scope, and exploration evidence. Flag omission, demotion,
+renaming, or replacement of a confirmed requirement unless actual user authority
+is recorded. Confirm every confirmed acceptance requirement appears in the Spec
+and maps to acceptance before recommending approval.
 Determine whether a competent builder can create a concrete plan without guessing
 important behavior. Return unresolved questions in order of consequence, affected
 sections, evidence, and how a wrong choice changes the plan. Respect explicit
@@ -159,7 +167,8 @@ paths without coordinator reassignment.
 
 ```text
 Plan item and current change revision:
-Confirmed requirements and acceptance sources:
+Complete confirmed requirement ledger and acceptance sources:
+Recorded scope changes and user authority, if any:
 Approved design/plan digests:
 Changed paths and verification evidence:
 Return separate requirements and quality verdicts:
@@ -171,10 +180,12 @@ keep their findings distinct; they do not require two reviewer agents.
 
 ### Requirements rubric
 
-Independently inspect the actual change and verification against confirmed
-requirements and accepted scope. Return a separate pass/fail verdict for each
-requirement with evidence and remediation. Do not substitute style opinions for
-requirements findings.
+Independently inspect the actual change and verification against the complete
+confirmed requirement ledger and accepted scope. Return a separate pass/fail
+verdict for every requirement, with evidence and remediation. Do not treat
+engineering cost, phased delivery, or an omitted/renamed ID as authority to
+reduce confirmed scope. Do not substitute style opinions for requirements
+findings.
 
 ### Quality rubric
 

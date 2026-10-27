@@ -92,7 +92,7 @@ class Server:
             selected = requested if requested in VERSIONS else VERSIONS[-1]
             self.initialized = True
             result = {"protocolVersion": selected, "capabilities": {"tools": {"listChanged": False}},
-                      "serverInfo": {"name": "task-workflow", "version": "1.0.0"}}
+                      "serverInfo": {"name": "task-workflow", "version": "0.1.15"}}
         elif method == "ping":
             result = {}
         elif not self.initialized:
