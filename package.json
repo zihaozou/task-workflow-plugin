@@ -1,15 +1,22 @@
 {
   "name": "@local/task-workflow",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "private": true,
   "type": "module",
   "description": "Shared Task Workflow tools, skills and context for DeepSeek Harness.",
   "exports": {
     ".": "./adapters/deepseek/index.js"
   },
-  "files": ["adapters/deepseek", "hooks/hooks.json", "skills/task-workflow"],
+  "files": [
+    "adapters/deepseek",
+    "hooks/hooks.json",
+    "skills/task-workflow",
+    "assets"
+  ],
   "dsh": {
-    "bundle": {"patch": "./adapters/deepseek/cordis.patch.yml"}
+    "bundle": {
+      "patch": "./adapters/deepseek/cordis.patch.yml"
+    }
   },
   "scripts": {
     "test:deepseek": "node --test tests/deepseek_adapter.integration.mjs"

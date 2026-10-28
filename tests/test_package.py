@@ -22,6 +22,7 @@ NATIVE_RELEASE_FILES = {
     'adapters/deepseek/recovery.js', 'hooks/hooks.json',
     'skills/task-workflow/SKILL.md', 'skills/task-workflow/agents/openai.yaml',
     'skills/task-workflow/references/workflow.md',
+    'assets/icon.svg', 'assets/icon.png',
     'skills/task-workflow/references/deepseek.md',
 } | {'skills/task-workflow/scripts/' + name for name in (
     'workflow.py', 'runner.py', 'mcp_server.py', 'session_hook.py',
@@ -40,13 +41,19 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.15')
+        self.assertEqual(manifest['version'], '0.1.16')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
         self.assertEqual(interface['category'], 'Productivity')
         self.assertLessEqual(len(interface['shortDescription']), 30)
         self.assertEqual(interface['capabilities'], [])
+        for key in ('logo', 'composerIcon'):
+            relative = Path(interface[key])
+            self.assertFalse(relative.is_absolute())
+            self.assertNotIn('..', relative.parts)
+            self.assertTrue((ROOT / relative).is_file())
+            self.assertIn(relative.as_posix(), NATIVE_RELEASE_FILES)
         for key in ('skills', 'mcpServers', 'hooks'):
             self.assertTrue((ROOT / manifest[key]).exists())
 
@@ -78,7 +85,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(packages), 1)
         package = packages[0]
         self.assertEqual(package['name'], '@local/task-workflow')
-        self.assertEqual(package['version'], '0.1.15')
+        self.assertEqual(package['version'], '0.1.16')
         paths = [entry['path'] for entry in package['files']]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(set(paths), NATIVE_RELEASE_FILES)
@@ -142,8 +149,11 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(replies[0]['result']['serverInfo']['name'], 'task-workflow')
             tools = replies[1]['result']['tools']
             expected = session_hook.workflow.command_schemas()
-            self.assertEqual(len(tools), 61)
-            self.assertEqual(len(expected), 61)
+            expected_names = {entry['name'] for entry in expected}
+            actual_names = [tool['name'] for tool in tools]
+            self.assertEqual(set(actual_names), expected_names)
+            self.assertEqual(len(actual_names), len(expected_names))
+            self.assertIn('environment-bind', expected_names)
             self.assertEqual([{key: tool[key] for key in schema}
                               for tool, schema in zip(tools, expected)], expected)
             self.assertFalse(replies[2]['result']['isError'])

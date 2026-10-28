@@ -33,8 +33,10 @@ class InitGuidanceTests(unittest.TestCase):
 
     def test_schema_adds_guidance_without_changing_operation_fields(self):
         schemas = workflow.command_schemas()
-        self.assertEqual(len(schemas), 61)
-        self.assertEqual({entry['name'] for entry in schemas}, set(workflow.COMMANDS))
+        schema_names = [entry['name'] for entry in schemas]
+        self.assertEqual(set(schema_names), set(workflow.COMMANDS))
+        self.assertEqual(len(schema_names), len(set(schema_names)))
+        self.assertIn('environment-bind', schema_names)
         for entry in schemas:
             command = workflow.COMMANDS[entry['name']]
             schema = entry['inputSchema']

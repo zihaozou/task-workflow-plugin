@@ -216,6 +216,17 @@ Tasks use the current Git project. Generated state and outputs use these paths:
 | `.worktrees/<task-id>/` | The task's fixed development worktree. |
 | `.experiments/<experiment-id>/runs/<run-id>/` | Frozen experiment code and run outputs. |
 
+## Project environment
+
+All development worktrees and new formal Runs reuse the existing environment
+from the explicitly bound main/base repository. Bind that environment once for
+the project state root with `environment-bind`, passing `path` and
+`authorization_source`. The binding is stored in
+`.task-workflow/environment.json` and applies across tasks, worktrees, checks,
+and Runs. Dependency conflicts return to project compatibility discussion;
+do not create a separate environment. Existing frozen Runs keep their recorded
+environment references and paths.
+
 An explicit experiment root can come from your existing private conventions.
 The agent passes that path as an operation argument. The program maintains its
 own project-local `.git/info/exclude` block for generated directories. It does

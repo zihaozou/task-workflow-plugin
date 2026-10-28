@@ -718,15 +718,25 @@ The caller must require `startup.status == "passed"` before numerical verificati
 The baseline records purpose `development-verification`; it makes no integration
 or formal Run approval claim. Preserve existing baseline inputs and receipts.
 
-For an existing open task, `environment-register` appends an existing absolute
-logical directory to `environment_registry`. Pass the current task version,
-coordinator actor, `environment_id`, `path`, and actual `authorization_source`.
-It records the actor and source in event history. A repeated ID with the same
-expanded logical path is idempotent; a different path requires a new ID. This
-operation does not install, rebuild, fingerprint, replace an existing reference,
-or change frozen runs or approvals. Frozen-run preparation retains its existing
-environment audit.
-Shared caches are outside task cleanup.
+## Bind the main repository environment
+
+All development worktrees and new formal Runs reuse one existing environment
+bound to the project's main/base repository. The authoritative binding is
+`.task-workflow/environment.json` under the existing project state root. Use
+`environment-bind` once to record the existing environment path and its actual
+authorization source. Pass the operation's standard mutation fields `path` and
+`authorization_source`; discover the current schema for all other required
+fields. The binding is project-wide, including across tasks and their worktrees.
+Resolve aliases and symlinks to the same underlying environment before reuse.
+
+Do not create or register an alternate environment for a task, worktree,
+integration check, or Run. Resolve dependency conflicts through project
+compatibility discussion. Preserve existing frozen Runs, snapshots, paths, and
+environment references exactly as recorded; binding the main environment does
+not rewrite historical execution evidence. Do not infer a host-specific
+environment directory name.
+
+Shared package caches remain outside task cleanup.
 
 Record purpose, parent run, checkpoint reference when relevant, frozen snapshot,
 resource identity, execution receipt, and artifact acceptance. The program pins

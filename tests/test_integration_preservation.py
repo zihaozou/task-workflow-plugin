@@ -233,11 +233,5 @@ class IntegrationPreservationTests(Fixture):
         with mock.patch.dict(os.environ, {'PYTHONPATH':str(self.repo)}):
             result = self.op('integration-verify', source_mode='fixed_commit', argv=[sys.executable, '-c', 'import code; assert code.VALUE == 2'])
         self.assertEqual(result['status'], 'passed')
-        denied = self.op('check-dispatch', check_id='mutable', kind='integration', source_mode='fixed_commit', argv=[sys.executable, str(self.repo / 'code.py')])
-        process = subprocess.run(denied['runner_argv'], capture_output=True)
-        self.assertNotEqual(process.returncode, 0)
-        self.assertIn(b'mutable_check_source', process.stderr)
-        self.refresh()
-        self.assertEqual(self.state['checks']['mutable']['status'], 'reserved')
-        self.assertFalse((Path(denied['check']['directory']) / 'execution.claim').exists())
-        self.op('check-cancel', check_id='mutable', reason='Actual invalid source reference cancelled')
+        self.error('mutable_check_source', lambda: self.op('check-dispatch', check_id='mutable', kind='integration', source_mode='fixed_commit', argv=[sys.executable, str(self.repo / 'code.py')]))
+        self.assertNotIn('mutable', self.refresh().get('checks', {}))

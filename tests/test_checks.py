@@ -25,6 +25,18 @@ class CheckTests(Fixture):
         return self.op('check-dispatch', check_id=name, kind='verification', item_id='overall',
                        argv=fields.pop('argv', [sys.executable, '-c', 'print("actual worker")']), **fields)
 
+    def test_main_python_prefix_and_idempotent_submitted_argv(self):
+        self.active()
+        for name, executable in [('generic', 'python'), ('system', sys.executable), ('versioned', 'python3.13')]:
+            command = [executable, '-c', 'import sys; assert sys.prefix == ' + repr(str(self.environment))]
+            reserved = self.reserve(name=name, argv=command)
+            self.assertEqual(reserved['check']['argv'][0], str(self.environment / 'bin/python'))
+            self.assertTrue(self.reserve(name=name, argv=command)['already_dispatched'])
+            result = subprocess.run(reserved['runner_argv'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.refresh()
+            self.assertEqual(self.op('check-reconcile', check_id=name)['status'], 'passed')
+
     def test_external_dispatch_does_not_execute_and_reconciles_once(self):
         self.active()
         count = self.base / 'counter'

@@ -39,7 +39,7 @@ class DialogueContractTests(Fixture):
     def test_same_turn_enrollment_and_missing_exploration_are_explicit(self):
         contract = self.contract()
         self.assertEqual(contract['stage'], 'exploration')
-        self.assertEqual(contract['state_version'], 1)
+        self.assertEqual(contract['state_version'], self.state['version'])
         self.assertEqual(contract['missing_records'], ['intent'])
         self.assertEqual(contract['allowed_next_operations'], ['context', 'status', 'process-intent'])
         self.error('exploration_required', lambda: self.op('process-question', question=self.question()))

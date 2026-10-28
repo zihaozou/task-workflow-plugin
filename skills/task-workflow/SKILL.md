@@ -373,6 +373,15 @@ Selecting a closed task preserves its closure. Recovery preserves the selected
 task. Use `status` with the known project and task context to inspect the
 persisted record before continuing authorized work.
 
+All development worktrees and new formal Runs reuse the existing environment
+from the explicitly bound main/base repository. Bind that existing environment
+once for the project state root with `environment-bind`, using the standard
+mutation fields `path` and `authorization_source`. The binding lives in
+`.task-workflow/environment.json`; worktrees and Runs must resolve to that same
+environment. Do not create or select a separate worktree or Run environment.
+Resolve dependency conflicts through project compatibility discussion. Existing
+frozen Runs retain their historical environment references and inputs.
+
 ## Integration, resources, and experiments
 
 Implementation approval and Git integration authorization are separate facts.

@@ -1355,11 +1355,9 @@ def integrate(args, state, path, previous):
         remove_integration_scratch(state, integration)
     return {"integration": integration}, previous, True
 
-def env_fingerprint(path, forbidden=()):
-    logical = Path(path).expanduser()
-    if not logical.is_absolute() or not logical.is_dir():
-        fail("invalid_environment", "The registered environment path is unavailable.")
-    env = logical.resolve()
+def audit_environment_paths(env, forbidden=()):
+    """Audit Python path metadata without requiring a Python environment."""
+    env = Path(env).resolve()
     metadata = {}
     for package_root in sorted(env.glob("lib/python*/site-packages")):
         for pth in sorted(package_root.glob("*.pth")):
@@ -1377,6 +1375,8 @@ def env_fingerprint(path, forbidden=()):
                         fail("unverifiable_import_hook", "An executable .pth import hook needs an explicit supported audit strategy.")
                     continue
                 referenced = (package_root / line).resolve()
+                if within(referenced, env):
+                    continue
                 if any(within(referenced, Path(f).resolve()) for f in forbidden):
                     fail("development_import", "An environment .pth path points into a development checkout.")
                 if not within(referenced, env):
@@ -1387,6 +1387,15 @@ def env_fingerprint(path, forbidden=()):
             if value.get("dir_info", {}).get("editable"):
                 fail("development_import", "Editable installed packages are prohibited for frozen experiments.")
 
+    return metadata
+
+
+def env_fingerprint(path, forbidden=()):
+    logical = Path(path).expanduser()
+    if not logical.is_absolute() or not logical.is_dir():
+        fail("invalid_environment", "The registered environment path is unavailable.")
+    env = logical.resolve()
+    metadata = audit_environment_paths(env, forbidden)
     python = env / "bin" / "python"
     if not python.is_file() or not os.access(python, os.X_OK):
         fail("invalid_environment", "The registered environment must contain an executable bin/python.")
@@ -1718,15 +1727,22 @@ def frozen_argv(arguments, state, environment):
     result = []
     for argument in arguments:
         path = Path(argument)
-        environment_argument = (path.is_absolute() and path.is_file()
-            and any(within(path, anchor) for anchor in (logical, physical)))
+        if path.is_absolute():
+            for parent in path.parents:
+                if (parent / 'pyvenv.cfg').is_file():
+                    if parent.resolve() != physical:
+                        fail('environment_conflict', 'Frozen commands must use the main repository environment.')
+                    break
+        environment_anchor = next((parent for parent in path.parents if parent.resolve() == physical), None) if path.is_absolute() else None
+        environment_argument = environment_anchor is not None and path.is_file()
         if environment_argument:
             reject_development_origin(state, path, environment)
-            if within(path, logical):
-                argument = str(physical / path.relative_to(logical))
+            argument = str(physical / path.relative_to(environment_anchor))
         elif any(checkout in argument for checkout in (state['project']['path'], state['worktree']['path'])):
             fail('development_reference', 'Frozen commands cannot reference mutable development checkout paths.')
         result.append(argument)
+    if result and re.fullmatch(r'python(?:[0-9]+(?:\.[0-9]+)*)?', Path(result[0]).name):
+        result[0] = str(physical / 'bin/python')
     return result
 
 
@@ -1869,7 +1885,7 @@ def startup_environment(current):
     environment = dict(os.environ)
     directory = Path(current['directory'])
     env_path = Path(current['environment']['path'])
-    environment.update(VIRTUAL_ENV=str(env_path), PATH=str(env_path / 'bin') + os.pathsep + environment.get('PATH', ''),
+    environment.update(VIRTUAL_ENV=str(env_path), UV_PROJECT_ENVIRONMENT=str(env_path), PATH=str(env_path / 'bin') + os.pathsep + environment.get('PATH', ''),
         PYTHONDONTWRITEBYTECODE='1', TASK_WORKFLOW_RUN_DIR=str(directory), TASK_WORKFLOW_OUTPUT_DIR=str(directory),
         TASK_WORKFLOW_STARTUP_REPORT=str(directory / 'startup-report.json'), TASK_WORKFLOW_STARTUP_TOKEN=current['token'])
     environment.pop('PYTHONPATH', None)
@@ -1942,6 +1958,7 @@ def prepare_verification_snapshot(state, *, commit, directory, environment_id, s
         fail('startup_validation_required', 'A baseline needs its actual startup validator argv.')
     if environment_id not in state['environment_registry']:
         fail('environment_not_registered', 'Reference an explicitly registered environment.')
+    require_project_environment(state, state['environment_registry'][environment_id])
     directory = Path(directory).expanduser()
     base = Path(state['root']) / '.experiments/verification' / state['task_id']
     if not directory.is_absolute() or not within(directory, base / 'baselines'):
@@ -1960,6 +1977,7 @@ def prepare_verification_snapshot(state, *, commit, directory, environment_id, s
         'commit': commit, 'provenance': {'commit': commit, 'objects': objects}, 'directory': str(directory),
         'snapshot_scope': args['snapshot_scope'], 'code_store': store, 'code': str(Path(store['directory']) / 'code'),
         'manifest': {name: item['sha256'] for name, item in store['identity']['files'].items()},
+        'main_environment_binding': copy.deepcopy(project_environment(state, required=True)),
         'environment': environment, 'argv': [], 'validation_argv': frozen_argv(validation_argv, state, environment), 'token': 'baseline-' + uuid.uuid4().hex}
     current['manifest_digest'] = digest(current['manifest'])
     current['startup_inputs'] = freeze_startup_inputs(args, state, Path(current['code']), environment)
@@ -1985,6 +2003,7 @@ def prepare_verification_snapshot(state, *, commit, directory, environment_id, s
     if receipt['status'] == 'passed':
         try:
             check_code_store(store)
+            check_main_environment_binding(state, current)
             check_startup_inputs(state, current)
             if environment_identity(env_fingerprint(environment['path'], (state['project']['path'], state['worktree']['path']))) != environment_identity(environment):
                 fail('environment_changed', 'The baseline environment changed during startup validation.')
@@ -2193,6 +2212,10 @@ def prepare_run_staged(args, root, store):
             args['snapshot_scope'] = normalize_snapshot_scope(args['snapshot_scope'])
             if not args['validation_argv'] or any(not isinstance(value, str) or not value or '\x00' in value for value in args['validation_argv']):
                 fail('startup_validation_required', 'Record an executable startup validator that produces the structured origin and reference report.')
+        if not legacy:
+            if args['environment_id'] not in state['environment_registry']:
+                fail('environment_not_registered', 'Reference an explicitly registered environment.')
+            require_project_environment(state, state['environment_registry'][args['environment_id']])
         frozen_intent = {key: args.get(key) for key in ('argv', 'artifacts', 'environment_id', 'lockfiles', 'output_dir', 'dependency_declaration') + (() if legacy else SCOPED_INPUTS)}
         original_proof = (current or {}).get('preparation_intent', {}).get('integration_verification', state.get('integration', {}).get('verification'))
         frozen_intent.update(commit=state.get('integration', {}).get('commit'), design_digest=state['design']['digest'], integration_verification=copy.deepcopy(original_proof))
@@ -2290,6 +2313,7 @@ def prepare_run(args, state, root):
     env_id = args['environment_id']
     if env_id not in state['environment_registry']:
         fail('environment_not_registered', 'Reference an explicitly registered environment.')
+    require_project_environment(state, state['environment_registry'][env_id])
     environment = env_fingerprint(state['environment_registry'][env_id], (state['project']['path'], state['worktree']['path']))
     argv = frozen_argv(args['argv'], state, environment)
     validation_argv = frozen_argv(args['validation_argv'], state, environment)
@@ -2312,6 +2336,7 @@ def prepare_run(args, state, root):
         'code_store': store, 'provenance': {'commit': commit, 'objects': objects}, 'startup_inputs': startup_inputs,
         'directory': str(destination), 'code': str(code), 'manifest': code_manifest, 'manifest_digest': digest(code_manifest),
         'lockfiles': {name: code_manifest[name] for name in args['lockfiles']}, 'environment_id': env_id,
+        'main_environment_binding': copy.deepcopy(project_environment(state, required=True)),
         'environment': environment, 'argv': argv, 'validation_argv': validation_argv,
         'origin_checks': args['origin_checks'], 'fixed_references': args['fixed_references'],
         'artifacts': args['artifacts'], 'token': 'tw-' + uuid.uuid4().hex, 'created': now(),
@@ -2368,7 +2393,7 @@ def prepare_run_legacy(args, state, root):
             recovered = read_json(snapshot_path)
             if (recovered.get('run_id') != run_id or recovered.get('commit') != commit
                     or recovered.get('design_digest') != state['design']['digest']
-                    or recovered.get('argv') != args['argv'] or recovered.get('artifacts') != args['artifacts']
+                    or recovered.get('argv') != (frozen_argv(args['argv'], state, recovered['environment']) if recovered.get('main_environment_binding') else args['argv']) or recovered.get('artifacts') != args['artifacts']
                     or recovered.get('environment_id') != args['environment_id']
                     or recovered.get('directory') != str(destination)
                     or recovered.get('code') != str(destination / 'code')
@@ -2384,10 +2409,9 @@ def prepare_run_legacy(args, state, root):
     env_id = args["environment_id"]
     if env_id not in state["environment_registry"]:
         fail("environment_not_registered", "Reference an environment explicitly registered at task enrollment.")
+    require_project_environment(state, state["environment_registry"][env_id])
     environment = env_fingerprint(state["environment_registry"][env_id], (state["project"]["path"], state["worktree"]["path"]))
-    for argument in args["argv"]:
-        if any(checkout in argument for checkout in (state["project"]["path"], state["worktree"]["path"])):
-            fail("development_reference", "Experiment argv cannot reference a mutable development checkout.")
+    argv = frozen_argv(args["argv"], state, environment)
     if not args["lockfiles"]:
         fail("lockfile_required", "At least one committed dependency lockfile is required.")
     for name in args["lockfiles"] + args["artifacts"]:
@@ -2440,7 +2464,8 @@ def prepare_run_legacy(args, state, root):
                  "directory": str(destination), "code": str(code),
                  "manifest": code_manifest, "manifest_digest": digest(code_manifest),
                  "lockfiles": {name: code_manifest[name] for name in args["lockfiles"]},
-                 "environment_id": env_id, "environment": environment, "argv": args["argv"],
+                 "main_environment_binding": copy.deepcopy(project_environment(state, required=True)),
+                 "environment_id": env_id, "environment": environment, "argv": argv,
                  "artifacts": args["artifacts"], "token": "tw-" + uuid.uuid4().hex, "created": now()}
     run_state["runtime"] = pin_runtime(state)
     atomic_json(destination / "snapshot.json", run_state)
@@ -2458,6 +2483,7 @@ def environment_identity(value):
     return {key: item for key, item in value.items() if key != "logical_path"}
 
 def check_run(state, experiment):
+    check_main_environment_binding(state, experiment)
     root = Path(state["root"])
     code = Path(experiment["code"])
     if experiment.get("experiment_id"):
@@ -2848,12 +2874,69 @@ def environment_reference(value):
         fail('invalid_environment', 'Environment references must be existing absolute directories.')
 
 
+def project_environment(state, required=False):
+    path = Path(state['root']) / '.task-workflow/environment.json'
+    if not path.exists():
+        if required:
+            fail('environment_binding_required', 'Bind the existing main repository environment before new preparation.')
+        return None
+    no_symlinks(path, path.parent)
+    value = read_json(path)
+    logical = Path(value['logical_path'])
+    if not logical.is_dir() or str(logical.resolve()) != value['resolved_path']:
+        fail('environment_changed', 'The bound main environment path changed or is unavailable.')
+    return value
+
+
+def require_project_environment(state, path):
+    binding = project_environment(state, required=True)
+    if Path(path).resolve() != Path(binding['resolved_path']):
+        fail('environment_conflict', 'Use the bound main repository environment.')
+    return binding
+
+
+def check_main_environment_binding(state, current):
+    if current.get('main_environment_binding'):
+        if project_environment(state, required=True) != current['main_environment_binding']:
+            fail('environment_changed', 'The frozen main environment binding changed.')
+        require_project_environment(state, current['environment']['path'])
+
+
+def bind_environment(args, state, store):
+    require_coordinator(args, state)
+    logical = environment_reference(args['path'])
+    resolved = Path(logical).resolve()
+    forbidden = [Path(tree['path']) for tree in registered_task_trees(state)]
+    for task in (store / 'tasks').iterdir():
+        if task.is_dir() and not task.is_symlink():
+            other, _ = load_events(task)
+            forbidden += [Path(item['directory']) for item in other.get('experiments', {}).values()]
+    forbidden += [Path(state['project']['path']) / '.worktrees', Path(state['root']) / '.experiments']
+    if any(within(Path(logical), root) or within(resolved, root.resolve()) for root in forbidden):
+        fail('environment_conflict', 'The main environment cannot belong to a task worktree or experiment.')
+    existing = project_environment(state)
+    if existing:
+        if str(resolved) != existing['resolved_path']:
+            fail('environment_conflict', 'The project already binds another main environment.')
+        binding = existing
+    else:
+        audit_environment_paths(resolved, (state['project']['path'], state['worktree']['path']))
+        binding = {'binding_id': uuid.uuid4().hex, 'logical_path': logical, 'resolved_path': str(resolved),
+                   'actor': args['actor'], 'authorization_source': args['authorization_source'], 'time': now()}
+        atomic_json(store / 'environment.json', binding)
+        sync_dir(store)
+    changed = state.get('main_environment_binding') != binding
+    state['main_environment_binding'] = copy.deepcopy(binding)
+    return {'environment_binding': binding, 'already_bound': bool(existing)}, changed
+
+
 def register_environment(args, state):
     require_coordinator(args, state)
     name = identifier(args['environment_id'])
     logical = environment_reference(args['path'])
+    require_project_environment(state, logical)
     if name in state['environment_registry']:
-        if state['environment_registry'][name] != logical:
+        if Path(state['environment_registry'][name]).resolve() != Path(logical).resolve():
             fail('environment_conflict', 'This environment identifier already names another logical path; use a new identifier.')
         return {'environment_id': name, 'path': logical, 'already_registered': True}, False
     state['environment_registry'][name] = logical
@@ -2880,7 +2963,10 @@ def init(args, root, store):
     for name, value in args.get('environment_registry', {}).items():
         identifier(name)
         environments[name] = environment_reference(value)
-    with lock(Path(project['common_dir']) / 'task-workflow-integration.lock'), lock(store / 'registry.lock'):
+    with lock(Path(project['common_dir']) / 'task-workflow-integration.lock'), lock(store / 'registry.lock'), lock(store / 'catalog.lock'):
+        if project_environment({'root': str(root)}):
+            for value in environments.values():
+                require_project_environment({'root': str(root)}, value)
         binding_path = Path(project['common_dir']) / 'task-workflow-root.json'
         if binding_path.exists() and read_json(binding_path) != {'root': str(root), 'common_dir': project['common_dir']}:
             fail('project_mismatch', 'This project already has a different authoritative state root.')
@@ -3270,7 +3356,7 @@ def mutation_locks(store, args, operation):
                 stack.enter_context(lock(Path(initial['project']['common_dir']) / 'task-workflow-integration.lock'))
             if operation == 'worktree-prepare':
                 stack.enter_context(lock(store / 'registry.lock'))
-            if operation in ('resource-register', 'experiment-create', 'environment-register', 'cleanup'):
+            if operation in ('resource-register', 'experiment-create', 'environment-register', 'environment-bind', 'cleanup'):
                 stack.enter_context(lock(store / 'catalog.lock'))
             for name in sorted(ids):
                 folder = resource_dir(store, name)
@@ -3542,6 +3628,7 @@ def check_source(state, kind, args):
     allowed = Path(state['root']) / '.experiments/verification' / state['task_id'] / 'baselines'
     no_symlinks(baseline_path, allowed)
     current = read_json(baseline_path)
+    check_main_environment_binding(state, current)
     if current.get('purpose') != 'development-verification' or current.get('validation_argv') != args['argv']:
         fail('baseline_changed', 'Use the exact registered baseline validator.')
     check_code_store(current['code_store'])
@@ -3566,7 +3653,16 @@ def check_checkout_identity(state, current):
 
 def check_execution_environment(state, current):
     environment = dict(os.environ)
-    if not current.get('source_checkout'):
+    binding = current.get('main_environment_binding')
+    if binding:
+        actual = project_environment(state, required=True)
+        if actual != binding:
+            fail('environment_changed', 'The check main environment binding changed.')
+        root = Path(binding['resolved_path'])
+        audit_environment_paths(root, (state['project']['path'], state['worktree']['path']))
+        environment.update(VIRTUAL_ENV=str(root), UV_PROJECT_ENVIRONMENT=str(root),
+                           PATH=str(root / 'bin') + os.pathsep + environment.get('PATH', ''))
+    if not current.get('source_checkout') and not binding:
         return environment
     environment.pop('PYTHONPATH', None)
     environment.pop('PYTHONHOME', None)
@@ -3582,7 +3678,17 @@ def check_execution_environment(state, current):
         candidate = Path(token).expanduser()
         candidate = candidate if candidate.is_absolute() else source / candidate
         resolved = candidate.resolve()
-        if any((within(candidate.absolute(), tree) or within(resolved, tree.resolve())) and not within(resolved, source) for tree in mutable):
+        allowed = binding and any(parent.resolve() == root for parent in (candidate, *candidate.parents))
+        if allowed:
+            reject_development_origin(state, candidate, {'path': str(root), 'logical_path': binding['logical_path']})
+        if binding and not allowed:
+            # Inspect the logical executable location before resolving interpreter symlinks.
+            for parent in candidate.parents:
+                if (parent / 'pyvenv.cfg').is_file():
+                    if parent.resolve() != root:
+                        fail('environment_conflict', 'A check cannot select another virtual environment.')
+                    break
+        if current.get('source_checkout') and not allowed and any((within(candidate.absolute(), tree) or within(resolved, tree.resolve())) and not within(resolved, source) for tree in mutable):
             fail('mutable_check_source', 'A fixed integration check cannot execute or read an explicit mutable-checkout argument.')
     return environment
 
@@ -3616,7 +3722,7 @@ def cleanup_check_checkout(state, current):
 
 
 def check_contract(current):
-    return digest({**{k: current[k] for k in ('id', 'kind', 'token', 'generation', 'source_binding', 'argv', 'cwd', 'resource_id', 'requirements', 'timeout', 'runtime', 'directory')},
+    return digest({**({'main_environment_binding': current['main_environment_binding'], 'submitted_argv': current['submitted_argv']} if current.get('main_environment_binding') else {}), **{k: current[k] for k in ('id', 'kind', 'token', 'generation', 'source_binding', 'argv', 'cwd', 'resource_id', 'requirements', 'timeout', 'runtime', 'directory')},
                    'source_checkout': current.get('source_checkout'), 'frozen_inputs': current.get('frozen_inputs')})
 
 
@@ -3903,7 +4009,7 @@ def dispatch_check(operation, args, root, store):
         if existing:
             if (existing['resource_id'] != arguments.get('resource_id') or existing['requirements'] != arguments.get('requirements', {}) or existing['timeout'] != arguments.get('timeout')):
                 fail('check_intent_changed', 'Preserve the existing immutable check resource and timeout intent.')
-            if existing['argv'] != arguments['argv'] or existing['kind'] != kind or existing['selectors'] != {k: arguments[k] for k in ('item_id', 'run_id', 'baseline_path', 'source_mode', 'expected_integration_commit') if k in arguments}:
+            if existing.get('submitted_argv', existing['argv']) != arguments['argv'] or existing['kind'] != kind or existing['selectors'] != {k: arguments[k] for k in ('item_id', 'run_id', 'baseline_path', 'source_mode', 'expected_integration_commit') if k in arguments}:
                 fail('check_intent_changed', 'Preserve the existing immutable check intent.')
             return check_response(state, existing, already_dispatched=True)
         source, cwd, frozen = check_source(state, kind, arguments)
@@ -3914,7 +4020,6 @@ def dispatch_check(operation, args, root, store):
         admit_new_resource(store, state, association)
         directory = path / 'checks' / name
         no_symlinks(directory, path)
-        directory.mkdir(parents=True)
         token = uuid.uuid4().hex
         current = {'id': name, 'kind': kind, 'token': token, 'generation': generation(state), 'source_binding': source,
                    'selectors': {k: arguments[k] for k in ('item_id', 'run_id', 'baseline_path', 'source_mode', 'expected_integration_commit') if k in arguments},
@@ -3924,6 +4029,15 @@ def dispatch_check(operation, args, root, store):
         if kind == 'integration' and source.get('source_mode') == 'fixed_commit':
             current['cwd'] = str(directory / 'source')
             current['source_checkout'] = {'path': current['cwd'], 'token': token, 'commit': source['commit'], 'tree': source['tree'], 'common_dir': state['project']['common_dir']}
+        if kind in ('verification', 'integration'):
+            main_environment = project_environment(state)
+            if main_environment:
+                current['main_environment_binding'] = copy.deepcopy(main_environment)
+                check_execution_environment(state, current)
+                current['submitted_argv'] = list(current['argv'])
+                if re.fullmatch(r'python(?:[0-9]+(?:\.[0-9]+)*)?', Path(current['argv'][0]).name):
+                    current['argv'][0] = str(Path(main_environment['resolved_path']) / 'bin/python')
+        directory.mkdir(parents=True)
         if frozen:
             current['frozen_inputs'] = frozen
         current['contract_digest'] = check_contract(current)
@@ -4046,6 +4160,10 @@ def _dispatch(operation, arguments):
             result = {"run": current}
         elif operation in ("run-reconcile", "run-observe"):
             result = reconcile_execution(args, state)
+        elif operation == 'environment-bind':
+            result, changed = bind_environment(args, state, store)
+            if not changed:
+                return {'ok': True, 'state': state, 'summary': summary(state), **result}
         elif operation == 'environment-register':
             result, changed = register_environment(args, state)
             if not changed:
@@ -4181,6 +4299,7 @@ COMMANDS = {
     "schema": spec("Discover operation schemas."),
     "init": spec("Explicitly enroll an existing task worktree or a base placeholder awaiting worktree-prepare.", {"task_id": "string", "title": "string", "actor": "string", "authorization_source": "string", "project": "string"}, {"worktree": "string", "coordinator": "string", "environment_registry": "object", "owned_worktree": "boolean", "integration_required": "boolean", "session_id": "string"}),
     "worktree-prepare": mutation("Explicitly create or reuse this task's reserved development worktree; path is project/.worktrees/task-id.", {"expected_base": "string", "authorization_source": "string"}, {"branch": "string"}),
+    "environment-bind": mutation("Bind the existing main repository environment once for this project.", {"path": "string", "authorization_source": "string"}),
     "environment-register": mutation("Append an existing logical environment path to this open task without installation or fingerprinting; existing identifiers cannot be replaced.", {"environment_id": "string", "path": "string", "authorization_source": "string"}),
     "status": spec("Read authoritative task state without modifying it.", optional={"task_id": "string"}),
     "context": spec("Read the current task dialogue contract and required recording steps without modifying state.", {"task_id": "string"}),

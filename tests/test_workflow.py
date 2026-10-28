@@ -37,6 +37,7 @@ class Fixture(unittest.TestCase):
         self.state = self.enroll({'root': str(self.root), 'project': str(self.repo), 'task_id': 'task',
             'title': 'Fixture task', 'actor': 'owner', 'session_id': 'session-fixture',
             'authorization_source': 'Fixture enrollment', 'environment_registry': {'runtime': str(self.environment)}})['state']
+        self.op('environment-bind', path=str(self.environment), authorization_source='Actual fixture main environment selection')
 
     def enroll(self, arguments):
         if getattr(self, 'structured', False):

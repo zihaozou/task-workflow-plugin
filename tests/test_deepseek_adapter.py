@@ -81,7 +81,10 @@ class DeepSeekContextTests(unittest.TestCase):
         self.assert_core_context(json.loads(result.stdout)["context"], expected)
         self.assertEqual(self.snapshot(), before)
         self.assertEqual(self.core.command_schemas(), schemas)
-        self.assertEqual(len(schemas), 61)
+        schema_names = [entry['name'] for entry in schemas]
+        self.assertEqual(set(schema_names), set(self.core.COMMANDS))
+        self.assertEqual(len(schema_names), len(set(schema_names)))
+        self.assertIn('environment-bind', schema_names)
 
     def test_unbound_project_and_other_session_are_successful_null_without_enrollment(self):
         self.assertEqual(self.context(), {"ok": True, "context": None})

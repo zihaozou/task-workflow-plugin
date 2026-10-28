@@ -24,7 +24,7 @@ class EnvironmentTests(Fixture):
 
     def test_existing_empty_task_appends_path_and_audit_in_one_event_without_fingerprinting(self):
         self.assertEqual(self.state['environment_registry'], {})
-        empty = self.base / 'existing-empty-environment'; empty.mkdir()
+        empty = self.environment
         before = copy.deepcopy(self.state)
         with mock.patch.object(w, 'env_fingerprint', side_effect=AssertionError('Registration must not audit or rebuild')):
             result = self.register(path=empty)
@@ -95,14 +95,14 @@ class EnvironmentTests(Fixture):
         alias = self.base / 'logical-environment'; alias.symlink_to(self.environment, target_is_directory=True)
         self.register(path=alias)
         self.assertEqual(self.state['environment_registry']['training'], str(alias))
-        self.error('environment_conflict', lambda: self.register(path=self.environment))
+        self.assertTrue(self.register(path=self.environment)['already_registered'])
 
     def test_existing_frozen_run_environment_and_approval_are_unchanged(self):
         self.register(name='runtime')
         self.integrated()
         self.prepare()
         before = copy.deepcopy(self.state)
-        another = self.base / 'another-reference'; another.mkdir()
+        another = self.environment
         self.register(name='another', path=another)
         self.assertEqual(self.state['runs'], before['runs'])
         self.assertEqual(self.state['approval'], before['approval'])
@@ -134,7 +134,7 @@ class EnvironmentTests(Fixture):
 
     def test_schema_cli_and_mcp_use_the_actual_append_operation(self):
         schemas = {entry['name']: entry['inputSchema'] for entry in w.command_schemas()}
-        self.assertEqual(len(schemas), 61)
+        self.assertEqual(len(schemas), 62)
         self.assertEqual(set(schemas['environment-register']['required']),
             {'root', 'task_id', 'actor', 'expected_version', 'environment_id', 'path', 'authorization_source'})
         arguments = {'task_id': 'task', 'actor': 'owner', 'expected_version': self.state['version'],
@@ -166,8 +166,91 @@ class EnvironmentApprovalTests(Fixture):
     def test_registration_preserves_approved_spec_plan_and_stage(self):
         self.approved()
         before = copy.deepcopy(self.state)
-        extra = self.base / 'existing-reference'; extra.mkdir()
+        extra = self.environment
         self.op('environment-register', environment_id='extra', path=str(extra), authorization_source='Actual request to reuse an existing environment')
         for key in ('process', 'design', 'approval', 'items', 'integration', 'runs'):
             self.assertEqual(self.state[key], before[key])
         self.assertEqual(w.summary(self.state)['stage'], 'implementation')
+
+
+class MainEnvironmentTests(Fixture):
+    def test_append_once_alias_and_interrupted_event_retry(self):
+        before = copy.deepcopy(self.state)
+        alias = self.repo / '.venv'; alias.symlink_to(self.environment, target_is_directory=True)
+        result = self.op('environment-bind', path=str(alias), authorization_source='Actual same main environment')
+        self.assertTrue(result['already_bound'])
+        self.assertEqual(self.state, before)
+        other = self.base / 'other'; other.mkdir()
+        self.error('environment_conflict', lambda: self.op('environment-bind', path=str(other), authorization_source='Actual conflicting selection'))
+        # A shared record can survive a failed task event. Retry reconciles its reference.
+        state = copy.deepcopy(self.state); state.pop('main_environment_binding')
+        result, changed = w.bind_environment({'actor':'owner','path':str(alias),'authorization_source':'Actual retry'}, state, self.root / '.task-workflow')
+        self.assertTrue(changed)
+        self.assertEqual(state['main_environment_binding'], before['main_environment_binding'])
+
+    def test_stale_registry_cannot_prepare_another_environment(self):
+        other = self.base / 'other'; other.mkdir()
+        state = copy.deepcopy(self.state); state['environment_registry']['old'] = str(other)
+        self.error('environment_conflict', lambda: w.require_project_environment(state, state['environment_registry']['old']))
+        self.error('environment_conflict', lambda: self.op('environment-register', environment_id='other', path=str(other), authorization_source='Actual conflicting request'))
+
+    def test_binding_rejects_worktree_and_overlay_without_importing_them(self):
+        (self.root / '.task-workflow/environment.json').unlink()
+        task_env = self.repo / '.worktrees' / 'task' / 'env'; task_env.mkdir(parents=True)
+        self.error('environment_conflict', lambda: self.op('environment-bind', path=str(task_env), authorization_source='Actual selection'))
+        overlay = self.base / 'overlay'; package = overlay / 'lib/python3/site-packages'; package.mkdir(parents=True)
+        (package / 'reference-runtime.pth').write_text(str(self.environment / 'lib') + '\n')
+        self.error('external_import', lambda: self.op('environment-bind', path=str(overlay), authorization_source='Actual overlay selection'))
+
+    def test_main_environment_contained_pth_and_external_overlay(self):
+        main = self.repo / '.venv'; package = main / 'lib/python3/site-packages'; package.mkdir(parents=True)
+        contained = package / 'contained'; contained.mkdir()
+        pth = package / 'paths.pth'; pth.write_text(str(contained) + '\n')
+        self.assertTrue(w.audit_environment_paths(main, (str(self.repo),)))
+        pth.write_text(str(self.repo) + '\n')
+        self.error('development_import', lambda: w.audit_environment_paths(main, (str(self.repo),)))
+
+    def test_check_environment_uses_main_and_rejects_another_interpreter(self):
+        binding = self.state['main_environment_binding']
+        current = {'cwd':str(self.repo), 'argv':[str(self.environment / 'bin/python'), '-c', 'pass'], 'main_environment_binding':binding}
+        with mock.patch.dict('os.environ', {'VIRTUAL_ENV':'/different', 'PYTHONPATH':'/different'}):
+            env = w.check_execution_environment(self.state, current)
+        self.assertEqual(env['VIRTUAL_ENV'], str(self.environment))
+        self.assertEqual(env['UV_PROJECT_ENVIRONMENT'], str(self.environment))
+        self.assertNotIn('PYTHONPATH', env)
+        other = self.base / 'other'; (other / 'bin').mkdir(parents=True); (other / 'pyvenv.cfg').write_text('')
+        current['argv'] = [str(other / 'bin/python')]
+        self.error('environment_conflict', lambda: w.check_execution_environment(self.state, current))
+
+    def test_fixed_check_accepts_alias_and_init_rejects_conflicting_reference(self):
+        alias = self.repo / '.venv'; alias.symlink_to(self.environment, target_is_directory=True)
+        current = {'cwd':str(self.base / 'frozen'), 'source_checkout':{},
+                   'main_environment_binding':self.state['main_environment_binding'], 'argv':[str(alias / 'bin/python')]}
+        current['source_checkout'] = {'path':current['cwd']}
+        self.assertEqual(w.check_execution_environment(self.state, current)['VIRTUAL_ENV'], str(self.environment))
+        other = self.base / 'other'; other.mkdir()
+        self.error('environment_conflict', lambda: self.enroll({'root':str(self.root),'project':str(self.repo),
+            'task_id':'other','title':'Other task','actor':'owner','authorization_source':'Actual fixture',
+            'environment_registry':{'other':str(other)}}))
+
+    def test_retained_legacy_preparation_accepts_main_environment_alias(self):
+        self.integrated()
+        alias = self.repo / '.venv'; alias.symlink_to(self.environment, target_is_directory=True)
+        arguments = {'run_id':'retained', 'environment_id':'runtime', 'lockfiles':['uv.lock'],
+                     'argv':[str(alias / 'bin/python'), '-c', 'pass'], 'artifacts':[],
+                     'dependency_declaration':'no-external-local-dependencies'}
+        state = copy.deepcopy(self.state)
+        state['runs']['retained'] = {**w.run_association(arguments, state), 'status':'preparing',
+                                    'preparation_token':'fixture', 'preparation_intent':{'argv':arguments['argv']}}
+        recovery = copy.deepcopy(state)
+        prepared = w.prepare_run_legacy(arguments, state, self.root)['run']
+        self.assertEqual(prepared['argv'][0], str(self.environment / 'bin/python'))
+        self.assertTrue(w.prepare_run_legacy(arguments, recovery, self.root)['recovered'])
+
+    def test_retargeted_main_alias_fails(self):
+        path = self.root / '.task-workflow/environment.json'
+        binding = json.loads(path.read_text())
+        alias = self.repo / '.venv'; alias.symlink_to(self.environment, target_is_directory=True)
+        binding['logical_path'] = str(alias); w.atomic_json(path, binding)
+        other = self.base / 'other'; other.mkdir(); alias.unlink(); alias.symlink_to(other, target_is_directory=True)
+        self.error('environment_changed', lambda: w.project_environment(self.state))

@@ -1002,7 +1002,10 @@ if (CLI) test('installed owned protocol: native handles cleanup source and final
     const capability = request => [...request.messages].reverse().flatMap(message => message.source?.kind === 'runtime-context' ? message.source.sections ?? [] : []).find(section => section.name === 'task-workflow:capabilities')?.text;
     assert.ok(capability(parentRequests[0]).includes('wait_agent'));
     assert.ok(!capability(parentRequests[1]).includes('wait_agent'));
-    assert.equal(parentRequests[1].tools.filter(tool => tool.name.startsWith('mcp__task-workflow__')).length, 61);
+    const workflowTools = parentRequests[1].tools.filter(tool => tool.name.startsWith('mcp__task-workflow__'));
+    assert.equal(workflowTools.length, 62);
+    assert.ok(workflowTools.some(tool => tool.name === 'mcp__task-workflow__environment-bind'));
+    assert.equal(new Set(workflowTools.map(tool => tool.name)).size, workflowTools.length);
     const ownedSchema = parentRequests[1].tools.find(tool => tool.name === 'task_workflow_delegate');
     const nativeSchema = parentRequests[1].tools.find(tool => tool.name === 'subagent');
     assert.deepEqual(ownedSchema.parameters, nativeSchema.parameters, 'Native parameter policy is retained');
@@ -1046,7 +1049,7 @@ if (CLI) test('installed owned protocol: native handles cleanup source and final
     await sdk.close();
     observed = lines(path.join(fixture.run, 'owned.jsonl'));
     assert.ok(observed.some(item => item.kind === 'activation-end' && item.id === unrelated && item.stopReason === 'completed'));
-    writeJson(path.join(fixture.run, 'owned-result.json'), { passed: true, coreOperations: 61, cleanupBeforeCollectionBeforeFinal: true, automaticOwnedSettlementMessages: 0, nativePoliciesPreserved: true, foreignHandleRejected: true, startupAborted: true, unownedActivationPreserved: true });
+    writeJson(path.join(fixture.run, 'owned-result.json'), { passed: true, coreOperations: 62, cleanupBeforeCollectionBeforeFinal: true, automaticOwnedSettlementMessages: 0, nativePoliciesPreserved: true, foreignHandleRejected: true, startupAborted: true, unownedActivationPreserved: true });
   } finally {
     for (const marker of ['release-cleanup', 'release-unowned']) fs.writeFileSync(path.join(fixture.run, marker), 'owned test cleanup');
     if (sdk.child.exitCode === null) await sdk.close();
@@ -1121,7 +1124,11 @@ if (CLI) test('installed runtime: real archive, schemas, tools, authority, statu
     assert.equal(capability.skill.name, 'task-workflow'); assert.equal(capability.skill.hasContent, true);
     const advertised = capability.schemas.filter(item => item.name.startsWith('mcp__task-workflow__'));
     const actualSchema = bootstrap.receipts.find(item => item.kind === 'actual-tool-result' && item.op === 'schema').result.commands;
-    assert.equal(actualSchema.length, 61); assert.equal(advertised.length, actualSchema.length);
+    const expectedNames = actualSchema.map(command => command.name);
+    const advertisedNames = advertised.map(item => item.name.slice('mcp__task-workflow__'.length));
+    assert.ok(expectedNames.includes('environment-bind'));
+    assert.equal(new Set(expectedNames).size, expectedNames.length);
+    assert.deepEqual([...advertisedNames].sort(), [...expectedNames].sort());
     for (const command of actualSchema) {
       const native = advertised.find(item => item.name === 'mcp__task-workflow__' + command.name);
       assert.ok(native, command.name); assert.deepEqual(native.parameters, command.inputSchema); assert.equal(native.description, command.description);
@@ -1221,7 +1228,7 @@ if (CLI) test('installed runtime: real archive, schemas, tools, authority, statu
     requireCurrentContext(requireStage(fixture, 'STATUS').receipts, finalState.version, 'large-context');
     assert.deepEqual(treeHashes(taskDir), unchanged);
     await sdk.close();
-    const final = { result: 'passed', source: 'installed runtime with scripted LLM only', schemas: 61, stateVersion: finalState.version, taskUnchangedAfterStatus: true, actualToolCalls: status.receipts.filter(item => item.kind === 'actual-tool-result').length };
+    const final = { result: 'passed', source: 'installed runtime with scripted LLM only', schemas: 62, stateVersion: finalState.version, taskUnchangedAfterStatus: true, actualToolCalls: status.receipts.filter(item => item.kind === 'actual-tool-result').length };
     writeJson(path.join(fixture.run, 'functional-result.json'), final);
     assert.ok(lines(path.join(fixture.run, 'probe.jsonl')).some(item => item.kind === 'probe-disposed'));
   } finally { if (sdk.child.exitCode === null) await sdk.close(); }
