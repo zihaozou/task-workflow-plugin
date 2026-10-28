@@ -23,13 +23,13 @@ class EnvironmentTests(Fixture):
         return sorted((self.root / '.task-workflow/tasks/task/events').glob('*.json'))
 
     def test_existing_empty_task_appends_path_and_audit_in_one_event_without_fingerprinting(self):
-        self.assertEqual(self.state['environment_registry'], {})
+        self.assertEqual(self.state['environment_registry'], {'development':str(self.environment)})
         empty = self.environment
         before = copy.deepcopy(self.state)
         with mock.patch.object(w, 'env_fingerprint', side_effect=AssertionError('Registration must not audit or rebuild')):
             result = self.register(path=empty)
         self.assertFalse(result['already_registered'])
-        self.assertEqual(self.state['environment_registry'], {'training': str(empty)})
+        self.assertEqual(self.state['environment_registry'], {'development':str(self.environment), 'training': str(empty)})
         registration = self.state['environment_registrations']['training']
         self.assertEqual(registration['path'], str(empty))
         self.assertEqual(registration['actor'], 'owner')
@@ -39,7 +39,7 @@ class EnvironmentTests(Fixture):
         self.assertEqual(event['operation'], 'environment-register')
         paths = [patch['path'] for patch in event['patches']]
         self.assertIn(['environment_registry', 'training'], paths)
-        self.assertIn(['environment_registrations'], paths)
+        self.assertIn(['environment_registrations', 'training'], paths)
         for key in ('runs', 'design', 'approval', 'items', 'integration', 'task_lifecycle', 'decisions'):
             self.assertEqual(self.state[key], before[key])
         self.assertEqual(self.state['version'], before['version'] + 1)
@@ -98,7 +98,7 @@ class EnvironmentTests(Fixture):
         self.assertTrue(self.register(path=self.environment)['already_registered'])
 
     def test_existing_frozen_run_environment_and_approval_are_unchanged(self):
-        self.register(name='runtime')
+        self.op('environment-register', environment_id='runtime', path=str(self.runtime_environment), purpose='runtime', cache_root=str(self.cache_root), install_receipt=str(self.fixture_install_receipt()), project_distributions=[], authorization_source='Actual fixed runtime request')
         self.integrated()
         self.prepare()
         before = copy.deepcopy(self.state)
@@ -200,7 +200,8 @@ class MainEnvironmentTests(Fixture):
         self.error('environment_conflict', lambda: self.op('environment-bind', path=str(task_env), authorization_source='Actual selection'))
         overlay = self.base / 'overlay'; package = overlay / 'lib/python3/site-packages'; package.mkdir(parents=True)
         (package / 'reference-runtime.pth').write_text(str(self.environment / 'lib') + '\n')
-        self.error('external_import', lambda: self.op('environment-bind', path=str(overlay), authorization_source='Actual overlay selection'))
+        self.op('environment-bind', path=str(overlay), authorization_source='Actual development selection')
+        self.error('external_import', lambda: w.env_fingerprint(overlay))
 
     def test_main_environment_contained_pth_and_external_overlay(self):
         main = self.repo / '.venv'; package = main / 'lib/python3/site-packages'; package.mkdir(parents=True)
@@ -222,20 +223,22 @@ class MainEnvironmentTests(Fixture):
         current['argv'] = [str(other / 'bin/python')]
         self.error('environment_conflict', lambda: w.check_execution_environment(self.state, current))
 
-    def test_fixed_check_accepts_alias_and_init_rejects_conflicting_reference(self):
+    def test_fixed_check_accepts_alias_and_init_preserves_legacy_reference(self):
         alias = self.repo / '.venv'; alias.symlink_to(self.environment, target_is_directory=True)
         current = {'cwd':str(self.base / 'frozen'), 'source_checkout':{},
                    'main_environment_binding':self.state['main_environment_binding'], 'argv':[str(alias / 'bin/python')]}
         current['source_checkout'] = {'path':current['cwd']}
         self.assertEqual(w.check_execution_environment(self.state, current)['VIRTUAL_ENV'], str(self.environment))
         other = self.base / 'other'; other.mkdir()
-        self.error('environment_conflict', lambda: self.enroll({'root':str(self.root),'project':str(self.repo),
+        enrolled = self.enroll({'root':str(self.root),'project':str(self.repo),
             'task_id':'other','title':'Other task','actor':'owner','authorization_source':'Actual fixture',
-            'environment_registry':{'other':str(other)}}))
+            'environment_registry':{'other':str(other)}})['state']
+        self.assertEqual(enrolled['environment_registry'], {'other':str(other)})
+        self.error('runtime_environment_required', lambda:w.require_runtime_environment(enrolled, 'other'))
 
     def test_retained_legacy_preparation_accepts_main_environment_alias(self):
         self.integrated()
-        alias = self.repo / '.venv'; alias.symlink_to(self.environment, target_is_directory=True)
+        alias = self.base / 'runtime-alias'; alias.symlink_to(self.runtime_environment, target_is_directory=True)
         arguments = {'run_id':'retained', 'environment_id':'runtime', 'lockfiles':['uv.lock'],
                      'argv':[str(alias / 'bin/python'), '-c', 'pass'], 'artifacts':[],
                      'dependency_declaration':'no-external-local-dependencies'}
@@ -244,7 +247,7 @@ class MainEnvironmentTests(Fixture):
                                     'preparation_token':'fixture', 'preparation_intent':{'argv':arguments['argv']}}
         recovery = copy.deepcopy(state)
         prepared = w.prepare_run_legacy(arguments, state, self.root)['run']
-        self.assertEqual(prepared['argv'][0], str(self.environment / 'bin/python'))
+        self.assertEqual(prepared['argv'][0], str(self.runtime_environment / 'bin/python'))
         self.assertTrue(w.prepare_run_legacy(arguments, recovery, self.root)['recovered'])
 
     def test_retargeted_main_alias_fails(self):
@@ -254,3 +257,103 @@ class MainEnvironmentTests(Fixture):
         binding['logical_path'] = str(alias); w.atomic_json(path, binding)
         other = self.base / 'other'; other.mkdir(); alias.unlink(); alias.symlink_to(other, target_is_directory=True)
         self.error('environment_changed', lambda: w.project_environment(self.state))
+
+
+class RuntimeProvenanceTests(Fixture):
+    def install_distribution(self, environment, name='demo', version='1.0', source=None, linked=False):
+        package = next((environment / 'lib').glob('python*/site-packages'))
+        metadata = package / (name + '-' + version + '.dist-info'); metadata.mkdir(exist_ok=True)
+        (metadata / 'METADATA').write_text('Metadata-Version: 2.1\nName: ' + name + '\nVersion: ' + version + '\n')
+        (metadata / 'RECORD').write_text(name + '.py,,\n')
+        module = package / (name + '.py')
+        if linked:
+            cached = self.cache_root / (name + '.py'); cached.write_text('VALUE = 7\n')
+            module.symlink_to(cached)
+        else:
+            module.write_text('VALUE = 7\n')
+        if source is not None:
+            (metadata / 'direct_url.json').write_text(json.dumps({'url':Path(source).as_uri(), 'dir_info':{'editable':True}}))
+        return metadata, module
+
+    def matching(self):
+        main_metadata, _ = self.install_distribution(self.environment)
+        runtime_metadata, runtime_module = self.install_distribution(self.runtime_environment, linked=True)
+        return main_metadata, runtime_metadata, runtime_module
+
+    def register_runtime(self, name='derived', **fields):
+        return self.op('environment-register', environment_id=name, path=str(self.runtime_environment), purpose='runtime',
+            cache_root=str(self.cache_root), project_distributions=fields.pop('project_distributions', []),
+            install_receipt=str(self.fixture_install_receipt()), authorization_source='Explicit fixture runtime installation', **fields)
+
+    def test_development_editable_and_fixed_runtime_survive_later_main_changes(self):
+        main_metadata, runtime_metadata, _ = self.matching()
+        source = self.repo / 'src'; source.mkdir()
+        self.install_distribution(self.environment, name='spad', source=source)
+        package = next((self.environment / 'lib').glob('python*/site-packages'))
+        (package / '_editable_impl_spad.pth').write_text(str(source) + '\n')
+        w.env_fingerprint(self.environment, (str(self.repo),), allow_development=True)
+        result = self.register_runtime(project_distributions=['spad'])
+        proof = result['runtime_provenance']
+        self.assertEqual(proof['dependency_baseline'], {'demo':'1.0'})
+        self.assertEqual(proof['link_mode'], 'symlink')
+        self.integrated()
+        self.error('runtime_environment_required', lambda:self.prepare(environment_id='development'))
+        self.assertNotIn('run', self.refresh()['runs'])
+        prepared = self.prepare(environment_id='derived')['run']
+        self.assertEqual(prepared['environment']['path'], str(self.runtime_environment))
+        self.assertEqual(prepared['argv'][0], str(self.runtime_environment / 'bin/python'))
+        self.assertNotIn('main_environment_binding', prepared)
+        (main_metadata / 'METADATA').write_text('Metadata-Version: 2.1\nName: demo\nVersion: 2.0\n')
+        self.assertEqual(w.require_runtime_environment(self.state, 'derived'), proof)
+        w.check_run(self.state, prepared)
+        self.assertTrue(self.register_runtime(project_distributions=['spad'])['already_registered'])
+        (runtime_metadata / 'METADATA').write_text('Metadata-Version: 2.1\nName: demo\nVersion: 3.0\n')
+        self.error('environment_changed', lambda:w.require_runtime_environment(self.state, 'derived'))
+
+    def test_versions_and_project_exclusions_are_checked(self):
+        _, runtime_metadata, _ = self.matching()
+        (runtime_metadata / 'METADATA').write_text('Metadata-Version: 2.1\nName: demo\nVersion: 2.0\n')
+        self.error('dependency_mismatch', lambda:self.register_runtime())
+        self.error('project_distribution_required', lambda:self.register_runtime(project_distributions=['demo']))
+
+    def test_cache_copy_hardlink_and_missing_receipt_are_rejected(self):
+        _, _, module = self.matching()
+        self.error('runtime_install_required', lambda:self.op('environment-register', environment_id='adhoc',
+            path=str(self.runtime_environment), purpose='runtime', cache_root=str(self.cache_root),
+            authorization_source='Fixture missing actual installer evidence'))
+        module.unlink(); module.write_text('VALUE = 7\n')
+        self.error('cache_link_required', lambda:self.register_runtime())
+        module.unlink()
+        import os
+        os.link(self.cache_root / 'demo.py', module)
+        self.error('cache_link_required', lambda:self.register_runtime())
+
+    def test_receipt_selects_exact_runtime_and_log_content(self):
+        self.matching()
+        receipt = self.fixture_install_receipt()
+        value = json.loads(receipt.read_text()); value['argv'][value['argv'].index('--link-mode') + 1] = 'hardlink'
+        w.atomic_json(receipt, value)
+        self.error('runtime_install_required', lambda:w.runtime_install_receipt(receipt, self.runtime_environment, self.cache_root))
+        receipt = self.fixture_install_receipt()
+        value = json.loads(receipt.read_text()); Path(value['stdout_log']).write_text('Changed installation log')
+        self.error('runtime_install_required', lambda:w.runtime_install_receipt(receipt, self.runtime_environment, self.cache_root))
+
+    def test_receipt_rejects_dry_run_and_destination_overrides(self):
+        cases = [('--dry-run',), ('--dry-run=true',), ('--target', '/elsewhere'),
+                 ('--target=/elsewhere',), ('--prefix', '/elsewhere'),
+                 ('--prefix=/elsewhere',), ('--system',), ('--system=true',)]
+        for flags in cases:
+            with self.subTest(flags=flags):
+                receipt = self.fixture_install_receipt()
+                value = json.loads(receipt.read_text())
+                value['argv'].extend(flags)
+                w.atomic_json(receipt, value)
+                self.error('runtime_install_required', lambda:w.runtime_install_receipt(receipt, self.runtime_environment, self.cache_root))
+
+    def test_runtime_can_live_in_experiment_outputs(self):
+        self.matching()
+        target = self.repo / '.experiments' / 'experiment' / 'runs' / 'run' / 'runtime'
+        target.parent.mkdir(parents=True)
+        self.runtime_environment.rename(target); self.runtime_environment = target
+        result = self.register_runtime()
+        self.assertEqual(result['runtime_provenance']['environment']['path'], str(target))

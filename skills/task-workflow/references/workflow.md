@@ -718,25 +718,43 @@ The caller must require `startup.status == "passed"` before numerical verificati
 The baseline records purpose `development-verification`; it makes no integration
 or formal Run approval claim. Preserve existing baseline inputs and receipts.
 
-## Bind the main repository environment
+## Bind development and training environments
 
-All development worktrees and new formal Runs reuse one existing environment
-bound to the project's main/base repository. The authoritative binding is
-`.task-workflow/environment.json` under the existing project state root. Use
-`environment-bind` once to record the existing environment path and its actual
-authorization source. Pass the operation's standard mutation fields `path` and
-`authorization_source`; discover the current schema for all other required
-fields. The binding is project-wide, including across tasks and their worktrees.
-Resolve aliases and symlinks to the same underlying environment before reuse.
+Use the existing environment from the main/base repository for development
+worktrees, tests, and development checks. Bind it once for the project state
+root with `environment-bind`; the authoritative file is
+`.task-workflow/environment.json`. Development permits the project's legitimate
+editable installation.
 
-Do not create or register an alternate environment for a task, worktree,
-integration check, or Run. Resolve dependency conflicts through project
-compatibility discussion. Preserve existing frozen Runs, snapshots, paths, and
-environment references exactly as recorded; binding the main environment does
-not rewrite historical execution evidence. Do not infer a host-specific
-environment directory name.
+Formal training Runs use a separate fixed runtime registered with
+`environment-register`. Pass `purpose: runtime`, `project_distributions`,
+`cache_root`, and the actual `install_receipt` with the operation's standard
+mutation fields and other required fields from the live schema. The host supplies
+the existing runtime path and resolved uv cache root. Do not infer a host-specific
+environment directory. The install receipt records the actual successful
+`uv pip install` argv with `--python`, `--cache-dir`, and `--link-mode symlink`,
+zero exit status, actual stdout/stderr logs, and their SHA-256 digests.
 
-Shared package caches remain outside task cleanup.
+At registration, compare normalized third-party distribution names and versions
+against the main environment once and freeze that baseline in runtime
+provenance. Resolve compatibility in the main project's dependency declarations;
+do not silently change runtime versions. Explicitly list own-project distributions excluded from that
+comparison only after validating their distribution origin under the base
+project. This exclusion does not permit frozen imports from the editable main
+checkout: frozen project imports must resolve to the registered source snapshot.
+Require strict environment paths with no foreign `.pth` overlays, editable
+foreign projects, or alternate environment paths. Validate representative
+third-party package import files through distribution metadata and confirm they
+are actual symlinks into the supplied uv cache root; matching versions alone do
+not prove shared cache use. Reject copied or hardlinked dependency trees and
+manual cache or `.pth` workarounds.
+
+Record runtime dependency and cache provenance once. New formal Run preparation
+requires this registered runtime. Later main-environment package changes do not
+invalidate a registered or prepared runtime; execution checks its fixed identity
+and frozen provenance. Preserve historical frozen Runs, snapshots, paths,
+runtime references, and execution evidence exactly as recorded. Shared caches
+remain outside task cleanup.
 
 Record purpose, parent run, checkpoint reference when relevant, frozen snapshot,
 resource identity, execution receipt, and artifact acceptance. The program pins

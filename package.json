@@ -1,6 +1,6 @@
 {
   "name": "@local/task-workflow",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "private": true,
   "type": "module",
   "description": "Shared Task Workflow tools, skills and context for DeepSeek Harness.",

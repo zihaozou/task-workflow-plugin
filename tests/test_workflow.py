@@ -27,6 +27,9 @@ class Fixture(unittest.TestCase):
         self.root = self.repo
         self.environment = self.base / 'environment'
         subprocess.check_call([sys.executable, '-m', 'venv', '--without-pip', str(self.environment)], stdout=subprocess.DEVNULL)
+        self.runtime_environment = self.base / 'runtime-environment'
+        subprocess.check_call([sys.executable, '-m', 'venv', '--without-pip', str(self.runtime_environment)], stdout=subprocess.DEVNULL)
+        self.cache_root = self.base / 'uv-cache'; self.cache_root.mkdir()
         self.git(self.repo, 'init', '-b', 'main')
         self.git(self.repo, 'config', 'user.name', 'Test Author')
         self.git(self.repo, 'config', 'user.email', 'test@example.invalid')
@@ -36,8 +39,22 @@ class Fixture(unittest.TestCase):
         self.git(self.repo, 'commit', '-m', 'Initial fixture')
         self.state = self.enroll({'root': str(self.root), 'project': str(self.repo), 'task_id': 'task',
             'title': 'Fixture task', 'actor': 'owner', 'session_id': 'session-fixture',
-            'authorization_source': 'Fixture enrollment', 'environment_registry': {'runtime': str(self.environment)}})['state']
+            'authorization_source': 'Fixture enrollment', 'environment_registry': {'runtime': str(self.runtime_environment)}})['state']
         self.op('environment-bind', path=str(self.environment), authorization_source='Actual fixture main environment selection')
+        if 'runtime' in self.state['environment_registry']:
+            self.op('environment-register', environment_id='runtime', path=str(self.runtime_environment), purpose='runtime',
+                    cache_root=str(self.cache_root), install_receipt=str(self.fixture_install_receipt()), project_distributions=[], authorization_source='Actual fixture fixed runtime selection')
+        self.op('environment-register', environment_id='development', path=str(self.environment), authorization_source='Actual fixture development reference')
+
+    def fixture_install_receipt(self, environment=None):
+        environment = environment or self.runtime_environment
+        stdout = self.base / (environment.name + '-install.stdout'); stdout.write_text('Fixture uv install output\n')
+        stderr = self.base / (environment.name + '-install.stderr'); stderr.write_text('')
+        receipt = self.base / (environment.name + '-install.json')
+        w.atomic_json(receipt, {'argv':['uv','pip','install','--python',str(environment / 'bin/python'),
+            '--cache-dir',str(self.cache_root),'--link-mode','symlink','fixture-package'], 'returncode':0,
+            'stdout_log':str(stdout),'stdout_sha256':w.sha_file(stdout),'stderr_log':str(stderr),'stderr_sha256':w.sha_file(stderr)})
+        return receipt
 
     def enroll(self, arguments):
         if getattr(self, 'structured', False):

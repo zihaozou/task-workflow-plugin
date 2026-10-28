@@ -216,16 +216,27 @@ Tasks use the current Git project. Generated state and outputs use these paths:
 | `.worktrees/<task-id>/` | The task's fixed development worktree. |
 | `.experiments/<experiment-id>/runs/<run-id>/` | Frozen experiment code and run outputs. |
 
-## Project environment
+## Project environments
 
-All development worktrees and new formal Runs reuse the existing environment
-from the explicitly bound main/base repository. Bind that environment once for
-the project state root with `environment-bind`, passing `path` and
-`authorization_source`. The binding is stored in
-`.task-workflow/environment.json` and applies across tasks, worktrees, checks,
-and Runs. Dependency conflicts return to project compatibility discussion;
-do not create a separate environment. Existing frozen Runs keep their recorded
-environment references and paths.
+Development worktrees, tests, and development checks use the existing
+main/base repository environment, bound once in
+`.task-workflow/environment.json` with `environment-bind`. Formal training Runs
+use a separate fixed environment registered with `environment-register` as
+`purpose: runtime`, with `project_distributions`, the host-resolved `cache_root`,
+and an actual `install_receipt`. The receipt records successful `uv pip install`
+arguments using `--python`, `--cache-dir`, and `--link-mode symlink`, zero exit
+status, actual stdout/stderr logs, and their SHA-256 digests. Compare third-party
+versions with main once and preserve that
+provenance. Resolve compatibility in the main project's dependency declarations;
+do not silently change runtime versions. Validate representative package imports
+as symlinks into the shared
+uv cache. Do not use copied or hardlinked packages, foreign editable installs,
+overlays, or manual `.pth` workarounds. Frozen Run project code comes from its
+registered source snapshot. Later main dependency changes do not invalidate an
+already registered runtime. The host supplies environment and cache paths.
+
+When a workload is paused or the user retains startup control, prepare and
+verify readiness, then wait for the user's authorization to start it.
 
 An explicit experiment root can come from your existing private conventions.
 The agent passes that path as an operation argument. The program maintains its

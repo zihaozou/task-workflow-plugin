@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import uuid
+from urllib.parse import unquote, urlparse
 import weakref
 
 
@@ -1355,7 +1356,7 @@ def integrate(args, state, path, previous):
         remove_integration_scratch(state, integration)
     return {"integration": integration}, previous, True
 
-def audit_environment_paths(env, forbidden=()):
+def audit_environment_paths(env, forbidden=(), allow_development=False):
     """Audit Python path metadata without requiring a Python environment."""
     env = Path(env).resolve()
     metadata = {}
@@ -1363,6 +1364,8 @@ def audit_environment_paths(env, forbidden=()):
         for pth in sorted(package_root.glob("*.pth")):
             value = pth.read_text(errors="replace")
             metadata[str(pth.relative_to(env))] = sha_file(pth)
+            if allow_development:
+                continue
             for line in value.splitlines():
                 line = line.strip()
                 if not line or line.startswith("#"):
@@ -1384,18 +1387,18 @@ def audit_environment_paths(env, forbidden=()):
         for direct in sorted(package_root.glob("*.dist-info/direct_url.json")):
             value = read_json(direct)
             metadata[str(direct.relative_to(env))] = sha_file(direct)
-            if value.get("dir_info", {}).get("editable"):
+            if not allow_development and value.get("dir_info", {}).get("editable"):
                 fail("development_import", "Editable installed packages are prohibited for frozen experiments.")
 
     return metadata
 
 
-def env_fingerprint(path, forbidden=()):
+def env_fingerprint(path, forbidden=(), allow_development=False):
     logical = Path(path).expanduser()
     if not logical.is_absolute() or not logical.is_dir():
         fail("invalid_environment", "The registered environment path is unavailable.")
     env = logical.resolve()
-    metadata = audit_environment_paths(env, forbidden)
+    metadata = audit_environment_paths(env, forbidden, allow_development=allow_development)
     python = env / "bin" / "python"
     if not python.is_file() or not os.access(python, os.X_OK):
         fail("invalid_environment", "The registered environment must contain an executable bin/python.")
@@ -1731,7 +1734,7 @@ def frozen_argv(arguments, state, environment):
             for parent in path.parents:
                 if (parent / 'pyvenv.cfg').is_file():
                     if parent.resolve() != physical:
-                        fail('environment_conflict', 'Frozen commands must use the main repository environment.')
+                        fail('environment_conflict', 'Frozen commands must use their selected environment.')
                     break
         environment_anchor = next((parent for parent in path.parents if parent.resolve() == physical), None) if path.is_absolute() else None
         environment_argument = environment_anchor is not None and path.is_file()
@@ -1970,7 +1973,7 @@ def prepare_verification_snapshot(state, *, commit, directory, environment_id, s
     except FileExistsError:
         fail('already_exists', 'Preserve the existing baseline and receipts; use a new baseline identity.')
     commit = git(state['project']['path'], 'rev-parse', '--verify', commit + '^{commit}')
-    environment = env_fingerprint(state['environment_registry'][environment_id], (state['project']['path'], state['worktree']['path']))
+    environment = env_fingerprint(state['environment_registry'][environment_id], (state['project']['path'], state['worktree']['path']), allow_development=True)
     with selected_snapshot(state['project']['path'], commit, args['snapshot_scope']) as (files, modes, objects):
         store = immutable_code_store(base / '.snapshots', args['snapshot_scope'], files, modes)
     current = {'snapshot_contract': 3, 'purpose': 'development-verification', 'authorization_source': authorization_source,
@@ -2005,7 +2008,7 @@ def prepare_verification_snapshot(state, *, commit, directory, environment_id, s
             check_code_store(store)
             check_main_environment_binding(state, current)
             check_startup_inputs(state, current)
-            if environment_identity(env_fingerprint(environment['path'], (state['project']['path'], state['worktree']['path']))) != environment_identity(environment):
+            if environment_identity(env_fingerprint(environment['path'], (state['project']['path'], state['worktree']['path']), allow_development=True)) != environment_identity(environment):
                 fail('environment_changed', 'The baseline environment changed during startup validation.')
         except WorkflowError as failure:
             receipt.update(status='failed', error=failure.code)
@@ -2215,7 +2218,7 @@ def prepare_run_staged(args, root, store):
         if not legacy:
             if args['environment_id'] not in state['environment_registry']:
                 fail('environment_not_registered', 'Reference an explicitly registered environment.')
-            require_project_environment(state, state['environment_registry'][args['environment_id']])
+            require_runtime_environment(state, args['environment_id'])
         frozen_intent = {key: args.get(key) for key in ('argv', 'artifacts', 'environment_id', 'lockfiles', 'output_dir', 'dependency_declaration') + (() if legacy else SCOPED_INPUTS)}
         original_proof = (current or {}).get('preparation_intent', {}).get('integration_verification', state.get('integration', {}).get('verification'))
         frozen_intent.update(commit=state.get('integration', {}).get('commit'), design_digest=state['design']['digest'], integration_verification=copy.deepcopy(original_proof))
@@ -2313,7 +2316,7 @@ def prepare_run(args, state, root):
     env_id = args['environment_id']
     if env_id not in state['environment_registry']:
         fail('environment_not_registered', 'Reference an explicitly registered environment.')
-    require_project_environment(state, state['environment_registry'][env_id])
+    runtime_proof = require_runtime_environment(state, env_id)
     environment = env_fingerprint(state['environment_registry'][env_id], (state['project']['path'], state['worktree']['path']))
     argv = frozen_argv(args['argv'], state, environment)
     validation_argv = frozen_argv(args['validation_argv'], state, environment)
@@ -2336,7 +2339,7 @@ def prepare_run(args, state, root):
         'code_store': store, 'provenance': {'commit': commit, 'objects': objects}, 'startup_inputs': startup_inputs,
         'directory': str(destination), 'code': str(code), 'manifest': code_manifest, 'manifest_digest': digest(code_manifest),
         'lockfiles': {name: code_manifest[name] for name in args['lockfiles']}, 'environment_id': env_id,
-        'main_environment_binding': copy.deepcopy(project_environment(state, required=True)),
+        'runtime_environment_provenance': copy.deepcopy(runtime_proof),
         'environment': environment, 'argv': argv, 'validation_argv': validation_argv,
         'origin_checks': args['origin_checks'], 'fixed_references': args['fixed_references'],
         'artifacts': args['artifacts'], 'token': 'tw-' + uuid.uuid4().hex, 'created': now(),
@@ -2393,7 +2396,7 @@ def prepare_run_legacy(args, state, root):
             recovered = read_json(snapshot_path)
             if (recovered.get('run_id') != run_id or recovered.get('commit') != commit
                     or recovered.get('design_digest') != state['design']['digest']
-                    or recovered.get('argv') != (frozen_argv(args['argv'], state, recovered['environment']) if recovered.get('main_environment_binding') else args['argv']) or recovered.get('artifacts') != args['artifacts']
+                    or recovered.get('argv') != (frozen_argv(args['argv'], state, recovered['environment']) if recovered.get('main_environment_binding') or recovered.get('runtime_environment_provenance') else args['argv']) or recovered.get('artifacts') != args['artifacts']
                     or recovered.get('environment_id') != args['environment_id']
                     or recovered.get('directory') != str(destination)
                     or recovered.get('code') != str(destination / 'code')
@@ -2409,7 +2412,7 @@ def prepare_run_legacy(args, state, root):
     env_id = args["environment_id"]
     if env_id not in state["environment_registry"]:
         fail("environment_not_registered", "Reference an environment explicitly registered at task enrollment.")
-    require_project_environment(state, state["environment_registry"][env_id])
+    runtime_proof = require_runtime_environment(state, env_id)
     environment = env_fingerprint(state["environment_registry"][env_id], (state["project"]["path"], state["worktree"]["path"]))
     argv = frozen_argv(args["argv"], state, environment)
     if not args["lockfiles"]:
@@ -2464,7 +2467,7 @@ def prepare_run_legacy(args, state, root):
                  "directory": str(destination), "code": str(code),
                  "manifest": code_manifest, "manifest_digest": digest(code_manifest),
                  "lockfiles": {name: code_manifest[name] for name in args["lockfiles"]},
-                 "main_environment_binding": copy.deepcopy(project_environment(state, required=True)),
+                 "runtime_environment_provenance": copy.deepcopy(runtime_proof),
                  "environment_id": env_id, "environment": environment, "argv": argv,
                  "artifacts": args["artifacts"], "token": "tw-" + uuid.uuid4().hex, "created": now()}
     run_state["runtime"] = pin_runtime(state)
@@ -2484,6 +2487,8 @@ def environment_identity(value):
 
 def check_run(state, experiment):
     check_main_environment_binding(state, experiment)
+    if experiment.get('runtime_environment_provenance'):
+        check_runtime_cache_provenance(experiment['environment']['path'], experiment['runtime_environment_provenance'], state)
     root = Path(state["root"])
     code = Path(experiment["code"])
     if experiment.get("experiment_id"):
@@ -2920,7 +2925,6 @@ def bind_environment(args, state, store):
             fail('environment_conflict', 'The project already binds another main environment.')
         binding = existing
     else:
-        audit_environment_paths(resolved, (state['project']['path'], state['worktree']['path']))
         binding = {'binding_id': uuid.uuid4().hex, 'logical_path': logical, 'resolved_path': str(resolved),
                    'actor': args['actor'], 'authorization_source': args['authorization_source'], 'time': now()}
         atomic_json(store / 'environment.json', binding)
@@ -2930,19 +2934,207 @@ def bind_environment(args, state, store):
     return {'environment_binding': binding, 'already_bound': bool(existing)}, changed
 
 
+def distribution_records(path):
+    script = """import importlib.metadata,json
+result=[]
+for dist in importlib.metadata.distributions():
+    files=[item for item in (dist.files or []) if '.dist-info/' not in str(item) and '.egg-info/' not in str(item) and '..' not in item.parts and not str(item).endswith('.pth')]
+    imports=[item for item in files if str(item).endswith(('.py','.pyd','.dylib','.dll')) or '.so' in item.name]
+    selected=next(iter(sorted(imports or files,key=str)),None)
+    direct=dist.read_text('direct_url.json')
+    result.append({'name':dist.metadata.get('Name',''),'version':dist.version,'direct_url':json.loads(direct) if direct else None,'representative':str(dist.locate_file(selected).absolute()) if selected else None})
+print(json.dumps(result,sort_keys=True))"""
+    result = run([str(Path(path) / 'bin/python'), '-I', '-c', script])
+    try:
+        records = json.loads(result['stdout'])
+        if result['returncode'] or not isinstance(records, list):
+            raise ValueError()
+        return records
+    except (ValueError, TypeError):
+        fail('environment_unverifiable', 'The environment could not report distribution source and RECORD metadata.')
+
+
+def distribution_name(value):
+    if not isinstance(value, str) or not value.strip():
+        fail('invalid_environment', 'Distribution names must be nonempty strings.')
+    return re.sub(r'[-_.]+', '-', value).lower()
+
+
+def dependency_versions(records, excluded=()):
+    versions = {}
+    for record in records:
+        name = distribution_name(record['name'])
+        if name in excluded:
+            continue
+        if name in versions:
+            fail('environment_unverifiable', 'The environment contains duplicate distribution names.')
+        versions[name] = record['version']
+    return versions
+
+
+def runtime_cache_origins(environment, cache_root, records, state=None):
+    env, cache = Path(environment).resolve(), Path(cache_root).resolve()
+    origins = []
+    for record in records:
+        if not record.get('representative'):
+            fail('cache_link_required', 'Each runtime distribution needs a RECORD-backed package file in the shared cache.')
+        path = Path(record['representative'])
+        if not within(path, env) or not path.is_file() or not within(path.resolve(), cache):
+            fail('cache_link_required', 'Runtime package files must resolve into the declared shared uv cache.')
+        if state is not None:
+            reject_development_origin(state, path, {'path': str(env)})
+        relative = path.relative_to(env)
+        cursor = env
+        linked = False
+        for part in relative.parts:
+            cursor = cursor / part
+            linked = linked or cursor.is_symlink()
+        if not linked:
+            fail('cache_link_required', 'Copied or hardlinked runtime packages do not prove uv cache symlink sharing.')
+        origins.append({'distribution': distribution_name(record['name']), 'path': str(relative),
+                        'resolved_path': str(path.resolve())})
+    return sorted(origins, key=lambda value: value['distribution'])
+
+
+def validate_runtime_location(state, logical):
+    resolved = Path(logical).resolve()
+    mutable = [Path(tree['path']) for tree in registered_task_trees(state)]
+    mutable.append(Path(state['project']['path']) / '.worktrees')
+    for task in (Path(state['root']) / '.task-workflow/tasks').iterdir():
+        if task.is_dir() and not task.is_symlink():
+            other, _ = load_events(task)
+            mutable += [Path(run['code']) for run in other.get('runs', {}).values() if run.get('code')]
+    if any(within(Path(logical), root) or within(resolved, root.resolve()) for root in mutable):
+        fail('environment_conflict', 'A runtime must be outside development worktrees and frozen Run code.')
+
+
+def require_runtime_environment(state, environment_id):
+    registration = state.get('environment_registrations', {}).get(environment_id, {})
+    proof = registration.get('runtime_provenance')
+    if registration.get('purpose') != 'runtime' or not proof:
+        fail('runtime_environment_required', 'Register a fixed runtime with dependency and uv cache provenance before a formal Run.')
+    path = state['environment_registry'][environment_id]
+    if str(Path(path).resolve()) != proof['environment']['path']:
+        fail('environment_changed', 'The runtime environment reference changed.')
+    fingerprint = env_fingerprint(path, (state['project']['path'], state['worktree']['path']))
+    if environment_identity(fingerprint) != environment_identity(proof['environment']):
+        fail('environment_changed', 'The registered fixed runtime changed.')
+    check_runtime_cache_provenance(fingerprint['path'], proof, state)
+    return proof
+
+
+def check_runtime_cache_provenance(environment, proof, state):
+    audit_environment_paths(environment, (state['project']['path'], state['worktree']['path']))
+    records = distribution_records(environment)
+    if runtime_cache_origins(environment, proof['cache_root'], records, state) != proof['cache_origins']:
+        fail('environment_changed', 'The registered runtime cache links changed.')
+
+
+def runtime_install_receipt(path, environment, cache):
+    receipt_path = Path(path).expanduser()
+    if not receipt_path.is_absolute() or not receipt_path.is_file():
+        fail('runtime_install_required', 'Record the actual completed uv installation receipt.')
+    receipt = read_json(receipt_path)
+    if not isinstance(receipt, dict):
+        fail('runtime_install_required', 'The actual uv installation receipt must be an object.')
+    argv = receipt.get('argv', [])
+    if (type(receipt.get('returncode')) is not int or receipt['returncode'] != 0 or not isinstance(argv, list) or len(argv) < 3
+            or any(not isinstance(value, str) for value in argv)
+            or Path(argv[0]).name not in ('uv', 'uv.exe') or argv[1:3] != ['pip', 'install']):
+        fail('runtime_install_required', 'A runtime requires a successful actual uv pip install receipt.')
+    if any(value.partition('=')[0] in ('--dry-run', '--target', '--prefix', '--system') for value in argv[3:]):
+        fail('runtime_install_required', 'The uv receipt must install into the selected runtime without dry-run or destination overrides.')
+    def option(name):
+        values = []
+        for index, value in enumerate(argv):
+            if value == name and index + 1 < len(argv):
+                values.append(argv[index + 1])
+            elif value.startswith(name + '='):
+                values.append(value.partition('=')[2])
+        if len(values) != 1:
+            fail('runtime_install_required', 'The uv receipt must declare one actual python, cache-dir and link-mode option.')
+        return values[0]
+    python = Path(option('--python')).expanduser()
+    cache_path = Path(option('--cache-dir')).expanduser()
+    if (option('--link-mode') != 'symlink' or not python.is_absolute() or python.parent.name != 'bin'
+            or python.parent.parent.resolve() != Path(environment).resolve()
+            or not cache_path.is_absolute() or cache_path.resolve() != Path(cache).resolve()):
+        fail('runtime_install_required', 'The uv install must select this runtime, shared cache and symlink link mode.')
+    logs = {}
+    for kind in ('stdout', 'stderr'):
+        log_value = receipt.get(kind + '_log', '')
+        if not isinstance(log_value, str):
+            fail('runtime_install_required', 'Installation receipt log paths must be absolute files.')
+        log = Path(log_value)
+        if not log.is_absolute() or not log.is_file() or sha_file(log) != receipt.get(kind + '_sha256'):
+            fail('runtime_install_required', 'The actual uv installation logs must match their receipt hashes.')
+        logs[kind + '_log'] = str(log)
+        logs[kind + '_sha256'] = receipt[kind + '_sha256']
+    return {'path': str(receipt_path), 'sha256': sha_file(receipt_path), 'argv': argv, 'returncode': 0, **logs}
+
+
 def register_environment(args, state):
     require_coordinator(args, state)
     name = identifier(args['environment_id'])
     logical = environment_reference(args['path'])
-    require_project_environment(state, logical)
-    if name in state['environment_registry']:
-        if Path(state['environment_registry'][name]).resolve() != Path(logical).resolve():
-            fail('environment_conflict', 'This environment identifier already names another logical path; use a new identifier.')
-        return {'environment_id': name, 'path': logical, 'already_registered': True}, False
+    purpose = args.get('purpose', 'development')
+    if purpose not in ('development', 'runtime'):
+        fail('invalid_environment', 'Use development or runtime environment purpose.')
+    existing = state.get('environment_registrations', {}).get(name)
+    if name in state['environment_registry'] and Path(state['environment_registry'][name]).resolve() != Path(logical).resolve():
+        fail('environment_conflict', 'This environment identifier already names another directory; use a new identifier.')
+    if purpose == 'development':
+        if any(key in args for key in ('project_distributions', 'cache_root', 'install_receipt')):
+            fail('invalid_environment', 'Runtime provenance fields require runtime purpose.')
+        require_project_environment(state, logical)
+        if existing and existing.get('purpose', 'development') != purpose:
+            fail('environment_conflict', 'An existing runtime registration cannot change purpose.')
+        if name in state['environment_registry']:
+            return {'environment_id': name, 'path': logical, 'already_registered': True}, False
+        proof = None
+    else:
+        excluded = sorted({distribution_name(value) for value in args.get('project_distributions', [])})
+        if 'install_receipt' not in args:
+            fail('runtime_install_required', 'New runtimes require the actual completed uv installation receipt.')
+        if 'cache_root' not in args:
+            fail('cache_link_required', 'Runtime registration requires the actual shared uv cache root.')
+        cache = environment_reference(args['cache_root'])
+        installation = runtime_install_receipt(args['install_receipt'], logical, cache)
+        if existing:
+            old = existing.get('runtime_provenance', {})
+            if existing.get('purpose') != purpose or old.get('project_distributions') != excluded or Path(cache).resolve() != Path(old.get('cache_root', '/')) or installation != old.get('installation'):
+                fail('environment_conflict', 'Preserve the existing runtime provenance; use a new identifier.')
+            require_runtime_environment(state, name)
+            return {'environment_id': name, 'path': logical, 'already_registered': True, 'runtime_provenance': old}, False
+        binding = project_environment(state, required=True)
+        if Path(logical).resolve() == Path(binding['resolved_path']):
+            fail('environment_conflict', 'Formal Runs require a separate fixed runtime environment.')
+        validate_runtime_location(state, logical)
+        fingerprint = env_fingerprint(logical, (state['project']['path'], state['worktree']['path']))
+        main_records = distribution_records(binding['resolved_path'])
+        by_name = {distribution_name(value['name']): value for value in main_records}
+        for name_to_exclude in excluded:
+            direct = by_name.get(name_to_exclude, {}).get('direct_url') or {}
+            source = urlparse(direct.get('url', ''))
+            if source.scheme != 'file' or source.netloc not in ('', 'localhost') or not Path(unquote(source.path)).exists() or not within(Path(unquote(source.path)).resolve(), Path(state['project']['path']).resolve()):
+                fail('project_distribution_required', 'Excluded distributions must have recorded source inside the base project.')
+        runtime_records = distribution_records(fingerprint['path'])
+        if any(distribution_name(value['name']) in excluded for value in runtime_records):
+            fail('development_import', 'Project distributions must load from frozen Run code, not the runtime environment.')
+        baseline = dependency_versions(main_records, excluded)
+        if dependency_versions(runtime_records) != baseline:
+            fail('dependency_mismatch', 'Runtime third-party dependency versions must exactly match the recorded main baseline.')
+        proof = {'main_binding': copy.deepcopy(binding), 'project_distributions': excluded,
+                 'dependency_baseline': baseline, 'environment': fingerprint, 'installation': installation,
+                 'cache_root': str(Path(cache).resolve()), 'link_mode': 'symlink',
+                 'cache_origins': runtime_cache_origins(fingerprint['path'], cache, runtime_records, state)}
     state['environment_registry'][name] = logical
-    state.setdefault('environment_registrations', {})[name] = {
-        'path': logical, 'actor': args['actor'], 'authorization_source': args['authorization_source'], 'time': now()}
-    return {'environment_id': name, 'path': logical, 'already_registered': False}, True
+    registration = {'path': logical, 'purpose': purpose, 'actor': args['actor'],
+                    'authorization_source': args['authorization_source'], 'time': now()}
+    if proof:
+        registration['runtime_provenance'] = proof
+    state.setdefault('environment_registrations', {})[name] = registration
+    return {'environment_id': name, 'path': logical, 'already_registered': False, **({'runtime_provenance': proof} if proof else {})}, True
 
 
 def init(args, root, store):
@@ -2964,9 +3156,6 @@ def init(args, root, store):
         identifier(name)
         environments[name] = environment_reference(value)
     with lock(Path(project['common_dir']) / 'task-workflow-integration.lock'), lock(store / 'registry.lock'), lock(store / 'catalog.lock'):
-        if project_environment({'root': str(root)}):
-            for value in environments.values():
-                require_project_environment({'root': str(root)}, value)
         binding_path = Path(project['common_dir']) / 'task-workflow-root.json'
         if binding_path.exists() and read_json(binding_path) != {'root': str(root), 'common_dir': project['common_dir']}:
             fail('project_mismatch', 'This project already has a different authoritative state root.')
@@ -3659,7 +3848,6 @@ def check_execution_environment(state, current):
         if actual != binding:
             fail('environment_changed', 'The check main environment binding changed.')
         root = Path(binding['resolved_path'])
-        audit_environment_paths(root, (state['project']['path'], state['worktree']['path']))
         environment.update(VIRTUAL_ENV=str(root), UV_PROJECT_ENVIRONMENT=str(root),
                            PATH=str(root / 'bin') + os.pathsep + environment.get('PATH', ''))
     if not current.get('source_checkout') and not binding:
@@ -4299,8 +4487,8 @@ COMMANDS = {
     "schema": spec("Discover operation schemas."),
     "init": spec("Explicitly enroll an existing task worktree or a base placeholder awaiting worktree-prepare.", {"task_id": "string", "title": "string", "actor": "string", "authorization_source": "string", "project": "string"}, {"worktree": "string", "coordinator": "string", "environment_registry": "object", "owned_worktree": "boolean", "integration_required": "boolean", "session_id": "string"}),
     "worktree-prepare": mutation("Explicitly create or reuse this task's reserved development worktree; path is project/.worktrees/task-id.", {"expected_base": "string", "authorization_source": "string"}, {"branch": "string"}),
-    "environment-bind": mutation("Bind the existing main repository environment once for this project.", {"path": "string", "authorization_source": "string"}),
-    "environment-register": mutation("Append an existing logical environment path to this open task without installation or fingerprinting; existing identifiers cannot be replaced.", {"environment_id": "string", "path": "string", "authorization_source": "string"}),
+    "environment-bind": mutation("Bind the existing main development environment once for this project.", {"path": "string", "authorization_source": "string"}),
+    "environment-register": mutation("Register the development main or a fixed runtime with matching dependency and cache provenance.", {"environment_id": "string", "path": "string", "authorization_source": "string"}, {"purpose": "string", "project_distributions": "array", "cache_root": "string", "install_receipt": "string"}),
     "status": spec("Read authoritative task state without modifying it.", optional={"task_id": "string"}),
     "context": spec("Read the current task dialogue contract and required recording steps without modifying state.", {"task_id": "string"}),
     "list": spec("List task summaries without modifying state."),

@@ -96,7 +96,7 @@ class ScopedSnapshotTests(LegacyFixture):
         self.op('run-cancel', run_id='run', reason='Complete legacy baseline preparation fixture')
         self.op('lifecycle-upgrade', authorization_source='Explicit fixture lifecycle transition')
         result = w.prepare_verification_snapshot(self.state, commit=self.git(self.repo, 'rev-parse','HEAD'),
-            directory=self.root / '.experiments/verification/task/baselines/check', environment_id='runtime',
+            directory=self.root / '.experiments/verification/task/baselines/check', environment_id='development',
             authorization_source='Fixture project baseline request', **args)
         self.assertEqual(result['startup']['status'], 'passed')
         self.assertEqual(result['baseline']['code_store'], current['code_store'])
@@ -109,12 +109,12 @@ class ScopedSnapshotTests(LegacyFixture):
 
     def test_uv_environment_origins_and_mutable_code_redirection(self):
         self.integrated()
-        package_root = next((self.environment / 'lib').glob('python*/site-packages'))
-        cache = self.base / 'uv-cache'; cache.mkdir(); (cache / 'module.py').write_text('VALUE=7\n')
+        package_root = next((self.runtime_environment / 'lib').glob('python*/site-packages'))
+        cache = self.cache_root; (cache / 'module.py').write_text('VALUE=7\n')
         (package_root / 'module.py').symlink_to(cache / 'module.py')
-        logical = self.repo / '.venv'; logical.symlink_to(self.environment, target_is_directory=True)
-        self.op('environment-register', environment_id='uv', path=str(logical), authorization_source='Existing uv environment')
-        relative = str((package_root / 'module.py').relative_to(self.environment))
+        logical = self.repo / '.venv'; logical.symlink_to(self.runtime_environment, target_is_directory=True)
+        self.op('environment-register', environment_id='uv', path=str(logical), purpose='runtime', cache_root=str(self.cache_root), install_receipt=str(self.fixture_install_receipt()), project_distributions=[], authorization_source='Existing uv runtime environment')
+        relative = str((package_root / 'module.py').relative_to(self.runtime_environment))
         current = self.prepare(environment_id='uv', origin_checks=[{'id':'package', 'reference':'environment','path':relative},
             {'id':'interpreter','reference':'environment','path':'bin/python'}], validation_argv=[str(logical / 'bin/python'), '-c',
                 'import module,sys,json,os; from pathlib import Path; assert module.VALUE == 7; '

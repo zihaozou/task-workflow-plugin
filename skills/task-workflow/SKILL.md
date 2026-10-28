@@ -373,14 +373,31 @@ Selecting a closed task preserves its closure. Recovery preserves the selected
 task. Use `status` with the known project and task context to inspect the
 persisted record before continuing authorized work.
 
-All development worktrees and new formal Runs reuse the existing environment
-from the explicitly bound main/base repository. Bind that existing environment
-once for the project state root with `environment-bind`, using the standard
-mutation fields `path` and `authorization_source`. The binding lives in
-`.task-workflow/environment.json`; worktrees and Runs must resolve to that same
-environment. Do not create or select a separate worktree or Run environment.
-Resolve dependency conflicts through project compatibility discussion. Existing
-frozen Runs retain their historical environment references and inputs.
+Use the explicitly bound main/base repository environment for development
+worktrees, tests, and development checks. Bind this existing environment once
+for the project state root with `environment-bind`. The binding lives in
+`.task-workflow/environment.json`. Its legitimate editable installation of the
+project source is valid for development.
+
+Register a separate fixed environment for formal training Runs with
+`environment-register`, `purpose: runtime`, the explicit `project_distributions`
+list, the host-resolved `cache_root`, and the actual `install_receipt`. The receipt
+records the successful `uv pip install` command using `--python`, `--cache-dir`,
+and `--link-mode symlink`, its zero exit status, and actual stdout/stderr logs
+with their SHA-256 digests. Compare third-party distribution names
+and versions with the main environment at registration, then freeze that
+provenance. Resolve compatibility in the main project's dependency declarations;
+do not silently change runtime versions. Validate representative package import
+files as actual symlinks into
+the shared uv cache. Reject copied or hardlinked packages, foreign editable
+installs, overlays, foreign environment paths, and manual `.pth` overlays. Only
+exclude the named project distributions after verifying their origin under the
+base project; frozen Run imports must resolve project code from the registered
+snapshot, not the mutable main checkout. Later changes to main dependencies do
+not invalidate already registered or prepared runtime provenance. The host
+supplies resolved environment and cache paths; do not infer a `.venv` path or
+create copy-based cache workarounds. Preserve historical frozen Runs and their
+recorded environment references.
 
 ## Integration, resources, and experiments
 
@@ -434,7 +451,10 @@ successful receipt, startup success, or acceptance.
 Each new formal Run follows accepted item and overall review, one ordinary
 squash integration, successful verification of that integrated revision,
 independent frozen inputs, successful startup validation, reference checks, and
-safe cleanup of the owned worktree before guarded dispatch. The cleanup receipt
+safe cleanup of the owned worktree before guarded dispatch. When the user has
+paused a workload or retained startup control, prepare and verify the environment
+and report readiness; do not dispatch training until the user authorizes its
+start. The cleanup receipt
 binds the generation, integration proof, Run startup proofs, and removal. A
 later approved revision recreates the fixed worktree from current main as a new
 generation; preserve earlier Runs and evidence.
