@@ -45,7 +45,9 @@ def execute(root, task_id, run_id, token, timeout=None):
         w.sync_dir(directory)
         environment = w.startup_environment(current)
         argv = list(current['argv'])
-        if argv[0] in ('python', 'python3'):
+        if current['environment'].get('kind') == 'toolchain':
+            argv = w.toolchain_argv(argv, current['environment'])
+        elif argv[0] in ('python', 'python3'):
             argv[0] = str(Path(current['environment']['path']) / 'bin/python')
         contract = w.execution_argv_digest(current)
         # Both files use exclusive creation. A claimed probe is never replayed.

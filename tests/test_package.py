@@ -25,7 +25,7 @@ NATIVE_RELEASE_FILES = {
     'assets/icon.svg', 'assets/icon.png',
     'skills/task-workflow/references/deepseek.md',
 } | {'skills/task-workflow/scripts/' + name for name in (
-    'workflow.py', 'runner.py', 'mcp_server.py', 'session_hook.py',
+    'bootstrap.py', 'workflow.py', 'runner.py', 'mcp_server.py', 'session_hook.py',
     'communication_prompt_hook.py', 'deepseek_context.py',
 )} | {'skills/task-workflow/templates/' + name for name in (
     'README.md', 'phases.md', 'conversation.md', 'record.md',
@@ -41,7 +41,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.18')
+        self.assertEqual(manifest['version'], '0.1.19')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -85,7 +85,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(packages), 1)
         package = packages[0]
         self.assertEqual(package['name'], '@local/task-workflow')
-        self.assertEqual(package['version'], '0.1.18')
+        self.assertEqual(package['version'], '0.1.19')
         paths = [entry['path'] for entry in package['files']]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(set(paths), NATIVE_RELEASE_FILES)
@@ -111,6 +111,24 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(plugin['category'], 'Productivity')
         self.assertEqual(plugin['policy'], {'installation': 'AVAILABLE', 'authentication': 'ON_INSTALL'})
 
+    @unittest.skipUnless(shutil.which('npm'), 'npm is needed for release archive verification')
+    def test_generated_runtime_and_lock_are_excluded_from_native_archive(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            staged = Path(temporary)
+            for relative in NATIVE_RELEASE_FILES:
+                destination = staged / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(ROOT / relative, destination)
+            runtime = staged / 'skills/task-workflow/.venv'
+            runtime.mkdir()
+            (runtime / 'unshipped.py').write_text('generated runtime data')
+            (runtime.parent / '.runtime-bootstrap.lock').touch()
+            result = subprocess.run(['npm', 'pack', '--dry-run', '--json'], cwd=staged,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            paths = {entry['path'] for entry in json.loads(result.stdout)[0]['files']}
+            self.assertEqual(paths, NATIVE_RELEASE_FILES)
+
     def test_mcp_manifest_points_to_shipped_python_entrypoint(self):
         portable = json.loads((ROOT / 'mcp.json').read_text())
         compatibility = json.loads((ROOT / '.mcp.json').read_text())
@@ -122,8 +140,8 @@ class PackageTests(unittest.TestCase):
             self.assertEqual(server['type'], 'stdio')
             self.assertEqual(server['command'], 'python3')
             self.assertEqual(server['cwd'], '.')
-            self.assertEqual(server['args'], ['skills/task-workflow/scripts/mcp_server.py'])
-            self.assertTrue((ROOT / server['cwd'] / server['args'][0]).is_file())
+            self.assertEqual(server['args'], ['-I', 'skills/task-workflow/scripts/bootstrap.py', '--', 'skills/task-workflow/scripts/mcp_server.py'])
+            self.assertTrue((ROOT / server['cwd'] / server['args'][1]).is_file())
 
     def test_declared_relative_mcp_command_starts_from_plugin_path_with_spaces(self):
         server = json.loads((ROOT / '.mcp.json').read_text())['mcpServers']['task-workflow']
@@ -227,7 +245,8 @@ class PackageTests(unittest.TestCase):
             self.assertTrue((SCRIPTS / name).is_file(), name)
         self.assertFalse((SCRIPTS / 'status_view.py').exists())
         self.assertFalse((ROOT / 'skills/task-workflow/assets/workflow.html').exists())
-        for path in ROOT.rglob('*.py'):
+        for relative in sorted(set(subprocess.check_output(['git', 'ls-files', '--', '*.py'], cwd=ROOT, text=True).splitlines()) | {name for name in NATIVE_RELEASE_FILES if name.endswith('.py')}):
+            path = ROOT / relative
             compile(path.read_text(), str(path), 'exec')
 
     def test_shipped_guidance_uses_persisted_status_and_session_recovery(self):
@@ -248,11 +267,11 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='plugin path with spaces ') as temporary:
             target = Path(temporary) / 'skills/task-workflow/scripts'
             target.mkdir(parents=True)
-            for name in ('communication_prompt_hook.py', 'session_hook.py', 'workflow.py'):
+            for name in ('bootstrap.py', 'communication_prompt_hook.py', 'session_hook.py', 'workflow.py'):
                 (target / name).write_bytes((SCRIPTS / name).read_bytes())
             for event, entries in hooks.items():
                 command = entries[0]['hooks'][0]['command'].replace('${PLUGIN_ROOT}', temporary)
-                self.assertEqual(len(shlex.split(command)), 2)
+                self.assertEqual(len(shlex.split(command)), 5)
                 result = subprocess.run(command, shell=True, text=True, input=json.dumps({
                     'hook_event_name': event, 'source': 'startup', 'session_id': 'session-1',
                     'cwd': temporary, 'prompt': 'Check terminology'}),
@@ -333,10 +352,10 @@ class NativeHookDiscoveryTests(unittest.TestCase):
                     self.assertEqual(native_mcp.returncode, 0, native_mcp.stderr)
                     transport = json.loads(native_mcp.stdout)['transport']
                     self.assertEqual(transport['command'], 'python3')
-                    self.assertEqual(transport['args'], ['skills/task-workflow/scripts/mcp_server.py'])
+                    self.assertEqual(transport['args'], ['-I', 'skills/task-workflow/scripts/bootstrap.py', '--', 'skills/task-workflow/scripts/mcp_server.py'])
                     installed_root = Path(transport['cwd'])
                     self.assertTrue(installed_root.is_relative_to(home))
-                    self.assertTrue((installed_root / transport['args'][0]).is_file())
+                    self.assertTrue((installed_root / transport['args'][1]).is_file())
                     self.assertNotIn('${PLUGIN_ROOT}', json.dumps(transport))
                     send({'id': 2, 'method': 'hooks/list', 'params': {'cwds': [str(staged)]}})
                     result = response(2)

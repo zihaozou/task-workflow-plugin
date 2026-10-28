@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
 import {
-  quoteShellArgument, runProcessSync, readContextSync, resolvedHookConfig,
+  quoteShellArgument, runProcessSync, readContextSync, resolvedHookConfig, pluginRuntimePython,
   ownedLifetime, mountChild, releaseRoot, UNAVAILABLE_NOTICE, hookTransportShell, HOOK_TRUNCATED_NOTICE,
   hookOwnership, capabilityContext,
   WORKFLOW_SCOPE,
@@ -95,6 +95,21 @@ test('transport: lossy official hook output is sanitized without changing native
   assert.equal(result.stderr, original.stderr);
   assert.equal(original.stdout.text, 'RAW_PARTIAL_JSON_TAIL');
   assert.equal(handle.kill(), 'native-kill');
+});
+
+test('runtime: native adapter resolves its installed plugin interpreter', () => {
+  const directory = temporary();
+  try {
+    const scripts = path.join(directory, 'skills/task-workflow/scripts');
+    fs.mkdirSync(scripts, { recursive: true });
+    fs.copyFileSync(path.join(ROOT, 'skills/task-workflow/scripts/bootstrap.py'), path.join(scripts, 'bootstrap.py'));
+    const python = pluginRuntimePython(directory, cleanEnvironment({ VIRTUAL_ENV: '/foreign/project/.venv' }));
+    assert.equal(python, path.join(fs.realpathSync(directory), 'skills/task-workflow/.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python'));
+    const proof = runProcessSync(python, ['-I', '-c', 'import json,sys; print(json.dumps({"prefix":sys.prefix,"executable":sys.executable}))']);
+    assert.equal(proof.status, 0);
+    assert.equal(JSON.parse(proof.stdout).prefix, path.dirname(path.dirname(python)));
+    assert.throws(() => pluginRuntimePython(directory, {}, () => ({ status: 0, stdout: '/foreign/python', stderr: '' })));
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });
 
 test('configuration: exact two-hook configuration quotes hostile paths literally', () => {
@@ -1319,7 +1334,12 @@ async function faultCase(fixture, mode, t) {
   const directory = path.join(fixture.run, mode); fs.mkdirSync(directory);
   const temporaryRoot = path.join(directory, 'temporary'); fs.mkdirSync(temporaryRoot);
   const copy = path.join(fixture.profile, 'node_modules/@local', 'fault-copy-' + mode);
-  fs.cpSync(fs.realpathSync(fixture.installed), copy, { recursive: true });
+  const original = fs.realpathSync(fixture.installed);
+  // A fault fixture is a fresh installation; its source runtime remains owned there.
+  pluginRuntimePython(original, cleanEnvironment({}));
+  const runtime = path.join(original, 'skills/task-workflow/.venv');
+  const lock = path.join(original, 'skills/task-workflow/.runtime-bootstrap.lock');
+  fs.cpSync(original, copy, { recursive: true, filter: source => source !== runtime && !source.startsWith(runtime + path.sep) && source !== lock });
   const baseline = treeHashes(copy);
   if (mode === 'invalid-config') fs.writeFileSync(path.join(copy, 'hooks/hooks.json'), '{}');
   if (mode === 'failed-mcp') fs.writeFileSync(path.join(copy, 'skills/task-workflow/scripts/mcp_server.py'), 'raise RuntimeError("Synthetic startup failure")\n');

@@ -5,6 +5,8 @@ from pathlib import Path
 import re
 import sys
 
+sys.dont_write_bytecode = True
+
 import workflow
 
 SAFE_ID = re.compile(r'[A-Za-z0-9_-]+\Z')

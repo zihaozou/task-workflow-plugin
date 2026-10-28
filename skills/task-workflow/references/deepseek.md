@@ -422,3 +422,7 @@ their README and compiled implementation:
 and [shared protocol rc.3](https://registry.npmjs.org/@deepseek-ai/dsh-hook-protocol/0.2.1-rc.3).
 Check shipped implementation when a README disagrees with observed behavior;
 preserve the evidence and version.
+
+## Interpreter ownership
+
+Native activation calls the installed bootstrap with isolated host Python, then uses the verified `skills/task-workflow/.venv` interpreter for context, hooks, and MCP. Activation fails if runtime ownership or interpreter verification fails. This change preserves the existing hook, delegation, recovery, and teardown contracts. See [plugin runtime ownership](workflow.md#plugin-runtime-and-project-toolchains).

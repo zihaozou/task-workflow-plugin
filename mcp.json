@@ -5,6 +5,9 @@
       "type": "stdio",
       "command": "python3",
       "args": [
+        "-I",
+        "skills/task-workflow/scripts/bootstrap.py",
+        "--",
         "skills/task-workflow/scripts/mcp_server.py"
       ],
       "cwd": "."

@@ -66,7 +66,7 @@ export function resolvedHookConfig(root, python, platform = process.platform) {
   const original = JSON.parse(fs.readFileSync(path.join(root, 'hooks/hooks.json'), 'utf8'));
   const hooks = {};
   for (const [event, script] of Object.entries({ SessionStart: 'session_hook.py', UserPromptSubmit: 'communication_prompt_hook.py' })) {
-    const expected = `python3 "\${PLUGIN_ROOT}/skills/task-workflow/scripts/${script}"`;
+    const expected = `python3 -I "\${PLUGIN_ROOT}/skills/task-workflow/scripts/bootstrap.py" -- "\${PLUGIN_ROOT}/skills/task-workflow/scripts/${script}"`;
     if (!Array.isArray(original.hooks?.[event]) || original.hooks[event].length === 0) throw new Error('Missing workflow hook registration.');
     hooks[event] = original.hooks[event].map(group => ({ ...group, hooks: group.hooks.map(handler => {
       if (handler.type !== 'command' || handler.async === true || handler.command !== expected) throw new Error('Unsupported workflow hook registration.');
@@ -263,6 +263,15 @@ export async function mountChild(ctx, lifetime, plugin, config) {
   return child;
 }
 
+/** Bootstrap only from the installed package; project working directories are irrelevant. */
+export function pluginRuntimePython(root, environment, run = runProcessSync) {
+  const discovered = run('python3', ['-I', path.join(root, 'skills/task-workflow/scripts/bootstrap.py'), '--print-python'], { env: environment });
+  const python = discovered.stdout.trim();
+  const expected = path.join(fs.realpathSync(root), 'skills/task-workflow/.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+  if (discovered.error || discovered.status !== 0 || python !== expected) throw new Error('Task Workflow could not verify its plugin-owned Python runtime: ' + discovered.stderr);
+  return python;
+}
+
 export async function apply(ctx) {
   // Production dependencies resolve only during native activation. Built-in-only
   // imports keep transport/ownership tests runnable without source node_modules.
@@ -274,9 +283,7 @@ export async function apply(ctx) {
   ]);
   const environment = subprocess.scrubbedParentEnv;
   if (typeof environment !== 'function') throw new Error('The native credential scrubber is unavailable.');
-  const discovered = runProcessSync('python3', ['-c', 'import sys; print(sys.executable)'], { env: environment() });
-  const python = discovered.stdout.trim();
-  if (discovered.error || discovered.status !== 0 || !path.isAbsolute(python)) throw new Error('Task Workflow requires an available Python interpreter.');
+  const python = pluginRuntimePython(releaseRoot, environment());
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'task-workflow-hooks-'));
   const configPath = path.join(directory, 'hooks.json');
   const lifetime = ownedLifetime(() => fs.rmSync(directory, { recursive: true, force: true }));

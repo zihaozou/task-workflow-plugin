@@ -1,6 +1,6 @@
 {
   "name": "@local/task-workflow",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "private": true,
   "type": "module",
   "description": "Shared Task Workflow tools, skills and context for DeepSeek Harness.",
@@ -11,7 +11,10 @@
     "adapters/deepseek",
     "hooks/hooks.json",
     "skills/task-workflow",
-    "assets"
+    "assets",
+    "!skills/task-workflow/.venv",
+    "!skills/task-workflow/.runtime-bootstrap.lock",
+    "!skills/task-workflow/.runtime-build-*"
   ],
   "dsh": {
     "bundle": {

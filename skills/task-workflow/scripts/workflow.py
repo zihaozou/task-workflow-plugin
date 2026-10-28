@@ -1393,7 +1393,101 @@ def audit_environment_paths(env, forbidden=(), allow_development=False):
     return metadata
 
 
-def env_fingerprint(path, forbidden=(), allow_development=False):
+def stable_runtime_python():
+    """Use the host base interpreter so retained runners survive plugin pruning."""
+    candidate = str(Path(getattr(sys, '_base_executable', sys.executable)).resolve())
+    result = run([candidate, '-I', '-S', '-c', 'import json,sys; print(json.dumps({"executable":sys.executable,"prefix":sys.prefix,"base_prefix":sys.base_prefix}))'])
+    try:
+        report = json.loads(result['stdout'])
+        executable = Path(report['executable']).resolve()
+        if result['returncode'] or report['prefix'] != report['base_prefix'] or not executable.is_file():
+            raise ValueError()
+        return str(executable)
+    except (ValueError, KeyError, TypeError):
+        fail('runtime_unavailable', 'A stable host base Python interpreter is required for retained workflow runners.')
+
+
+def tool_specs(tools):
+    if not isinstance(tools, list) or not tools:
+        fail('invalid_environment', 'A toolchain requires actual named executable version commands.')
+    result, names = [], set()
+    for tool in tools:
+        if not isinstance(tool, dict) or not isinstance(tool.get('name'), str):
+            fail('invalid_environment', 'Each tool requires a name and version argv.')
+        name, argv = identifier(tool['name']), tool.get('argv')
+        if name in names or not isinstance(argv, list) or not argv or any(not isinstance(value, str) or not value or '\x00' in value for value in argv):
+            fail('invalid_environment', 'Tool names must be unique and version argv must contain nonempty strings.')
+        executable = Path(argv[0]).expanduser()
+        if not executable.is_absolute() or not executable.is_file() or not os.access(executable, os.X_OK):
+            fail('invalid_environment', 'Tool version commands require existing absolute executable paths.')
+        names.add(name)
+        result.append({'name': name, 'argv': [str(executable), *argv[1:]]})
+    return sorted(result, key=lambda item: item['name'])
+
+
+def toolchain_fingerprint(path, tools, forbidden=(), cwd=None):
+    logical = Path(environment_reference(path))
+    identities = []
+    for tool in tool_specs(tools):
+        executable = Path(tool['argv'][0])
+        if any(within(executable, Path(root)) or within(executable.resolve(), Path(root).resolve()) for root in forbidden):
+            fail('development_reference', 'Toolchain executables cannot come from mutable project checkouts.')
+        if any(str(root) in argument for argument in tool['argv'][1:] for root in forbidden):
+            fail('development_reference', 'Tool version probes cannot execute mutable project source.')
+        result = run(tool['argv'], cwd=cwd)
+        if result['returncode']:
+            fail('environment_unverifiable', 'An actual toolchain version command failed.')
+        identities.append({**tool, 'resolved_executable': str(executable.resolve()),
+                           'executable_sha256': sha_file(executable),
+                           'version_stdout': result['stdout'], 'version_stderr': result['stderr']})
+    return {'kind': 'toolchain', 'path': str(logical.resolve()), 'logical_path': str(logical), 'tools': identities}
+
+
+def registered_env_fingerprint(state, environment_id, allow_development=False):
+    registration = state.get('environment_registrations', {}).get(environment_id, {})
+    frozen = registration.get('runtime_provenance', {}).get('environment')
+    binding = None if frozen or registration.get('kind') else project_environment(state)
+    kind = registration.get('kind', (frozen or binding or {}).get('kind', 'python'))
+    tools = registration.get('tools', (frozen or binding or {}).get('tools'))
+    return env_fingerprint(state['environment_registry'][environment_id], (state['project']['path'], state['worktree']['path']),
+                           allow_development=allow_development, kind=kind, tools=tools, cwd=state['project']['path'])
+
+
+def refingerprint(environment, state, allow_development=False):
+    return env_fingerprint(environment['path'], (state['project']['path'], state['worktree']['path']),
+                           allow_development=allow_development, kind=environment.get('kind', 'python'),
+                           tools=environment.get('tools'), cwd=state['project']['path'])
+
+
+def toolchain_argv(arguments, environment):
+    result = list(arguments)
+    matches = [tool for tool in environment['tools'] if result[0] in (tool['name'], tool['argv'][0])]
+    if not matches and Path(result[0]).is_absolute():
+        matches = [tool for tool in environment['tools'] if Path(result[0]).resolve() == Path(tool['resolved_executable'])]
+    if len(matches) != 1:
+        fail('unregistered_tool', 'Native execution must use an unambiguous explicitly registered tool executable.')
+    # Preserve argv[0] semantics of rustup and other multicall executable aliases.
+    result[0] = matches[0]['argv'][0]
+    return result
+
+
+def apply_toolchain_environment(environment, fingerprint):
+    excluded = {str(Path(environment[key]) / 'bin') for key in ('VIRTUAL_ENV', 'UV_PROJECT_ENVIRONMENT') if environment.get(key)}
+    if sys.prefix != sys.base_prefix:
+        excluded.add(str(Path(sys.prefix) / 'bin'))
+    inherited_path = [part for part in environment.get('PATH', '').split(os.pathsep) if part not in excluded]
+    for key in ('VIRTUAL_ENV', 'UV_PROJECT_ENVIRONMENT', 'PYTHONHOME', 'PYTHONPATH'):
+        environment.pop(key, None)
+    folders = list(dict.fromkeys(str(Path(tool['argv'][0]).parent) for tool in fingerprint['tools']))
+    environment['PATH'] = os.pathsep.join([*folders, *inherited_path])
+    return environment
+
+
+def env_fingerprint(path, forbidden=(), allow_development=False, kind="python", tools=None, cwd=None):
+    if kind == "toolchain":
+        return toolchain_fingerprint(path, tools, forbidden, cwd)
+    if kind != "python":
+        fail("invalid_environment", "Use python or toolchain environment kind.")
     logical = Path(path).expanduser()
     if not logical.is_absolute() or not logical.is_dir():
         fail("invalid_environment", "The registered environment path is unavailable.")
@@ -1716,7 +1810,7 @@ def fixed_path(value):
 
 def reject_development_origin(state, path, environment):
     resolved = path.resolve()
-    allowed = (Path(environment['path']), Path(environment.get('logical_path', environment['path'])))
+    allowed = (() if environment.get('kind') == 'toolchain' else (Path(environment['path']), Path(environment.get('logical_path', environment['path']))))
     for checkout in (state['project']['path'], state['worktree']['path']):
         checkout = Path(checkout)
         if within(resolved, checkout.resolve()) and not any(within(resolved, root.resolve()) for root in allowed):
@@ -1725,6 +1819,12 @@ def reject_development_origin(state, path, environment):
 
 def frozen_argv(arguments, state, environment):
     """Retain environment semantics while removing removable logical shortcuts."""
+    if environment.get('kind') == 'toolchain':
+        result = toolchain_argv(arguments, environment)
+        for argument in result:
+            if any(checkout in argument for checkout in (state['project']['path'], state['worktree']['path'])):
+                fail('development_reference', 'Frozen native commands cannot reference mutable checkouts.')
+        return result
     logical = Path(environment.get('logical_path', environment['path']))
     physical = Path(environment['path'])
     result = []
@@ -1887,10 +1987,13 @@ def scoped_execution_proof(current, receipt, actual_files=True):
 def startup_environment(current):
     environment = dict(os.environ)
     directory = Path(current['directory'])
-    env_path = Path(current['environment']['path'])
-    environment.update(VIRTUAL_ENV=str(env_path), UV_PROJECT_ENVIRONMENT=str(env_path), PATH=str(env_path / 'bin') + os.pathsep + environment.get('PATH', ''),
-        PYTHONDONTWRITEBYTECODE='1', TASK_WORKFLOW_RUN_DIR=str(directory), TASK_WORKFLOW_OUTPUT_DIR=str(directory),
+    environment.update(TASK_WORKFLOW_RUN_DIR=str(directory), TASK_WORKFLOW_OUTPUT_DIR=str(directory),
         TASK_WORKFLOW_STARTUP_REPORT=str(directory / 'startup-report.json'), TASK_WORKFLOW_STARTUP_TOKEN=current['token'])
+    if current['environment'].get('kind') == 'toolchain':
+        return apply_toolchain_environment(environment, current['environment'])
+    env_path = Path(current['environment']['path'])
+    environment.update(VIRTUAL_ENV=str(env_path), UV_PROJECT_ENVIRONMENT=str(env_path),
+                       PATH=str(env_path / 'bin') + os.pathsep + environment.get('PATH', ''), PYTHONDONTWRITEBYTECODE='1')
     environment.pop('PYTHONPATH', None)
     environment.pop('PYTHONHOME', None)
     return environment
@@ -1904,7 +2007,9 @@ def perform_startup_validation(current, timeout=None):
     if report.exists() or report.is_symlink():
         fail('startup_report_invalid', 'A startup report must be created by this claimed validation, not supplied in advance.')
     command = list(current['validation_argv'])
-    if command[0] in ('python', 'python3'):
+    if current['environment'].get('kind') == 'toolchain':
+        command = toolchain_argv(command, current['environment'])
+    elif command[0] in ('python', 'python3'):
         command[0] = str(Path(current['environment']['path']) / 'bin/python')
     process, code, error = None, 127, None
     with log_path.open('xb') as log:
@@ -1973,7 +2078,7 @@ def prepare_verification_snapshot(state, *, commit, directory, environment_id, s
     except FileExistsError:
         fail('already_exists', 'Preserve the existing baseline and receipts; use a new baseline identity.')
     commit = git(state['project']['path'], 'rev-parse', '--verify', commit + '^{commit}')
-    environment = env_fingerprint(state['environment_registry'][environment_id], (state['project']['path'], state['worktree']['path']), allow_development=True)
+    environment = registered_env_fingerprint(state, environment_id, allow_development=True)
     with selected_snapshot(state['project']['path'], commit, args['snapshot_scope']) as (files, modes, objects):
         store = immutable_code_store(base / '.snapshots', args['snapshot_scope'], files, modes)
     current = {'snapshot_contract': 3, 'purpose': 'development-verification', 'authorization_source': authorization_source,
@@ -2008,7 +2113,7 @@ def prepare_verification_snapshot(state, *, commit, directory, environment_id, s
             check_code_store(store)
             check_main_environment_binding(state, current)
             check_startup_inputs(state, current)
-            if environment_identity(env_fingerprint(environment['path'], (state['project']['path'], state['worktree']['path']), allow_development=True)) != environment_identity(environment):
+            if environment_identity(refingerprint(environment, state, allow_development=True)) != environment_identity(environment):
                 fail('environment_changed', 'The baseline environment changed during startup validation.')
         except WorkflowError as failure:
             receipt.update(status='failed', error=failure.code)
@@ -2317,7 +2422,7 @@ def prepare_run(args, state, root):
     if env_id not in state['environment_registry']:
         fail('environment_not_registered', 'Reference an explicitly registered environment.')
     runtime_proof = require_runtime_environment(state, env_id)
-    environment = env_fingerprint(state['environment_registry'][env_id], (state['project']['path'], state['worktree']['path']))
+    environment = registered_env_fingerprint(state, env_id)
     argv = frozen_argv(args['argv'], state, environment)
     validation_argv = frozen_argv(args['validation_argv'], state, environment)
     if not args['lockfiles']:
@@ -2413,7 +2518,7 @@ def prepare_run_legacy(args, state, root):
     if env_id not in state["environment_registry"]:
         fail("environment_not_registered", "Reference an environment explicitly registered at task enrollment.")
     runtime_proof = require_runtime_environment(state, env_id)
-    environment = env_fingerprint(state["environment_registry"][env_id], (state["project"]["path"], state["worktree"]["path"]))
+    environment = registered_env_fingerprint(state, env_id)
     argv = frozen_argv(args["argv"], state, environment)
     if not args["lockfiles"]:
         fail("lockfile_required", "At least one committed dependency lockfile is required.")
@@ -2487,7 +2592,7 @@ def environment_identity(value):
 
 def check_run(state, experiment):
     check_main_environment_binding(state, experiment)
-    if experiment.get('runtime_environment_provenance'):
+    if experiment.get('runtime_environment_provenance') and experiment['environment'].get('kind') != 'toolchain':
         check_runtime_cache_provenance(experiment['environment']['path'], experiment['runtime_environment_provenance'], state)
     root = Path(state["root"])
     code = Path(experiment["code"])
@@ -2505,7 +2610,7 @@ def check_run(state, experiment):
         check_startup_inputs(state, experiment)
     if manifest(code) != experiment["manifest"]:
         fail("snapshot_changed", "The experiment code differs from its recorded manifest.")
-    if environment_identity(env_fingerprint(experiment["environment"]["path"], (state["project"]["path"], state["worktree"]["path"]))) != environment_identity(experiment["environment"]):
+    if environment_identity(refingerprint(experiment["environment"], state)) != environment_identity(experiment["environment"]):
         fail("environment_changed", "The registered environment differs from its prepared inventory.")
     if experiment.get("frozen_approval", {}).get("digest") != experiment["design_digest"]:
         fail("approval_required", "The frozen experiment has no approval for its own design.")
@@ -2907,10 +3012,30 @@ def check_main_environment_binding(state, current):
         require_project_environment(state, current['environment']['path'])
 
 
+def native_binding_upgrade_safe(state, store, binding):
+    if (Path(binding['resolved_path']) / 'bin/python').exists():
+        fail('environment_conflict', 'An existing Python binding cannot change environment kind.')
+    for task in (store / 'tasks').iterdir():
+        if task.is_dir() and not task.is_symlink():
+            other, _ = load_events(task)
+            inputs = [*other.get('runs', {}).values(), *(check.get('frozen_inputs', {}) for check in other.get('checks', {}).values())]
+            if any(value.get('environment', {}).get('path') == binding['resolved_path'] for value in inputs):
+                fail('environment_conflict', 'Preserve existing frozen inputs before annotating a legacy native binding.')
+    for baseline_root in (Path(state['root']) / '.experiments/verification').glob('*/baselines'):
+        for baseline in baseline_root.rglob('baseline.json'):
+            if read_json(baseline).get('environment', {}).get('path') == binding['resolved_path']:
+                fail('environment_conflict', 'Preserve existing baseline identity before annotating its environment.')
+
+
 def bind_environment(args, state, store):
     require_coordinator(args, state)
     logical = environment_reference(args['path'])
     resolved = Path(logical).resolve()
+    kind = args.get('kind', 'python')
+    if kind not in ('python', 'toolchain') or (kind == 'python' and 'tools' in args):
+        fail('invalid_environment', 'Declare toolchain tools only for toolchain kind.')
+    fingerprint = (toolchain_fingerprint(logical, args.get('tools'), (state['project']['path'], state['worktree']['path']), state['project']['path'])
+                   if kind == 'toolchain' else None)
     forbidden = [Path(tree['path']) for tree in registered_task_trees(state)]
     for task in (store / 'tasks').iterdir():
         if task.is_dir() and not task.is_symlink():
@@ -2920,18 +3045,65 @@ def bind_environment(args, state, store):
     if any(within(Path(logical), root) or within(resolved, root.resolve()) for root in forbidden):
         fail('environment_conflict', 'The main environment cannot belong to a task worktree or experiment.')
     existing = project_environment(state)
+    changed_binding = False
     if existing:
         if str(resolved) != existing['resolved_path']:
             fail('environment_conflict', 'The project already binds another main environment.')
-        binding = existing
+        binding = copy.deepcopy(existing)
+        if kind != existing.get('kind', 'python'):
+            if kind != 'toolchain' or 'kind' in existing:
+                fail('environment_conflict', 'The project binding cannot change environment kind.')
+            native_binding_upgrade_safe(state, store, existing)
+            binding.update(kind=kind, tools=tool_specs(args['tools']), toolchain=fingerprint,
+                           toolchain_annotation={'actor':args['actor'], 'authorization_source':args['authorization_source'], 'time':now()})
+            changed_binding = True
+        elif kind == 'toolchain' and environment_identity(existing['toolchain']) != environment_identity(fingerprint):
+            fail('environment_changed', 'The bound toolchain executable or version identity changed.')
     else:
         binding = {'binding_id': uuid.uuid4().hex, 'logical_path': logical, 'resolved_path': str(resolved),
                    'actor': args['actor'], 'authorization_source': args['authorization_source'], 'time': now()}
+        if kind == 'toolchain':
+            binding.update(kind=kind, tools=tool_specs(args['tools']), toolchain=fingerprint)
+        changed_binding = True
+    if changed_binding:
         atomic_json(store / 'environment.json', binding)
         sync_dir(store)
     changed = state.get('main_environment_binding') != binding
     state['main_environment_binding'] = copy.deepcopy(binding)
     return {'environment_binding': binding, 'already_bound': bool(existing)}, changed
+
+
+def register_toolchain_environment(args, state, name, logical, purpose, existing):
+    binding = project_environment(state, required=True)
+    if binding.get('kind') != 'toolchain':
+        fail('environment_conflict', 'A native environment requires the project toolchain binding.')
+    tools = tool_specs(args.get('tools', binding['tools']))
+    fingerprint = toolchain_fingerprint(logical, tools, (state['project']['path'], state['worktree']['path']), state['project']['path'])
+    if fingerprint['tools'] != binding['toolchain']['tools']:
+        fail('environment_conflict', 'Registered native tools must match the bound project toolchain identities.')
+    if any(key in args for key in ('project_distributions', 'cache_root', 'install_receipt')):
+        fail('invalid_environment', 'Python runtime provenance fields do not apply to native toolchains.')
+    if purpose == 'development':
+        require_project_environment(state, logical)
+    else:
+        validate_runtime_location(state, logical)
+    if existing and existing.get('kind') == 'toolchain':
+        if existing.get('purpose') != purpose or existing['tools'] != tools:
+            fail('environment_conflict', 'Preserve the existing native environment intent.')
+        if purpose == 'runtime':
+            require_runtime_environment(state, name)
+        return {'environment_id':name, 'path':logical, 'already_registered':True}, False
+    if existing and existing.get('purpose', 'development') != purpose:
+        fail('environment_conflict', 'An existing environment cannot change purpose.')
+    registration = {'path':logical, 'purpose':purpose, 'kind':'toolchain', 'tools':tools,
+                    'actor':args['actor'], 'authorization_source':args['authorization_source'], 'time':now()}
+    if existing:
+        registration['previous_registration'] = copy.deepcopy(existing)
+    if purpose == 'runtime':
+        registration['runtime_provenance'] = {'kind':'toolchain', 'main_binding':copy.deepcopy(binding), 'environment':fingerprint}
+    state['environment_registry'][name] = logical
+    state.setdefault('environment_registrations', {})[name] = registration
+    return {'environment_id':name, 'path':logical, 'already_registered':False}, True
 
 
 def distribution_records(path):
@@ -3036,14 +3208,15 @@ def require_runtime_environment(state, environment_id):
     registration = state.get('environment_registrations', {}).get(environment_id, {})
     proof = registration.get('runtime_provenance')
     if registration.get('purpose') != 'runtime' or not proof:
-        fail('runtime_environment_required', 'Register a fixed runtime with dependency and uv cache provenance before a formal Run.')
+        fail('runtime_environment_required', 'Register fixed runtime provenance before a formal Run.')
     path = state['environment_registry'][environment_id]
     if str(Path(path).resolve()) != proof['environment']['path']:
         fail('environment_changed', 'The runtime environment reference changed.')
-    fingerprint = env_fingerprint(path, (state['project']['path'], state['worktree']['path']))
+    fingerprint = registered_env_fingerprint(state, environment_id)
     if environment_identity(fingerprint) != environment_identity(proof['environment']):
         fail('environment_changed', 'The registered fixed runtime changed.')
-    check_runtime_cache_provenance(fingerprint['path'], proof, state)
+    if fingerprint.get('kind') != 'toolchain':
+        check_runtime_cache_provenance(fingerprint['path'], proof, state)
     return proof
 
 
@@ -3107,6 +3280,11 @@ def register_environment(args, state):
     existing = state.get('environment_registrations', {}).get(name)
     if name in state['environment_registry'] and Path(state['environment_registry'][name]).resolve() != Path(logical).resolve():
         fail('environment_conflict', 'This environment identifier already names another directory; use a new identifier.')
+    kind = args.get('kind', 'python')
+    if kind == 'toolchain':
+        return register_toolchain_environment(args, state, name, logical, purpose, existing)
+    if kind != 'python' or 'tools' in args:
+        fail('invalid_environment', 'Declare native tools only for toolchain kind.')
     if purpose == 'development':
         if any(key in args for key in ('project_distributions', 'cache_root', 'install_receipt')):
             fail('invalid_environment', 'Runtime provenance fields require runtime purpose.')
@@ -3872,8 +4050,14 @@ def check_execution_environment(state, current):
         if actual != binding:
             fail('environment_changed', 'The check main environment binding changed.')
         root = Path(binding['resolved_path'])
-        environment.update(VIRTUAL_ENV=str(root), UV_PROJECT_ENVIRONMENT=str(root),
-                           PATH=str(root / 'bin') + os.pathsep + environment.get('PATH', ''))
+        if binding.get('kind') == 'toolchain':
+            actual_tools = toolchain_fingerprint(root, binding['tools'], (state['project']['path'], state['worktree']['path']), state['project']['path'])
+            if environment_identity(actual_tools) != environment_identity(binding['toolchain']):
+                fail('environment_changed', 'The bound native toolchain changed.')
+            apply_toolchain_environment(environment, actual_tools)
+        else:
+            environment.update(VIRTUAL_ENV=str(root), UV_PROJECT_ENVIRONMENT=str(root),
+                               PATH=str(root / 'bin') + os.pathsep + environment.get('PATH', ''))
     if not current.get('source_checkout') and not binding:
         return environment
     environment.pop('PYTHONPATH', None)
@@ -3882,7 +4066,12 @@ def check_execution_environment(state, current):
     source = Path(current['cwd'])
     mutable = [Path(state['project']['path']), *(Path(tree['path']) for tree in registered_task_trees(state))]
     for index, value in enumerate(current['argv']):
-        if index and current['argv'][index - 1] == '-c':
+        if binding and binding.get('kind') == 'toolchain':
+            if current.get('source_checkout') and any(str(tree) in value for tree in mutable):
+                fail('mutable_check_source', 'Native check arguments cannot reference mutable checkout code.')
+            if index and current['argv'][index - 1] in ('-c', '-e', '--eval'):
+                continue
+        elif index and current['argv'][index - 1] == '-c':
             continue
         token = value.partition('=')[2] if value.startswith('-') and '=' in value else value
         if not token or token.startswith('-'):
@@ -3890,10 +4079,11 @@ def check_execution_environment(state, current):
         candidate = Path(token).expanduser()
         candidate = candidate if candidate.is_absolute() else source / candidate
         resolved = candidate.resolve()
-        allowed = binding and any(parent.resolve() == root for parent in (candidate, *candidate.parents))
+        allowed = binding and (any(resolved == Path(tool['resolved_executable']) for tool in binding['toolchain']['tools'])
+                               if binding.get('kind') == 'toolchain' else any(parent.resolve() == root for parent in (candidate, *candidate.parents)))
         if allowed:
-            reject_development_origin(state, candidate, {'path': str(root), 'logical_path': binding['logical_path']})
-        if binding and not allowed:
+            reject_development_origin(state, candidate, {'path': str(root), 'logical_path': binding['logical_path'], 'kind':binding.get('kind', 'python')})
+        if binding and binding.get('kind') != 'toolchain' and not allowed:
             # Inspect the logical executable location before resolving interpreter symlinks.
             for parent in candidate.parents:
                 if (parent / 'pyvenv.cfg').is_file():
@@ -4247,13 +4437,15 @@ def dispatch_check(operation, args, root, store):
                 current['main_environment_binding'] = copy.deepcopy(main_environment)
                 check_execution_environment(state, current)
                 current['submitted_argv'] = list(current['argv'])
-                if re.fullmatch(r'python(?:[0-9]+(?:\.[0-9]+)*)?', Path(current['argv'][0]).name):
+                if main_environment.get('kind') == 'toolchain':
+                    current['argv'] = toolchain_argv(current['argv'], main_environment['toolchain'])
+                elif re.fullmatch(r'python(?:[0-9]+(?:\.[0-9]+)*)?', Path(current['argv'][0]).name):
                     current['argv'][0] = str(Path(main_environment['resolved_path']) / 'bin/python')
         directory.mkdir(parents=True)
         if frozen:
             current['frozen_inputs'] = frozen
         current['contract_digest'] = check_contract(current)
-        current['runner_argv'] = [sys.executable, str(Path(current['runtime']['directory']) / 'runner.py'), '--root', str(root), '--task-id', args['task_id'], '--check-id', name, '--token', token]
+        current['runner_argv'] = [stable_runtime_python(), '-B', '-E', '-S', str(Path(current['runtime']['directory']) / 'runner.py'), '--root', str(root), '--task-id', args['task_id'], '--check-id', name, '--token', token]
         current['retention_hold_id'] = bind_resource_retention(state, association, args['actor'])
         state['checks'][name] = current
         commit_event(path, state, previous, 'check-dispatch-intent', args['actor'])
@@ -4511,8 +4703,8 @@ COMMANDS = {
     "schema": spec("Discover operation schemas."),
     "init": spec("Explicitly enroll an existing task worktree or a base placeholder awaiting worktree-prepare.", {"task_id": "string", "title": "string", "actor": "string", "authorization_source": "string", "project": "string"}, {"worktree": "string", "coordinator": "string", "environment_registry": "object", "owned_worktree": "boolean", "integration_required": "boolean", "session_id": "string"}),
     "worktree-prepare": mutation("Explicitly create or reuse this task's reserved development worktree; path is project/.worktrees/task-id.", {"expected_base": "string", "authorization_source": "string"}, {"branch": "string"}),
-    "environment-bind": mutation("Bind the existing main development environment once for this project.", {"path": "string", "authorization_source": "string"}),
-    "environment-register": mutation("Register the development main or a fixed runtime with matching dependency and cache provenance.", {"environment_id": "string", "path": "string", "authorization_source": "string"}, {"purpose": "string", "project_distributions": "array", "cache_root": "string", "install_receipt": "string"}),
+    "environment-bind": mutation("Bind the existing main development environment once for this project.", {"path": "string", "authorization_source": "string"}, {"kind": "string", "tools": "array"}),
+    "environment-register": mutation("Register the development main or a fixed runtime with matching dependency and cache provenance.", {"environment_id": "string", "path": "string", "authorization_source": "string"}, {"purpose": "string", "project_distributions": "array", "cache_root": "string", "install_receipt": "string", "kind": "string", "tools": "array"}),
     "status": spec("Read authoritative task state without modifying it.", optional={"task_id": "string"}),
     "context": spec("Read the current task dialogue contract and required recording steps without modifying state.", {"task_id": "string"}),
     "list": spec("List task summaries without modifying state."),
@@ -5820,7 +6012,7 @@ def execute_run(args, root, store, external=False):
         validate_resource_reference(store, state, {**current, 'run_id': args['run_id']}, require_available=not external, capacity=True)
         check_run(state, current)
         runner = Path(current['runtime']['directory']) / 'runner.py'
-        command = [sys.executable, str(runner), '--root', str(root), '--task-id', args['task_id'], '--run-id', args['run_id'], '--token', current['token']]
+        command = [stable_runtime_python(), '-B', '-E', '-S', str(runner), '--root', str(root), '--task-id', args['task_id'], '--run-id', args['run_id'], '--token', current['token']]
         if 'timeout' in args:
             command += ['--timeout', str(args['timeout'])]
         current['retention_hold_id'] = bind_resource_retention(state, current, args['actor'])

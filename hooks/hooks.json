@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${PLUGIN_ROOT}/skills/task-workflow/scripts/session_hook.py\""
+            "command": "python3 -I \"${PLUGIN_ROOT}/skills/task-workflow/scripts/bootstrap.py\" -- \"${PLUGIN_ROOT}/skills/task-workflow/scripts/session_hook.py\""
           }
         ]
       }
@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${PLUGIN_ROOT}/skills/task-workflow/scripts/communication_prompt_hook.py\""
+            "command": "python3 -I \"${PLUGIN_ROOT}/skills/task-workflow/scripts/bootstrap.py\" -- \"${PLUGIN_ROOT}/skills/task-workflow/scripts/communication_prompt_hook.py\""
           }
         ]
       }

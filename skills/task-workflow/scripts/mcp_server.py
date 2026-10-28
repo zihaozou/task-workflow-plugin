@@ -8,6 +8,8 @@ import math
 from pathlib import Path
 import sys
 
+sys.dont_write_bytecode = True
+
 import workflow
 
 VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")

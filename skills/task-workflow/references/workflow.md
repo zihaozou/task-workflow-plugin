@@ -903,3 +903,15 @@ Before large execution, state scope and stopping conditions. Review actual
 results and required cleanup before declaring completion. Report integration,
 execution, artifact acceptance, experiment closure, task closure, and resource
 release as separate facts when they affect the conclusion.
+
+## Plugin runtime and project toolchains
+
+Each installed skill owns `.venv` beside `SKILL.md`. The bootstrap resolves its installation from its own file, uses the existing interpreter's verified base executable, and creates the environment with Python's standard library `venv` module and `--without-pip`. Initial calls use `python3 -I`; child script calls ignore Python environment variables and user site packages. `PYTHONPATH`, `PYTHONHOME`, `VIRTUAL_ENV`, `UV_PROJECT_ENVIRONMENT`, and the macOS Python launcher override are removed from child process environments.
+
+An exclusive OS file lock at `.runtime-bootstrap.lock` serializes creation and verification. `.venv/.task-workflow-runtime.json` binds the runtime to the absolute skill directory and the verified host base Python. A runtime with another owner, an absent marker, or a symlink root fails without deletion. An interrupted creation marked by this installation is retried under the same lock. Creation occurs at its final path so activation paths remain valid.
+
+The bootstrap prints only the interpreter path for `--print-python`. Executed scripts receive the original stdin and stdout. Diagnostics use stderr. No download, global package installation, project Python environment, or host configuration change is needed.
+
+The plugin runtime is replaceable application infrastructure. Frozen retained runners use an isolated, verified host base Python outside the installed plugin and project environments. Their pinned code imports no plugin bootstrap.
+
+Release inspection must compare shipped source files with the frozen manifest. A generated runtime may be excluded only after its marker, absolute installation ownership, interpreter prefix, base interpreter, and standard-library-only configuration pass verification. The permanent lock is excluded only beside that verified runtime. An unowned `.venv`, foreign extra file, or additional generated directory remains an error. Runtime files are never release source, and source syntax checks inspect tracked Python source rather than recursively scanning environments or workflow worktrees.

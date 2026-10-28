@@ -5,6 +5,8 @@ import math
 import re
 import sys
 
+sys.dont_write_bytecode = True
+
 import workflow
 
 ROUTING_GUIDANCE = (

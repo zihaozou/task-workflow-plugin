@@ -38,7 +38,8 @@ guidance](https://developers.openai.com/plugins/build/plugins#add-a-marketplace-
 The Codex package uses `.codex-plugin/plugin.json`, `.mcp.json`, `skills/`,
 and `hooks/hooks.json`. The manifest explicitly declares the hook file. The
 native MCP declaration uses plugin-relative `cwd: "."` and
-`args: ["skills/task-workflow/scripts/mcp_server.py"]` with `python3`. The tested
+`args: ["-I", "skills/task-workflow/scripts/bootstrap.py", "--",
+"skills/task-workflow/scripts/mcp_server.py"]` with `python3`. The tested
 native client resolves these relative paths from the plugin root; it does not
 expand `${PLUGIN_ROOT}` in MCP arguments or `cwd`. Hook commands run through a
 shell and retain their quoted `${PLUGIN_ROOT}` paths. `mcp.json` is a
@@ -121,14 +122,14 @@ The MCP process starts with the following command, which normally runs through
 the client rather than an interactive terminal:
 
 ```sh
-python3 skills/task-workflow/scripts/mcp_server.py
+python3 -I skills/task-workflow/scripts/bootstrap.py mcp_server.py
 ```
 
 After connection, verify tool discovery and a harmless schema call. Discover
 the operation interface from the repository with:
 
 ```sh
-python3 skills/task-workflow/scripts/workflow.py schema
+python3 -I skills/task-workflow/scripts/bootstrap.py workflow.py schema
 ```
 
 ## DeepSeek Harness
@@ -379,3 +380,15 @@ records, earlier repository history, private conventions, execution data,
 account settings, host paths, and caches are excluded. Publication does not
 install the plugin, upload it to an account, or submit it to a plugin directory.
 A project license has not been selected.
+
+## Plugin runtime
+
+The first MCP, hook, or DeepSeek launch uses an existing host base Python 3.9 or later to create `skills/task-workflow/.venv` inside that installed plugin. This standard-library environment has no pip or third-party dependencies. Creation uses an installation ownership marker and an exclusive file lock. A concurrent launch waits for the same runtime. A foreign environment or mismatched installation marker fails without replacement. No project environment is borrowed. No packages are downloaded and no host configuration is edited.
+
+Use the installed bootstrap for direct commands, including from another working directory:
+
+```sh
+python3 -I /absolute/plugin/skills/task-workflow/scripts/bootstrap.py workflow.py schema --root /absolute/project
+```
+
+MCP transport output remains JSON-RPC only. Bootstrap failures go to stderr. DeepSeek resolves the verified plugin interpreter once for its MCP server, hooks, and context helper. Frozen durable runners use a separately verified host base interpreter and do not import this installed runtime. Generated `.venv` and the runtime lock stay outside release and npm payloads. See [runtime ownership and inspection](skills/task-workflow/references/workflow.md#plugin-runtime-and-project-toolchains).

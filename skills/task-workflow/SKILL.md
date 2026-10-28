@@ -534,3 +534,7 @@ resource ownership, execution receipts, and artifacts before retrying an action.
 Avoid duplicate integration, execution, or release. Report integration and
 experiment outcomes separately. Complete the task only after required review,
 acceptance, and in-scope cleanup.
+
+## Plugin execution runtime
+
+Launch installed CLI commands through `python3 -I <installed-skill>/scripts/bootstrap.py workflow.py <operation>`. Bootstrap creates the standard-library-only environment at `<installed-skill>/.venv` from the existing host base Python. MCP, hooks, and DeepSeek use this same owned runtime. Project development and scientific training environments remain separate. See [runtime ownership](references/workflow.md#plugin-runtime-and-project-toolchains).
