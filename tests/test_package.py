@@ -41,7 +41,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.19')
+        self.assertEqual(manifest['version'], '0.1.20')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -85,7 +85,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(packages), 1)
         package = packages[0]
         self.assertEqual(package['name'], '@local/task-workflow')
-        self.assertEqual(package['version'], '0.1.19')
+        self.assertEqual(package['version'], '0.1.20')
         paths = [entry['path'] for entry in package['files']]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(set(paths), NATIVE_RELEASE_FILES)
@@ -190,6 +190,48 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'examples').exists())
         self.assertFalse((SCRIPTS / 'install.py').exists())
         self.assertTrue((ROOT / 'skills/task-workflow/references/workflow.md').is_file())
+
+    def test_cleanup_guidance_distinguishes_disposable_caches_from_source(self):
+        paths = ['README.md', 'skills/task-workflow/SKILL.md',
+                 'skills/task-workflow/references/workflow.md',
+                 'skills/task-workflow/templates/worker-briefs.md']
+        for relative in paths:
+            text = re.sub(r'\s+', ' ', (ROOT / relative).read_text())
+            with self.subTest(path=relative):
+                self.assertIn('`__pycache__` bytecode and `.pytest_cache` entries are disposable', text)
+                self.assertRegex(text, r'compact (?:cache )?counts')
+                self.assertIn('durable cleanup intent', text)
+        reference = re.sub(r'\s+', ' ', (ROOT / 'skills/task-workflow/references/workflow.md').read_text())
+        self.assertIn('Git stores committed source', reference)
+        self.assertIn('batch metadata/object checks rather than one Git process per file', reference)
+        self.assertIn('both the directory and its matching Git worktree registration are absent', reference)
+        self.assertIn('unknown cache members', reference)
+        self.assertIn('frozen Run inputs remain protected', reference)
+
+    def test_handoff_guidance_requires_real_acceptance_then_ends_the_turn(self):
+        paths = ['README.md', 'skills/task-workflow/SKILL.md',
+                 'skills/task-workflow/references/workflow.md',
+                 'skills/task-workflow/templates/conversation.md']
+        for relative in paths:
+            text = re.sub(r'\s+', ' ', (ROOT / relative).read_text())
+            with self.subTest(path=relative):
+                self.assertIn('`detached: true`', text)
+                self.assertIn('actual external queue acceptance', text)
+                self.assertIn('process-start acknowledgment', text)
+                self.assertIn('end the current turn', text)
+                self.assertIn('Do not wait for the first step, metrics, or a checkpoint', text)
+                self.assertIn('Keep the Run and task open and resources retained', text)
+                self.assertIn('or an authorized dependent operation', text)
+                self.assertIn('it does not keep this turn watching', text)
+        reference = re.sub(r'\s+', ' ', (ROOT / 'skills/task-workflow/references/workflow.md').read_text())
+        self.assertIn('it launches nothing', reference)
+        self.assertIn('An internal `queued` intent is a reservation, not actual external queue acceptance', reference)
+        briefs = re.sub(r'\s+', ' ', (ROOT / 'skills/task-workflow/templates/worker-briefs.md').read_text())
+        self.assertIn('or an authorized dependent operation', briefs)
+        self.assertIn('it does not keep this turn watching', briefs)
+        reports = (ROOT / 'skills/task-workflow/templates/worker-reports.md').read_text()
+        self.assertIn('Actual queue/start evidence and log location', reports)
+        self.assertIn('Run/task open; resources retained; later checks by request or an authorized dependent operation', reports)
 
     def test_structured_templates_are_shipped_and_linked(self):
         base = ROOT / 'skills/task-workflow'

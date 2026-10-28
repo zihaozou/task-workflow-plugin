@@ -180,6 +180,21 @@ confirmed behavior even when it is difficult or expensive. Distinguish
 requirements, quality, and overall verdicts where relevant. Continue routine
 authorized work.
 
+For long local work, use `run-execute` with `detached: true`. `run-dispatch`
+records a reserved intent, not actual external queue acceptance. After actual
+external queue acceptance or a process-start acknowledgment, record available
+evidence and log locations. Give a compact acknowledgment and end the current
+turn. Do not wait for the first step, metrics, or a checkpoint. Later checks
+follow a user request, explicit monitoring authority, or an authorized dependent operation. Keep the Run and task
+open and resources retained; handoff does not close or release them. An authorized
+dependent operation needs evidence later; it does not keep this turn watching.
+
+> **Result**
+> - Job 12345 was accepted in the scheduler queue. Logs: `/absolute/run/train.log`.
+>
+> **Next**
+> - Check its progress when the user asks.
+
 ## Goal-preserving examples
 
 **Complete goal, hard requirement**

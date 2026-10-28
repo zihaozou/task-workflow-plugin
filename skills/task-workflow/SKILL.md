@@ -459,6 +459,24 @@ binds the generation, integration proof, Run startup proofs, and removal. A
 later approved revision recreates the fixed worktree from current main as a new
 generation; preserve earlier Runs and evidence.
 
+Recognized `__pycache__` bytecode and `.pytest_cache` entries are disposable
+with the owned worktree. Report compact cache counts; do not archive these caches
+or duplicate unchanged tracked source into evidence. Git stores committed source.
+Retry interrupted cleanup through the program's durable cleanup intent. It
+verifies ownership, the generation, and remaining source before removing a
+partial worktree. Modified source, unknown files, external symlinks/environments,
+active references, and frozen Run inputs retain their protections.
+
+For long local work, use `run-execute` with `detached: true`. `run-dispatch`
+reserves an execution intent and returns `runner_argv`; it does not submit a job.
+After actual external queue acceptance or a process-start acknowledgment, record
+available evidence and log locations, give a compact acknowledgment, and end the
+current turn. Do not wait for the first step, metrics, or a checkpoint. Later
+checks follow a user request, explicit monitoring authority, or an authorized dependent operation. Keep the Run and
+task open and resources retained; handoff does not close or release them. An
+authorized dependent operation needs evidence later; it does not keep this turn
+watching.
+
 `run-prepare` freezes from the recorded integrated Git commit. Its immutable
 preparation intent and Run snapshot retain the exact integration verification
 proof, including the check receipt and source mode. Preserved dirty integration

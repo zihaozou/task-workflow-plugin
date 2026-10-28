@@ -41,6 +41,9 @@ Snapshot scope and dependency evidence, when applicable:
 Frozen identity and per-run source provenance:
 Startup validation exit/report and actual origin evidence:
 Retained references and cleanup ownership checks:
+Disposable cache counts, Git source proof, and partial-cleanup recovery result:
+Actual queue/start evidence and log location, when launching work:
+Turn handoff: acknowledgment sent; Run/task open; resources retained; later checks by request or an authorized dependent operation:
 Deviations or open choices:
 Handoff state: ready for review | blocked
 ```

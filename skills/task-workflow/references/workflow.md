@@ -418,6 +418,20 @@ for generated directories. It does not alter global Git settings. Inspect
 source and ignored inputs before freezing or cleanup. Git covers tracked code;
 required non-Git inputs need explicit preservation and evidence.
 
+Recognized `__pycache__` bytecode and `.pytest_cache` entries are disposable
+inside the owned temporary worktree. The cleanup receipt records compact counts.
+Delete these entries with the worktree; do not archive caches or copy unchanged
+tracked source into evidence. Git stores committed source. Source verification
+uses batch metadata/object checks rather than one Git process per file.
+
+Retry an interrupted or partial deletion through the same cleanup operation.
+Its durable cleanup intent binds the owned path, generation, and source proof.
+Recovery verifies remaining content and current references before continuing.
+Cleanup completes only when both the directory and its matching Git worktree
+registration are absent. Modified tracked source, unknown cache members or other
+unknown files, replaced paths, symlinks/external environments, active references,
+and frozen Run inputs remain protected.
+
 Implementation approval and integration authorization are separate. Within
 recorded authorization, the program validates expected base and task revisions
 and creates exactly one ordinary squash commit on the base. Keep normal Git
@@ -775,8 +789,8 @@ their original runtime.
 
 Runs and commands have no default execution time limit. A timeout is optional
 and applies only when the user supplies it; the plugin does not set a maximum.
-`run-execute` waits for a receipt by default; `detached: true` returns after
-launching the pinned runner.
+`run-execute` waits for a receipt by default. For long local work, pass
+`detached: true` to return after launching the pinned runner.
 
 For an external executor, call `run-dispatch` with `root`, `task_id`, `actor`,
 `expected_version`, and `run_id`. Its optional `timeout` becomes immutable.
@@ -792,7 +806,17 @@ intent without another launch. An unclaimed queued run can be cancelled; a
 later runner then fails admission. A claimed execution requires reconciliation. If a local runner fails admission
 before claiming or starting, its run remains queued and can be cancelled.
 
-Reread task status after the runner starts to obtain the current version. Use
+An internal `queued` intent is a reservation, not actual external queue acceptance.
+After the external scheduler/controller accepts the exact job in its queue, or
+a local/remote process-start acknowledgment is available, record the available
+queue/start evidence, job or process identity, and log location. Give a compact
+acknowledgment and end the current turn. Do not wait for the first step, metrics,
+or a checkpoint. Later checks follow a user request, explicit monitoring authority, or an authorized dependent
+operation. Keep the Run and task open and resources retained. Handoff does not
+accept artifacts, complete a Run/task, or authorize resource release. An authorized
+dependent operation needs evidence later; it does not keep this turn watching.
+
+On a later authorized check, reread task status to obtain the current version. Use
 `run-observe` with `run_id`, `receipt_path`, and `evidence`, or use
 `run-reconcile` for the canonical receipt. Both ingest actual execution evidence
 without launching or repeating the workload. If an unsettled current Run has no

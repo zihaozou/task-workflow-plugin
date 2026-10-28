@@ -298,7 +298,14 @@ accepted implementation and overall review,
 integration and verification, input freeze and startup validation, reference
 checks, owned-worktree cleanup, then guarded dispatch. A later approved revision
 recreates a worktree from current main as a new generation and creates a new
-immutable Run for the same experiment. Development checks may use authorized
+immutable Run for the same experiment. Recognized `__pycache__` bytecode and
+`.pytest_cache` entries are disposable with the owned worktree. Cleanup records
+compact counts; Git stores unchanged committed source. Keep caches and duplicate
+source archives out of cleanup evidence. Retry partial deletion through the
+program's durable cleanup intent; it verifies ownership, source, and references
+and finishes only after the directory and matching Git registration are absent.
+
+Development checks may use authorized
 resources, including GPUs, before merge; their evidence stays bound to the actual
 worktree revision. Integration verification runs against the exact integrated
 commit after merge and may also use authorized resources, including GPUs; its
@@ -315,10 +322,17 @@ with `detached: true` for a local launch that returns immediately, or
 `run-dispatch` to save an external execution intent and obtain its exact pinned
 runner argument array. External `check-dispatch` similarly returns exact
 `runner_argv` to the private controller. Direct verification wrappers execute
-their local runner. Dispatch records `queued`; the actual runner checks resource
-admission, makes a permanent claim, and records the workload start. `run-validate`
+their local runner. `run-dispatch` records `queued` as an internal reservation;
+it launches nothing. The actual runner checks resource admission, makes a
+permanent claim, and records the workload start. `run-validate`
 uses the resource and controller path prepared for that Run.
-Observe or reconcile its receipt after rereading the current task version.
+After actual external queue acceptance or a process-start acknowledgment, record
+available evidence and log locations, give a compact acknowledgment, and end the
+current turn. Do not wait for the first step, metrics, or a checkpoint. Later
+checks follow a user request, explicit monitoring authority, or an authorized dependent operation. Keep the Run and
+task open and resources retained. On a later authorized check, reread the task
+version and observe or reconcile the actual receipt. An authorized dependent
+operation needs evidence later; it does not keep this turn watching.
 
 Resources record who provided them and their observed availability. Actual
 check and Run activity is tracked separately from holds that retain capacity for

@@ -2721,60 +2721,269 @@ def cleanup_task_references(state, store):
         if any(within(Path(reference).absolute(), target) or within(Path(reference).resolve(), target) for reference in references):
             fail("active_reference", "Another enrolled task references an environment, snapshot or run directory in this worktree.")
 
+def cleanup_registration(state):
+    target = state['worktree']['path']
+    for record in git(state['project']['path'], 'worktree', 'list', '--porcelain', '-z').split('\0\0'):
+        fields = dict(field.split(' ', 1) if ' ' in field else (field, '') for field in record.split('\0') if field)
+        if fields.get('worktree') == target:
+            if fields.get('branch') != 'refs/heads/' + state['worktree']['branch']:
+                fail('cleanup_unknown', 'Another Git worktree registration now occupies the cleanup path.')
+            if state.get('cleanup_intent') and fields.get('HEAD') != state['cleanup_intent'].get('head'):
+                fail('revision_conflict', 'The registered cleanup source revision changed.')
+            return True
+    return False
+
+
+def cleanup_source(state, head):
+    project = state['project']['path']
+    result = subprocess.run(['git', '-C', project, 'ls-tree', '-r', '-z', '--full-tree', head], capture_output=True)
+    if result.returncode:
+        fail('cleanup_unknown', 'The recorded cleanup source tree is unavailable.')
+    entries = {}
+    for record in result.stdout.split(b'\0'):
+        if not record:
+            continue
+        metadata, name = record.split(b'\t', 1)
+        mode, kind, oid = metadata.split()
+        if kind != b'blob' or mode not in (b'100644', b'100755', b'120000'):
+            fail('cleanup_unknown', 'Cleanup requires supported tracked source files and links.')
+        entries[os.fsdecode(name)] = (mode.decode(), oid.decode())
+    algorithm = git(project, 'rev-parse', '--show-object-format')
+    return entries, algorithm
+
+
+def cleanup_file_digest(path, algorithm='sha256', blob=False):
+    info = path.lstat()
+    if path.is_symlink():
+        value = os.fsencode(os.readlink(path))
+        return hashlib.new(algorithm, (b'blob ' + str(len(value)).encode() + b'\0' if blob else b'') + value).hexdigest()
+    result = hashlib.new(algorithm)
+    if blob:
+        result.update(b'blob ' + str(info.st_size).encode() + b'\0')
+    with path.open('rb') as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b''):
+            result.update(block)
+    return result.hexdigest()
+
+
+def disposable_cache_file(target, relative, source, known_roots):
+    parts = Path(relative).parts
+    if '__pycache__' in parts:
+        index = parts.index('__pycache__')
+        if index != len(parts) - 2:
+            return None
+        match = re.fullmatch(r'(.+)\.(?:cpython-[0-9]+|pypy[0-9]+)(?:-pytest-[0-9][A-Za-z0-9.+-]*)?(?:\.opt-[0-9]+)?\.pyc', parts[-1])
+        original = str(Path(*parts[:index]) / (match.group(1) + '.py')) if match else None
+        if original not in source:
+            return None
+        # A truncated write is still disposable when the canonical cache name maps to tracked source.
+        return str(Path(*parts[:index + 1]))
+    if '.pytest_cache' not in parts:
+        return None
+    index = parts.index('.pytest_cache')
+    root = str(Path(*parts[:index + 1]))
+    tail = '/'.join(parts[index + 1:])
+    folder = target / root
+    if root not in known_roots:
+        if not all((folder / name).is_file() and not (folder / name).is_symlink() for name in ('CACHEDIR.TAG', 'README.md', '.gitignore')):
+            return None
+        if not (folder / 'CACHEDIR.TAG').read_bytes().startswith(b'Signature: 8a477f597d28d172789f06886806bc55'):
+            return None
+        if not (folder / 'README.md').read_text(errors='replace').startswith('# pytest cache directory #'):
+            return None
+        if (folder / '.gitignore').read_text() != '# Created by pytest automatically.\n*\n':
+            return None
+    if tail == 'README.md':
+        return root if (folder / tail).read_text(errors='replace').startswith('# pytest cache directory #') else None
+    if tail == '.gitignore':
+        return root if (folder / tail).read_text() == '# Created by pytest automatically.\n*\n' else None
+    if tail == 'CACHEDIR.TAG':
+        return root if (folder / tail).read_bytes().startswith(b'Signature: 8a477f597d28d172789f06886806bc55') else None
+    if tail not in ('v/cache/nodeids', 'v/cache/lastfailed', 'v/cache/stepwise'):
+        return None
+    # Interrupted pytest writes can contain invalid JSON; the verified root and exact generator path identify them.
+    return root
+
+
+def cleanup_inventory(target, source, algorithm, links, intent=None):
+    if target.is_symlink() or not target.is_dir():
+        fail('cleanup_unknown', 'The owned cleanup directory was replaced or is unavailable.')
+    root = target.stat()
+    identity = [root.st_dev, root.st_ino]
+    if intent and intent.get('root_identity') != identity:
+        fail('cleanup_unknown', 'The cleanup directory identity changed; preserve its contents.')
+    known_roots = set((intent or {}).get('cache_roots', []))
+    entries, cache_roots = {}, set()
+    for directory, folders, files in os.walk(target, followlinks=False):
+        for name in [*folders, *files]:
+            path = Path(directory) / name
+            relative = str(path.relative_to(target))
+            info = path.lstat()
+            identity_file = [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns]
+            if stat.S_ISDIR(info.st_mode):
+                entries[relative] = {'kind':'directory', 'identity':identity_file}
+                continue
+            if not (stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode)):
+                fail('unique_files', 'Special or unknown filesystem contents prevent cleanup.')
+            if relative in source:
+                mode, oid = source[relative]
+                if (mode == '120000') != path.is_symlink() or (mode != '120000' and bool(info.st_mode & 0o111) != (mode == '100755')) or cleanup_file_digest(path, algorithm, True) != oid:
+                    fail('unique_files', 'Modified tracked source must be preserved during cleanup.')
+                kind = 'tracked'
+            elif relative == '.git' and not path.is_symlink():
+                if intent and cleanup_file_digest(path) != intent.get('git_file_sha256'):
+                    fail('cleanup_unknown', 'The worktree Git entrypoint changed during cleanup.')
+                kind = 'git_admin'
+            elif relative in links and path.is_symlink() and str(path.resolve()) == links[relative]:
+                kind = 'environment_link'
+            elif not path.is_symlink():
+                cache = disposable_cache_file(target, relative, source, known_roots)
+                if cache is None:
+                    fail('unique_files', 'Unknown untracked or ignored files prevent cleanup.', {'path':relative})
+                cache_roots.add(cache)
+                kind = 'cache'
+            else:
+                fail('unique_files', 'Unknown symbolic links prevent cleanup.', {'path':relative})
+            entries[relative] = {'kind':kind, 'identity':identity_file, 'sha256':cleanup_file_digest(path)}
+    return entries, identity, sorted(cache_roots)
+
+
+def remove_cleanup_entries(target, entries, root_identity, all_files=False):
+    """Remove only inspected entries through directory descriptors, without following links."""
+    groups = {}
+    for relative in entries:
+        groups.setdefault(str(Path(relative).parent), []).append(Path(relative).name)
+    def visit(fd, relative):
+        names = groups.get(relative, [])
+        if set(os.listdir(fd)) != set(names):
+            fail('revision_conflict', 'Directory contents changed after cleanup inspection.')
+        for name in names:
+            path = name if relative == '.' else str(Path(relative) / name)
+            expected = entries[path]
+            info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if [info.st_dev, info.st_ino] != expected['identity'][:2]:
+                fail('revision_conflict', 'A cleanup entry was replaced after inspection.')
+            if expected['kind'] == 'directory':
+                child = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                try:
+                    visit(child, path)
+                    empty = not os.listdir(child)
+                finally:
+                    os.close(child)
+                if all_files and empty:
+                    os.rmdir(name, dir_fd=fd)
+            elif all_files or expected['kind'] in ('cache', 'environment_link'):
+                if [info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns] != expected['identity']:
+                    fail('revision_conflict', 'A cleanup file changed after inspection.')
+                if stat.S_ISLNK(info.st_mode):
+                    observed = hashlib.sha256(os.fsencode(os.readlink(name, dir_fd=fd))).hexdigest()
+                else:
+                    opened = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+                    with os.fdopen(opened, 'rb') as stream:
+                        opened_info = os.fstat(stream.fileno())
+                        if list(lock_identity(opened_info)) != expected['identity'][:2]:
+                            fail('revision_conflict', 'A cleanup file changed while opening it.')
+                        hashed = hashlib.sha256()
+                        for block in iter(lambda: stream.read(1024 * 1024), b''):
+                            hashed.update(block)
+                        observed = hashed.hexdigest()
+                if observed != expected['sha256'] or list(lock_identity(os.stat(name, dir_fd=fd, follow_symlinks=False))) != expected['identity'][:2]:
+                    fail('revision_conflict', 'A cleanup file changed before removal.')
+                os.unlink(name, dir_fd=fd)
+        # Git can remove empty cache directories together with the owned checkout.
+    if [target.lstat().st_dev, target.lstat().st_ino] != root_identity or target.is_symlink():
+        fail('cleanup_unknown', 'The cleanup root was replaced.')
+    fd = os.open(target, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        if list(lock_identity(os.fstat(fd))) != root_identity:
+            fail('cleanup_unknown', 'The cleanup root changed while opening it.')
+        visit(fd, '.')
+    finally:
+        os.close(fd)
+    if all_files:
+        if [target.lstat().st_dev, target.lstat().st_ino] != root_identity or target.is_symlink():
+            fail('cleanup_unknown', 'The cleanup root changed before final removal.')
+        target.rmdir()
+
+
 def cleanup(args, state, store):
-    if not state["owned_worktree"] or state["project"]["path"] == state["worktree"]["path"]:
-        fail("not_owned", "Only a distinct explicitly owned task worktree can be removed.")
-    if state["integration"].get("status") != "complete":
-        fail("integration_required", "Worktree cleanup requires a completed integration.")
+    if not state['owned_worktree'] or state['project']['path'] == state['worktree']['path']:
+        fail('not_owned', 'Only a distinct explicitly owned task worktree can be removed.')
+    if state['integration'].get('status') != 'complete':
+        fail('integration_required', 'Worktree cleanup requires a completed integration.')
     require_cleanup_inputs(state)
-    target = Path(state["worktree"]["path"])
-    if state.get("cleaned") and not target.exists():
-        return {"already_cleaned": True}
-    if state.get("cleanup_intent") and not target.exists():
+    target = Path(state['worktree']['path'])
+    registered = cleanup_registration(state)
+    if state.get('cleaned') and not target.exists() and not target.is_symlink() and not registered:
+        return {'already_cleaned':True}
+    intent = state.get('cleanup_intent')
+    if intent and (intent.get('generation') != generation(state) or intent.get('path') != str(target) or intent.get('head') != state['integration']['head']):
+        fail('cleanup_unknown', 'Cleanup intent does not match this worktree generation and source.')
+    if intent and not target.exists() and not target.is_symlink():
+        if registered and intent.get('root_identity') and not args.get('dry_run',True):
+            result = run(['git','-C',state['project']['path'],'worktree','remove','--force','--',str(target)])
+            if result['returncode']:
+                return {'cleanup_pending':True,'recoverable':True,'path':str(target),'result':result}
+        if args.get('dry_run',True):
+            return {'dry_run':True,'removable':str(target),'recovery':True,'registration_remaining':registered}
         return finish_cleanup(args, state)
-    check_identity(state)
+    if not intent:
+        check_identity(state)
+    else:
+        if not intent.get('root_identity'):
+            fail('cleanup_unknown', 'Legacy partial cleanup has no directory ownership proof; preserve it for inspection.')
+        if git_identity(state['project']['path']) != state['project']:
+            fail('git_identity_changed', 'The base checkout identity changed.')
     cleanup_task_references(state, store)
-    for experiment in state["runs"].values():
-        if experiment["status"] not in ("complete", "failed", "cancelled"):
-            if experiment.get("independent_snapshot") is not True or any(within(Path(experiment[key]).resolve(), target) for key in ("code", "directory")) or within(Path(experiment["environment"]["path"]).resolve(), target):
-                fail("active_reference", "An unfinished run still depends on this worktree.")
-    safe_env_links = []
-    candidates = list(state["environment_registry"].values()) + [r["environment"].get("logical_path", r["environment"]["path"]) for r in state["runs"].values() if r.get("environment")]
-    for logical in candidates:
-        link = Path(logical)
+    for current in state['runs'].values():
+        if current['status'] not in ('complete','failed','cancelled'):
+            if current.get('independent_snapshot') is not True or any(within(Path(current[key]).resolve(),target) for key in ('code','directory')) or within(Path(current['environment']['path']).resolve(),target):
+                fail('active_reference','An unfinished Run still depends on this worktree.')
+    links = {}
+    candidates = list(state['environment_registry'].values()) + [r['environment'].get('logical_path',r['environment']['path']) for r in state['runs'].values() if r.get('environment')]
+    for value in candidates:
+        link = Path(value)
         if within(link.resolve(), target):
-            fail("active_reference", "A registered environment is stored inside the development worktree.")
-        if within(link, target) and link.is_symlink() and link.resolve().is_dir() and not within(link.resolve(), target):
-            relative = str(link.relative_to(target))
-            if relative not in safe_env_links:
-                safe_env_links.append(relative)
-    dirty = git(target, "status", "--porcelain=v1", "--untracked-files=all", "--ignored")
-    allowed_status = {prefix + name for name in safe_env_links for prefix in ("?? ", "!! ")}
-    if any(line not in allowed_status for line in dirty.splitlines()):
-        fail("unique_files", "Uncommitted, untracked or ignored unique files prevent safe cleanup.")
-    head = git(target, "rev-parse", "HEAD")
-    cleanup_integration_proof(state, head)
-    if args.get("dry_run", True):
-        return {"dry_run": True, "removable": str(target), "environment_links_only": safe_env_links}
-    state["cleanup_intent"] = state.get("cleanup_intent") or {"token": uuid.uuid4().hex, "generation": generation(state), "head": head, "path": str(target), "time": now()}
-    task_path = task_dir(store, state["task_id"])
-    _, parent = load_events(task_path)
-    commit_event(task_path, state, parent, "cleanup-intent", args["actor"])
-    check_identity(state)
-    cleanup_task_references(state, store)
-    cleanup_integration_proof(state, head)
-    if git(target, "rev-parse", "HEAD") != head or git(target, "status", "--porcelain=v1", "--untracked-files=all", "--ignored") != dirty:
-        fail("revision_conflict", "The worktree changed after cleanup checks.")
-    for name in safe_env_links:
-        link = target / name
-        if link.is_symlink() and not within(link.resolve(), target):
-            link.unlink()  # Remove only the checkout entrypoint, never its external environment.
-        else:
-            fail("revision_conflict", "An environment entrypoint changed during cleanup.")
-    result = run(["git", "-C", state["project"]["path"], "worktree", "remove", "--", str(target)])
-    if result["returncode"] != 0:
-        fail("cleanup_failed", "Git refused safe worktree removal; files were not force removed.")
-    return finish_cleanup(args, state)
+            fail('active_reference','A registered environment is stored inside the development worktree.')
+        if within(link,target) and link.is_symlink() and link.resolve().is_dir():
+            links[str(link.relative_to(target))] = str(link.resolve())
+    head = intent['head'] if intent else git(target,'rev-parse','HEAD')
+    cleanup_integration_proof(state,head)
+    source, algorithm = cleanup_source(state,head)
+    entries, root_identity, caches = cleanup_inventory(target,source,algorithm,links,intent)
+    if not intent and git(target,'status','--porcelain=v1','--untracked-files=no'):
+        fail('unique_files','Modified tracked source prevents cleanup.')
+    counts = {kind:sum(value['kind'] == kind for value in entries.values()) for kind in ('tracked','cache','environment_link','directory')}
+    proof = {'source_commit':head,'source_tree':state['integration']['source_tree'],'counts':counts,
+             'inventory_digest':digest(entries),'cache_roots':caches}
+    if args.get('dry_run',True):
+        return {'dry_run':True,'removable':str(target),'environment_links_only':sorted(links), 'disposable_cache_roots':caches,'cleanup_proof':proof,'recovery':bool(intent)}
+    recovering = bool(intent)
+    if not intent:
+        intent = {'token':uuid.uuid4().hex,'generation':generation(state),'head':head,'path':str(target),'time':now(),
+                  'root_identity':root_identity,'git_file_sha256':entries.get('.git',{}).get('sha256'), 'cache_roots':caches,'proof':proof}
+        state['cleanup_intent'] = intent
+        task_path = task_dir(store,state['task_id'])
+        _, parent = load_events(task_path)
+        commit_event(task_path,state,parent,'cleanup-intent',args['actor'])
+    # Revalidate references and every remaining source/cache file after the durable intent.
+    cleanup_task_references(state,store)
+    entries, root_identity, _ = cleanup_inventory(target,source,algorithm,links,intent)
+    if not registered or recovering:
+        remove_cleanup_entries(target,entries,root_identity,all_files=True)
+        if registered:
+            # No filesystem contents remain. Force only removal of the exact owned Git metadata.
+            if target.exists() or target.is_symlink() or not cleanup_registration(state):
+                fail('cleanup_unknown', 'Cleanup metadata ownership changed after directory removal.')
+            result = run(['git','-C',state['project']['path'],'worktree','remove','--force','--',str(target)])
+            if result['returncode']:
+                return {'cleanup_pending':True,'recoverable':True,'path':str(target),'result':result}
+        return finish_cleanup(args,state)
+    remove_cleanup_entries(target,entries,root_identity)
+    result = run(['git','-C',state['project']['path'],'worktree','remove','--',str(target)])
+    if result['returncode']:
+        return {'cleanup_pending':True,'recoverable':True,'path':str(target),'result':result}
+    return finish_cleanup(args,state)
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
@@ -3893,7 +4102,7 @@ def require_cleanup_inputs(state):
 def finish_cleanup(args, state):
     intent = state.get('cleanup_intent')
     target = Path(state['worktree']['path'])
-    if not intent or intent.get('generation') != generation(state) or target.exists() or git_registered_worktree(state['project']['path'], target, 'refs/heads/' + state['worktree']['branch']):
+    if not intent or intent.get('generation') != generation(state) or target.exists() or target.is_symlink() or cleanup_registration(state):
         fail('cleanup_unknown', 'Worktree removal needs matching intent and actual Git removal evidence.')
     state['cleaned'] = {'time': now(), 'actor': args['actor'], 'token': intent['token'], 'generation': generation(state)}
     receipt = {'generation': generation(state), 'worktree': copy.deepcopy(state['worktree']), 'owned_worktree': state['owned_worktree'],
@@ -4827,6 +5036,7 @@ def dialogue_contract(state):
         "turn_exit": "Continue only the current authorized action.", "approval_target": None,
         "allowed_next_operations": ["context", "status"],
         "goal_integrity": GOAL_INTEGRITY,
+        "run_handoff_policy": "A dispatch intent is not provider queue acceptance. After actual provider queue acceptance or a local runner process-start acknowledgment, record available evidence and end the current turn. Keep the Run open and its resource holds intact. reconciliation_required requests later user status or a later authorized dependent operation; it does not request active polling for first steps, metrics or completion.",
         "operation_scope": "allowed_next_operations guides dialogue and context steps for the current phase. It is not an exhaustive list of task, review, run, resource, integration or lifecycle operations. Those operations follow the current schema, actual program guards and existing user authorization. A closed task still requires authorized reopening before its work can change.",
         "templates": ["templates/conversation.md", "templates/record.md"],
         "applicability": "Apply this stage contract to related workflow work. The current user request determines scope. For a progress or status question, inspect and answer only; do not advance the stage or force a design question.",
@@ -6006,7 +6216,8 @@ def execute_run(args, root, store, external=False):
             if intent['mode'] != 'external' or ('timeout' in args and args['timeout'] != intent['timeout']):
                 fail('execution_denied', 'The durable execution intent cannot be replaced.')
             return {'ok': True, 'state': state, 'summary': summary(state), 'run': current,
-                    'runner_argv': intent['runner_argv'], 'already_dispatched': True, 'reconciliation_required': True}
+                    'runner_argv': intent['runner_argv'], 'already_dispatched': True, 'reconciliation_required': True,
+                    'handoff': {'state':'dispatch_intent','actual_acceptance':False,'end_turn':False}}
         if current['status'] != 'prepared':
             fail('execution_denied', 'Only an unstarted prepared run can execute.')
         validate_resource_reference(store, state, {**current, 'run_id': args['run_id']}, require_available=not external, capacity=True)
@@ -6021,14 +6232,28 @@ def execute_run(args, root, store, external=False):
         commit_event(path, state, previous, 'run-dispatch-intent', args['actor'])
     if external:
         return {'ok': True, 'state': state, 'summary': summary(state), 'run': current,
-                'runner_argv': command, 'reconciliation_required': True}
+                'runner_argv': command, 'reconciliation_required': True,
+                'handoff': {'state':'dispatch_intent','actual_acceptance':False,'end_turn':False}}
     # The pinned runner validates actual admission and writes its durable result.
     if args.get('detached'):
         log_path = Path(current['directory']) / 'runner.log'
         with open(log_path, 'xb') as log:
             process = subprocess.Popen(command, cwd=str(root), stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
         threading.Thread(target=process.wait, daemon=True).start()
-        return {'ok': True, 'state': state, 'summary': summary(state), 'run': current, 'runner_pid': process.pid, 'reconciliation_required': True}
+        acknowledgment = {'state':'runner_started','actual_acceptance':True,'end_turn':True,
+                          'evidence':{'kind':'local_runner_process_started','pid':process.pid,'host':socket.gethostname(),
+                                      'time':now(),'run_id':args['run_id'],'token':current['token'], 'runner_argv_digest':digest(command)},
+                          'reconciliation':'Later user status or a later authorized dependent operation; no active progress polling.'}
+        receipt = Path(current['directory']) / 'runner-started.json'
+        try:
+            atomic_json(receipt,acknowledgment)
+            sync_dir(receipt.parent)
+            acknowledgment = {**acknowledgment,'receipt_path':str(receipt),'receipt_sha256':sha_file(receipt)}
+        except OSError as error:
+            # Process creation already happened; a recording failure must not hide that fact or invite redispatch.
+            acknowledgment = {**acknowledgment,'receipt_recorded':False,'recording_error':str(error)}
+        return {'ok': True, 'state': state, 'summary': summary(state), 'run': current, 'runner_pid': process.pid,
+                'reconciliation_required': True, 'handoff': acknowledgment}
     # The runner owns the optional workload timeout and process-group cleanup.
     result = run(command, cwd=str(root), timeout=None)
     with mutation_locks(store, args, 'run-dispatch' if 'external' in locals() else 'resource-release'):

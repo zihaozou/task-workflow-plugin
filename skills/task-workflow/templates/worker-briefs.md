@@ -157,6 +157,19 @@ Use the program-selected scope and return startup exit/report evidence plus actu
 code origins. Stop when a required dependency or identity is missing or mutable.
 Preserve existing snapshots and running inputs; remove only owned, unreferenced
 content under the approved cleanup boundary.
+Recognized `__pycache__` bytecode and `.pytest_cache` entries are disposable with
+the owned worktree. Return compact counts and Git source proof, not cache backups
+or duplicate source archives. Retry partial deletion through the durable cleanup
+intent; preserve unknown files, changed source, external references, and Run inputs.
+
+For an assigned long local launch, use `run-execute` with `detached: true`.
+`run-dispatch` only reserves intent. After actual external queue acceptance or a
+process-start acknowledgment, return the available evidence and log location,
+then settle the worker activation. Do not wait for the first step, metrics, or a
+checkpoint. Keep the Run and task open and resources retained. Later checks need
+a user request, explicit monitoring authority, or an authorized dependent operation.
+A dependent operation needs evidence later; it does not keep this turn watching.
+
 
 Implement named work items from the approved plan in owned paths. Report the
 change revision, verification, and any deviation. Stop when a new important
