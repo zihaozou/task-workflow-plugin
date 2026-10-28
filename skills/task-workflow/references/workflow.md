@@ -476,12 +476,21 @@ reserves and records the check, then returns exact `runner_argv`
 for the private controller; it does not execute that external workload on the
 harness host. Direct `verify` and `integration-verify` wrappers run their
 program-pinned local runner. Formal Run startup validation uses the arguments,
-resource, and controller path recorded in that Run. For each new formal Run,
-freeze and validate its inputs, check references, then safely clean the owned
-worktree before guarded dispatch. Check live cross-task, runtime, and environment
-references and unique content before cleanup. A later approved revision
-recreates the fixed worktree path from current main as a new generation; retain
-earlier runs and evidence.
+resource, and controller path recorded in that Run. Every formal Run freezes and
+validates its inputs, checks references, and has a cleanup proof for the exact
+source before guarded dispatch. Check live cross-task, runtime, and environment
+references and unique content before cleaning an owned worktree. A later Run can
+reuse the already cleaned integrated source with its accepted review and
+integration evidence; it still gets its own frozen Run and successful startup
+validation. Recreate the fixed worktree path from current main only for an
+authorized source-changing fix. After cleanup, when the user authorizes an
+in-scope fix, explicitly pass `reuse_approved_plan:true` to
+`worktree-prepare`. The unchanged approved Plan remains approved; a new Plan is
+not required for this routine fix. Normal
+implementation, item reviews, and overall review still apply.
+Changes to confirmed scope, acceptance, or Plan require normal reentry and
+revised approvals. Cleanup removes only the owned checkout after source and
+reference checks. Preserve earlier Runs, frozen inputs, artifacts, and evidence.
 
 `run-prepare` freezes executable files directly from the recorded integrated
 Git commit's tree. Its immutable preparation intent and Run snapshot retain the

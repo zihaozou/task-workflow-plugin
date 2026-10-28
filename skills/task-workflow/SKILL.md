@@ -5,6 +5,10 @@ description: Automatically route substantive development and experiment action r
 
 # Task Workflow
 
+Apply the [shared communication policy](references/communication_policy.md) to
+ordinary messages, status replies, and Task Workflow stages. Hooks supply the
+same policy to ordinary prompts and registered-task recovery.
+
 ## Enrollment and context
 
 The main agent chooses the route from the current request and conversation
@@ -50,7 +54,14 @@ For `init`, `project` is the existing absolute base checkout path; `task_id` is
 the short label. Normally `root` is that same checkout. Enroll from the base with
 `owned_worktree:false` and omit `worktree`; use `worktree-prepare` after plan
 approval to create the dedicated owned checkout. Preserve an existing registered
-state root. Reuse an existing registered task worktree for fixes. New experiment data defaults to
+state root. Reuse an existing registered task worktree for fixes. After owned-
+worktree cleanup, when the user authorizes a routine in-scope fix, explicitly
+pass `reuse_approved_plan:true` to `worktree-prepare` if the approved Spec and
+Plan remain unchanged. This reuses the approval; it does not require a new Plan.
+Complete the normal implementation and review steps. If a fix changes confirmed scope,
+acceptance, or the approved Plan, reenter discussion and obtain the required
+revised approvals. Preserve earlier Runs and evidence when preparing another
+Run. New experiment data defaults to
 `<project>/.experiments/<experiment-id>/runs/<run-id>/`; an explicit experiment
 root can come from the user's already loaded conventions. Preserve existing
 registered paths and frozen run inputs. Let the program maintain its project
@@ -448,16 +459,19 @@ controller receipt path and SHA-256. `settlement_path` and `receipt_path` are
 mutually exclusive. A settlement records non-success; it cannot create a
 successful receipt, startup success, or acceptance.
 
-Each new formal Run follows accepted item and overall review, one ordinary
-squash integration, successful verification of that integrated revision,
-independent frozen inputs, successful startup validation, reference checks, and
-safe cleanup of the owned worktree before guarded dispatch. When the user has
-paused a workload or retained startup control, prepare and verify the environment
-and report readiness; do not dispatch training until the user authorizes its
-start. The cleanup receipt
-binds the generation, integration proof, Run startup proofs, and removal. A
-later approved revision recreates the fixed worktree from current main as a new
-generation; preserve earlier Runs and evidence.
+Each formal Run needs accepted item and overall reviews, a verified integrated
+source, frozen inputs, its own successful startup validation, reference checks,
+and a valid cleanup proof for that source before guarded dispatch. A later Run
+can reuse the already cleaned integrated source and its accepted review and
+integration evidence. It still gets its own frozen Run and successful startup
+validation. Recreate a worktree only for an authorized source-changing fix.
+After cleanup, use `worktree-prepare` with `reuse_approved_plan:true` for an
+in-scope fix when the approved Spec and Plan remain unchanged. The existing Plan
+approval applies. Complete implementation, item review, and overall review.
+Changes to confirmed scope, acceptance, or Plan require normal reentry and
+revised approvals. Worktree cleanup removes only the owned checkout after
+checking source and references. It preserves earlier Runs, frozen inputs,
+artifacts, and evidence.
 
 Recognized `__pycache__` bytecode and `.pytest_cache` entries are disposable
 with the owned worktree. Report compact cache counts; do not archive these caches

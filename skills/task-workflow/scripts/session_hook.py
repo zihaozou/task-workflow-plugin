@@ -8,6 +8,7 @@ import sys
 sys.dont_write_bytecode = True
 
 import workflow
+from communication_policy import load_policy
 
 SAFE_ID = re.compile(r'[A-Za-z0-9_-]+\Z')
 ITEM_STATES = ('pending', 'implementing', 'reviewing', 'complete')
@@ -90,7 +91,8 @@ def context_for(event):
         templates += ['templates/worker-briefs.md', 'templates/worker-reports.md']
     context_data = {'goal_integrity': workflow.GOAL_INTEGRITY, 'root': str(root), 'session_id': session_id, 'status_tool': 'context', 'task': facts,
          'templates': templates,
-         'recovery_guidance': 'Restore the recorded phase and its template. Read current task context before continuing authorized work. Hook delivery does not authorize work.'}
+         'recovery_guidance': 'Restore the recorded phase and its template. Read current task context before continuing authorized work. Hook delivery does not authorize work.',
+         'communication_policy': load_policy()}
     if isinstance(result.get('dialogue_contract'), dict):
         context_data['dialogue_contract'] = result['dialogue_contract']
     context = 'Registered Task Workflow context: ' + json.dumps(context_data,

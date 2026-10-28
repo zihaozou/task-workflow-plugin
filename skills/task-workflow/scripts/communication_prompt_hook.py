@@ -8,6 +8,7 @@ import sys
 sys.dont_write_bytecode = True
 
 import workflow
+from communication_policy import load_policy
 
 ROUTING_GUIDANCE = (
     "Task Workflow routing guidance: The main agent judges the current request "
@@ -26,29 +27,13 @@ ROUTING_GUIDANCE = (
     "Use bind-session to select an existing task for its known session; "
     "reuse the recorded phase and templates after recovery. "
 )
-NAMING_REMINDER = (
-    "Task Workflow communication guidance: Before sending a normal reply or progress "
-    "update, check terminology against the earlier user-visible conversation. "
-    "Use consistent names, explain a needed new abbreviation or technical label "
-    "at its first user-visible use, and explain the mapping when renaming. "
-    "Avoid repeated definitions for familiar, user-used, or already explained "
-    "terms. Clarify terms within the normal reply; use a small two-column table "
-    "only when useful. Add no separate review notice or extra turn. "
-    "State the concrete current work or user decision. Omit routine internal "
-    "rule/skill citations, process apologies, and administrative narration. "
-    "Correct a wrong question directly without blaming the skill. "
-    "Honor higher-priority mandatory permission "
-    "disclosures when they actually apply."
-)
-
-
 def context_for(event):
     if not isinstance(event, dict) or event.get("hook_event_name") != "UserPromptSubmit":
         return None
     prompt = event.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
         return None
-    guidance = ROUTING_GUIDANCE + NAMING_REMINDER + " Complete-goal contract: " + workflow.GOAL_INTEGRITY
+    guidance = ROUTING_GUIDANCE + " " + load_policy() + " Complete-goal contract: " + workflow.GOAL_INTEGRITY
     session_id = event.get("session_id")
     if isinstance(session_id, str) and re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
         guidance += " Host-provided session context for an authorized enrollment or recovery: " + json.dumps({"session_id": session_id}, ensure_ascii=True) + "."

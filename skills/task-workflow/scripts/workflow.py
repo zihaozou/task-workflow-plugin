@@ -1914,7 +1914,10 @@ def check_startup_inputs(state, current):
 
 def execution_argv_digest(current):
     if current.get("lifecycle_contract"):
-        return digest({"generation": current["generation"], "integration_commit": current["integration_commit"], "lifecycle_contract": current["lifecycle_contract"], "inputs": {key: current[key] for key in ("snapshot_contract", "argv", "validation_argv", "snapshot_scope", "code_store", "startup_inputs", "environment", "manifest_digest")}})
+        contract = {"generation": current["generation"], "integration_commit": current["integration_commit"], "lifecycle_contract": current["lifecycle_contract"], "inputs": {key: current[key] for key in ("snapshot_contract", "argv", "validation_argv", "snapshot_scope", "code_store", "startup_inputs", "environment", "manifest_digest")}}
+        if current['lifecycle_contract'] == 2:
+            contract['source_generation'] = current.get('source_generation')
+        return digest(contract)
     if current.get('snapshot_contract') == 3:
         return digest({key: current[key] for key in ('snapshot_contract', 'argv', 'validation_argv', 'snapshot_scope', 'code_store', 'startup_inputs', 'environment', 'manifest_digest')})
     return digest(current['argv'])
@@ -2451,7 +2454,10 @@ def prepare_run(args, state, root):
         'preparation_token': ownership['token'], 'preparation_intent': ownership['intent']}
     current['retention_hold_id'] = planned.get('retention_hold_id')
     if state.get('workflow_format') == 3:
-        current.update(lifecycle_contract=1, generation=generation(state), integration_commit=commit)
+        current.update(lifecycle_contract=2, generation=generation(state), integration_commit=commit,
+                       source_generation={'generation':generation(state),'integration_commit':commit,
+                           'source_tree':integration['source_tree'],'integration_token':integration['token'],
+                           'design_digest':state['design']['digest'],'verification_digest':digest(verified)})
     current['runtime'] = pin_runtime(state)
     atomic_json(destination / 'snapshot.json', current)
     state['runs'][run_id] = current
@@ -4072,10 +4078,22 @@ def prepare_generation(args, state):
     if state.get('process') and not plan_is_approved(state):
         fail('plan_approval_required', 'Approve the current implementation Plan before recreating the worktree.')
     previous = state.get('generation_history', [])[-1] if state.get('generation_history') else None
-    if previous and state.get('process') and previous.get('plan_digest') == state['process']['plan']['digest']:
-        fail('new_plan_required', 'A later generation requires its newly approved Plan.')
+    if args.get('reuse_approved_plan'):
+        receipts = [receipt for receipt in state.get('generation_history', []) if receipt['generation'] == current]
+        if (not state.get('process') or len(receipts) != 1
+                or receipts[0].get('plan_digest') != state['process']['plan']['digest']
+                or receipts[0].get('design', {}).get('digest') != state['design']['digest']
+                or receipts[0].get('cleanup') != state['cleaned']
+                or receipts[0].get('integration', {}).get('commit') != state['integration'].get('commit')):
+            fail('approved_plan_mismatch', 'Reuse requires the unchanged approved Spec/Plan and its exact cleaned generation.')
+    elif previous and state.get('process') and previous.get('plan_digest') == state['process']['plan']['digest']:
+        fail('new_plan_required', 'Use explicitly authorized reuse_approved_plan for an in-scope fix, or approve a changed Plan.')
     if any(c['status'] not in TERMINAL_CHECKS for c in state.get('checks', {}).values() if c['generation'] == current):
         fail('active_check', 'Settle generation checks before recreating its worktree.')
+    if args.get('reuse_approved_plan'):
+        state.setdefault('generation_continuations', []).append({'generation':current + 1,'previous_generation':current,
+            'design_digest':state['design']['digest'],'plan_digest':state['process']['plan']['digest'],
+            'actor':args['actor'],'authorization_source':args['authorization_source'],'time':now()})
     state['generation'] = current + 1
     state.update(worktree=copy.deepcopy(state['project']), owned_worktree=False, integration={})
     for key in ('cleaned', 'cleanup_intent', 'worktree_preparation'):
@@ -4124,6 +4142,53 @@ def require_generation_dispatch(state, current):
     proof = receipts[0] if len(receipts) == 1 else {}
     startup = current.get('startup_validation', {})
     validated = state.get('checks', {}).get(startup.get('check_id'), {})
+    if current['lifecycle_contract'] == 2:
+        source = current.get('source_generation', {})
+        integration = proof.get('integration', {})
+        verification = current.get('integration_verification', {})
+        verification_check = state.get('checks', {}).get(verification.get('check_id'), {})
+        contract = execution_argv_digest(current)
+        if (len(receipts) != 1 or integration.get('status') != 'complete'
+                or source.get('generation') != current['generation']
+                or source.get('integration_commit') != current['integration_commit']
+                or current.get('commit') != current['integration_commit']
+                or integration.get('commit') != source.get('integration_commit')
+                or integration.get('token') != source.get('integration_token')
+                or integration.get('source_tree') != source.get('source_tree')
+                or proof.get('source_tree') != source.get('source_tree')
+                or proof.get('design', {}).get('digest') != source.get('design_digest')
+                or current.get('design_digest') != source.get('design_digest')
+                or digest(verification) != source.get('verification_digest')
+                or not verification.get('passed') or verification.get('commit') != source.get('integration_commit')
+                or verification.get('design_digest') != source.get('design_digest')
+                or verification.get('integration_token') != source.get('integration_token')
+                or verification_check.get('status') != 'passed' or verification_check.get('kind') != 'integration'
+                or verification_check.get('source_binding', {}).get('commit') != source.get('integration_commit')
+                or verification_check.get('source_binding', {}).get('tree') != source.get('source_tree')
+                or verification_check.get('source_binding', {}).get('integration_token') != source.get('integration_token')
+                or verification_check.get('source_binding', {}).get('design_digest') != source.get('design_digest')
+                or verification_check.get('generation') != current['generation']
+                or verification_check.get('receipt_digest') != verification.get('receipt_digest')
+                or proof.get('owned_worktree') is not True
+                or proof.get('source_commit') != integration.get('head')
+                or proof.get('cleanup_intent', {}).get('head') != integration.get('head')
+                or proof.get('removed') != proof.get('worktree', {}).get('path')
+                or proof.get('cleanup_intent', {}).get('path') != proof.get('worktree', {}).get('path')
+                or proof.get('cleanup', {}).get('generation') != current['generation']
+                or proof.get('cleanup', {}).get('token') != proof.get('cleanup_intent', {}).get('token')
+                or startup.get('contract_digest') != contract
+                or validated.get('status') != 'passed' or validated.get('kind') != 'startup'
+                or validated.get('generation') != current['generation']
+                or validated.get('selectors', {}).get('run_id') != current['run_id']
+                or validated.get('source_binding', {}).get('run_id') != current['run_id']
+                or validated.get('source_binding', {}).get('kind') != 'startup'
+                or validated.get('source_binding', {}).get('contract_digest') != contract
+                or validated.get('receipt_digest') != startup.get('receipt_digest')):
+            fail("generation_cleanup_required", "Formal dispatch requires matching cleaned source provenance and this Run's own successful startup proof.")
+        return
+    if current['lifecycle_contract'] != 1:
+        fail('generation_cleanup_required', 'The Run lifecycle contract is unsupported.')
+    # Preserve the exact admission contract of existing immutable Runs.
     frozen = proof.get('runs', {}).get(current['run_id'], {})
     if (proof.get('integration', {}).get('commit') != current['integration_commit'] or
             frozen.get('contract_digest') != execution_argv_digest(current) or frozen.get('startup_validation') != startup or
@@ -4354,7 +4419,7 @@ def check_response(state, current, **extra):
 
 def settlement_runtime(state, current, kind):
     if (current.get('runtime', {}).get('execution_protocol') != 4 or
-            (kind == 'run' and current.get('lifecycle_contract') != 1) or
+            (kind == 'run' and current.get('lifecycle_contract') not in (1, 2)) or
             (kind == 'check' and state.get('workflow_format') != 3)):
         fail('settlement_unsupported', 'Retained legacy execution keeps its original reconciliation contract.')
     require_execution_protocol(state, current)
@@ -4423,7 +4488,7 @@ def execution_settlement_targets(state):
     for kind, collection in (('check', 'checks'), ('run', 'runs')):
         for name, current in state.get(collection, {}).items():
             if (current.get('runtime', {}).get('execution_protocol') != 4 or
-                    (kind == 'run' and (current.get('lifecycle_contract') != 1 or not current.get('execution_intent')))):
+                    (kind == 'run' and (current.get('lifecycle_contract') not in (1, 2) or not current.get('execution_intent')))):
                 continue
             try:
                 result[collection][name] = settlement_target(current, kind)
@@ -4764,7 +4829,7 @@ def _dispatch(operation, arguments):
             require_coordinator(args, state)
             current = get_run(state, args["run_id"])
             if current["status"] == "queued" and (Path(current["directory"]) / "execution.claim").exists():
-                if current.get('lifecycle_contract') != 1 or current.get('runtime', {}).get('execution_protocol') != 4:
+                if current.get('lifecycle_contract') not in (1, 2) or current.get('runtime', {}).get('execution_protocol') != 4:
                     fail('cancellation_denied', 'A claimed execution requires reconciliation before cancellation.')
                 cancel_unstarted_claim(args, state, current, 'run')
             if current["status"] not in ("planned", "preparing", "prepared", "queued") and not (current["status"] == "awaiting_artifacts" and current.get("execution")):
@@ -4970,7 +5035,7 @@ COMMANDS.update({
         {'resource_id': 'string', 'hold_id': 'string', 'outcome': 'string', 'evidence': 'array', 'authorization_source': 'string'}),
     'lifecycle-upgrade': mutation('Explicitly upgrade quiescent legacy lifecycle metadata without replacing old Run or runtime bytes.', {'authorization_source': 'string'}),
 })
-COMMANDS['worktree-prepare']['optional']['expected_generation'] = 'integer'
+COMMANDS['worktree-prepare']['optional'].update(expected_generation='integer', reuse_approved_plan='boolean')
 COMMANDS['run-reconcile']['optional']['settlement_path'] = 'string'
 COMMANDS['run-reconcile']['description'] = 'Reconcile a matching execution receipt or current non-success controller settlement without repeating execution.'
 COMMANDS['integrate']['optional'].update(preserve_unrelated_dirty='boolean', expected_preservation_digest='string')

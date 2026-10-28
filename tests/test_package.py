@@ -24,9 +24,10 @@ NATIVE_RELEASE_FILES = {
     'skills/task-workflow/references/workflow.md',
     'assets/icon.svg', 'assets/icon.png',
     'skills/task-workflow/references/deepseek.md',
+    'skills/task-workflow/references/communication_policy.md',
 } | {'skills/task-workflow/scripts/' + name for name in (
     'bootstrap.py', 'workflow.py', 'runner.py', 'mcp_server.py', 'session_hook.py',
-    'communication_prompt_hook.py', 'deepseek_context.py',
+    'communication_prompt_hook.py', 'communication_policy.py', 'deepseek_context.py',
 )} | {'skills/task-workflow/templates/' + name for name in (
     'README.md', 'phases.md', 'conversation.md', 'record.md',
     'worker-briefs.md', 'worker-reports.md', 'spec.md', 'plan.md',
@@ -41,7 +42,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.20')
+        self.assertEqual(manifest['version'], '0.1.21')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -85,7 +86,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(packages), 1)
         package = packages[0]
         self.assertEqual(package['name'], '@local/task-workflow')
-        self.assertEqual(package['version'], '0.1.20')
+        self.assertEqual(package['version'], '0.1.21')
         paths = [entry['path'] for entry in package['files']]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(set(paths), NATIVE_RELEASE_FILES)
@@ -283,7 +284,7 @@ class PackageTests(unittest.TestCase):
 
     def test_runtime_assets_and_python_syntax(self):
         for name in ('workflow.py', 'runner.py', 'mcp_server.py',
-                     'session_hook.py', 'communication_prompt_hook.py', 'deepseek_context.py'):
+                     'session_hook.py', 'communication_prompt_hook.py', 'communication_policy.py', 'deepseek_context.py'):
             self.assertTrue((SCRIPTS / name).is_file(), name)
         self.assertFalse((SCRIPTS / 'status_view.py').exists())
         self.assertFalse((ROOT / 'skills/task-workflow/assets/workflow.html').exists())
@@ -309,8 +310,12 @@ class PackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='plugin path with spaces ') as temporary:
             target = Path(temporary) / 'skills/task-workflow/scripts'
             target.mkdir(parents=True)
-            for name in ('bootstrap.py', 'communication_prompt_hook.py', 'session_hook.py', 'workflow.py'):
+            for name in ('bootstrap.py', 'communication_prompt_hook.py', 'communication_policy.py', 'session_hook.py', 'workflow.py'):
                 (target / name).write_bytes((SCRIPTS / name).read_bytes())
+            reference = target.parent / 'references'
+            reference.mkdir()
+            (reference / 'communication_policy.md').write_bytes(
+                (ROOT / 'skills/task-workflow/references/communication_policy.md').read_bytes())
             for event, entries in hooks.items():
                 command = entries[0]['hooks'][0]['command'].replace('${PLUGIN_ROOT}', temporary)
                 self.assertEqual(len(shlex.split(command)), 5)
@@ -461,7 +466,10 @@ class ContextTests(unittest.TestCase):
                 result = session_hook.context_for(self.event(path))
             context = result['hookSpecificOutput']['additionalContext']
             self.assertIn('example', context)
+            self.assertIn('exponential moving average (EMA)', context)
             self.assertNotIn('PRIVATE', context)
+            recovered = json.loads(context.removeprefix('Registered Task Workflow context: '))
+            self.assertEqual(recovered['communication_policy'], communication_prompt_hook.load_policy())
             self.assertEqual(dispatch.call_args_list[-1], mock.call('context', {'root': str(path), 'task_id': 'example'}))
 
     def test_ambiguous_binding_and_invalid_identifiers_are_quiet(self):
@@ -537,7 +545,26 @@ class ContextTests(unittest.TestCase):
         context = contexts[0]
         self.assertNotIn('PRIVATE_PROMPT_SENTINEL', context)
         self.assertIn(communication_prompt_hook.ROUTING_GUIDANCE, context)
-        self.assertIn(communication_prompt_hook.NAMING_REMINDER, context)
+        policy = communication_prompt_hook.load_policy()
+        self.assertIn(policy, context)
+        normalized_policy = ' '.join(policy.split())
+        self.assertIn('exponential moving average (EMA)', normalized_policy)
+        self.assertIn('The discrepancy decreased.', normalized_policy)
+        for clause in ('Omit routine internal rule or skill citations',
+                       'Correct a wrong question directly',
+                       'Do not add a separate review notice or extra turn',
+                       'Honor a mandatory higher-priority permission',
+                       'The plan is ready. Do you approve it?',
+                       'Prefer approved, familiar English words that fit',
+                       'Keep general-word meaning and part of speech stable',
+                       'Use active voice and name known actors.',
+                       'Use direct action verbs and simple tenses',
+                       'Keep necessary domain terms, technical nouns and verbs',
+                       'Use equivalent clarity principles in natural Chinese.',
+                       'After: “The results suggest unstable high-noise training.”',
+                       'After: “The samples contain substantial noise and color shifts.”',
+                       'After: “Compute precision and intermediate rounding both changed. The discrepancy decreased.”'):
+            self.assertIn(clause, normalized_policy)
         hooks = json.loads((ROOT / 'hooks/hooks.json').read_text())['hooks']
         for entries in hooks.values():
             for entry in entries:
@@ -562,6 +589,10 @@ class ContextTests(unittest.TestCase):
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temporary:
                 folder = Path(temporary)
                 (folder / name).write_bytes((SCRIPTS / name).read_bytes())
+                (folder / 'communication_policy.py').write_bytes((SCRIPTS / 'communication_policy.py').read_bytes())
+                (folder / 'references').mkdir()
+                (folder / 'references/communication_policy.md').write_bytes(
+                    (ROOT / 'skills/task-workflow/references/communication_policy.md').read_bytes())
                 (folder / "workflow.py").write_text("from pathlib import Path\nGOAL_INTEGRITY = 'Preserve the complete fixture goal.'\nCHECK_STATES = ()\ndef find_registered_root(path): return path\ndef dispatch(op, args):\n    return {'tasks': [{'task_id': 't', 'session_id': 's'}]} if op == 'list' else {'summary': {'task_id': 't', 'session_id': 's'}}\n")
                 result = subprocess.run([sys.executable, str(folder / name)], input=json.dumps(event), text=True,
                                         capture_output=True, timeout=10)

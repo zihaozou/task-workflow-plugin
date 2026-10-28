@@ -6,6 +6,7 @@ approvals, delegated work, evidence review, and optional frozen runs.
 It combines a skill, recovery and communication hooks, and a Python workflow
 program exposed through command-line and MCP tools. Codex and DeepSeek Harness
 use that same program and skill through their native registrations.
+This checkout packages release 0.1.21.
 
 ## Codex installation and enrollment
 
@@ -280,11 +281,12 @@ flowchart LR
   D --> E[One authorized squash commit]
   E --> F[Verify integrated revision]
   F --> G[Freeze Run inputs and validate startup]
-  G --> H[Check references and clean worktree]
+  G --> H[Check references and source cleanup proof]
   H --> I[Guarded formal dispatch]
   I --> J[Accept artifacts and outcome]
-  J --> K{Another approved revision?}
-  K -->|yes| A
+  J --> K{Next Run?}
+  K -->|same integrated source| G
+  K -->|authorized source fix| A
 ```
 
 Implementation approval and integration authorization are recorded separately.
@@ -293,12 +295,20 @@ with normal Git hooks and signing. Verify that revision before freezing dependen
 runs. Integration requires a clean base by default. An authorized integration
 can preserve unrelated dirty tracked work through a preview-bound preservation
 digest, then verify the exact integrated commit in a detached checkout and
-freeze Run inputs from that commit's Git objects. Each new formal Run follows
-accepted implementation and overall review,
-integration and verification, input freeze and startup validation, reference
-checks, owned-worktree cleanup, then guarded dispatch. A later approved revision
-recreates a worktree from current main as a new generation and creates a new
-immutable Run for the same experiment. Recognized `__pycache__` bytecode and
+freeze Run inputs from that commit's Git objects. A formal Run needs accepted
+implementation and overall review, a verified integrated source, frozen inputs,
+its own successful startup validation, reference checks, and a valid cleanup
+proof for that source before guarded dispatch. A later Run can reuse the already
+cleaned integrated source and its accepted review and integration evidence; it
+still gets its own frozen Run and startup validation. Recreate a worktree only
+for an authorized source-changing fix. After cleanup, explicitly pass
+`reuse_approved_plan:true` to `worktree-prepare` while the approved Spec and
+Plan remain unchanged; the existing Plan approval applies. The fix still needs
+normal implementation, item review, and overall review. Changes to confirmed
+scope, acceptance, or Plan require normal reentry and revised approvals.
+Cleanup removes only the owned checkout after checking source and references;
+it preserves earlier Runs, frozen inputs, artifacts, and evidence. Recognized
+`__pycache__` bytecode and
 `.pytest_cache` entries are disposable with the owned worktree. Cleanup records
 compact counts; Git stores unchanged committed source. Keep caches and duplicate
 source archives out of cleanup evidence. Retry partial deletion through the
