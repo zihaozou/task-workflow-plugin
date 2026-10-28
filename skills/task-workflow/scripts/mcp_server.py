@@ -5,6 +5,7 @@ The adapter owns no task, experiment, run, or allocation lifecycle state.
 """
 import json
 import math
+from pathlib import Path
 import sys
 
 import workflow
@@ -54,9 +55,19 @@ def parse_json(data):
                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError("invalid JSON number")))
 
 
+def package_version():
+    """Read the release identity from this installed package."""
+    manifest = Path(__file__).resolve().parents[3] / "package.json"
+    version = json.loads(manifest.read_text(encoding="utf-8"))["version"]
+    if not isinstance(version, str) or not version.strip():
+        raise ValueError("The installed package must declare a nonempty version.")
+    return version
+
+
 class Server:
     def __init__(self):
         self.initialized = False
+        self.version = package_version()
         self.tools = []
         for tool in workflow.command_schemas():
             if tool["name"] in ("init", "status", "context", "bind-session", "recover"):
@@ -92,7 +103,7 @@ class Server:
             selected = requested if requested in VERSIONS else VERSIONS[-1]
             self.initialized = True
             result = {"protocolVersion": selected, "capabilities": {"tools": {"listChanged": False}},
-                      "serverInfo": {"name": "task-workflow", "version": "0.1.15"}}
+                      "serverInfo": {"name": "task-workflow", "version": self.version}}
         elif method == "ping":
             result = {}
         elif not self.initialized:

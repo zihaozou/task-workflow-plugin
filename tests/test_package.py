@@ -41,7 +41,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.16')
+        self.assertEqual(manifest['version'], '0.1.17')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -85,7 +85,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(packages), 1)
         package = packages[0]
         self.assertEqual(package['name'], '@local/task-workflow')
-        self.assertEqual(package['version'], '0.1.16')
+        self.assertEqual(package['version'], '0.1.17')
         paths = [entry['path'] for entry in package['files']]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(set(paths), NATIVE_RELEASE_FILES)
@@ -129,6 +129,7 @@ class PackageTests(unittest.TestCase):
         server = json.loads((ROOT / '.mcp.json').read_text())['mcpServers']['task-workflow']
         with tempfile.TemporaryDirectory(prefix='plugin root with spaces ') as temporary:
             plugin = Path(temporary)
+            shutil.copyfile(ROOT / 'package.json', plugin / 'package.json')
             target = plugin / 'skills/task-workflow/scripts'
             target.mkdir(parents=True)
             for source in SCRIPTS.glob('*.py'):
@@ -147,6 +148,8 @@ class PackageTests(unittest.TestCase):
             replies = [json.loads(line) for line in result.stdout.splitlines()]
             self.assertEqual([reply['id'] for reply in replies], [1, 2, 3])
             self.assertEqual(replies[0]['result']['serverInfo']['name'], 'task-workflow')
+            package_version = json.loads((ROOT / 'package.json').read_text())['version']
+            self.assertEqual(replies[0]['result']['serverInfo']['version'], package_version)
             tools = replies[1]['result']['tools']
             expected = session_hook.workflow.command_schemas()
             expected_names = {entry['name'] for entry in expected}
