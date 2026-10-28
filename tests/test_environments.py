@@ -350,6 +350,28 @@ class RuntimeProvenanceTests(Fixture):
                 w.atomic_json(receipt, value)
                 self.error('runtime_install_required', lambda:w.runtime_install_receipt(receipt, self.runtime_environment, self.cache_root))
 
+    def test_metadata_only_distribution_has_explicit_frozen_proof(self):
+        for environment in (self.environment, self.runtime_environment):
+            metadata, module = self.install_distribution(environment, name='dependency-bundle')
+            module.unlink()
+            prefix = metadata.name + '/'
+            (metadata / 'RECORD').write_text(prefix + 'METADATA,,\n' + prefix + 'RECORD,,\n')
+        result = self.register_runtime()
+        proof = result['runtime_provenance']
+        origin = proof['cache_origins'][0]
+        self.assertEqual(origin['distribution'], 'dependency-bundle')
+        self.assertEqual(origin['kind'], 'metadata-only')
+        self.assertEqual(origin['version'], '1.0')
+        self.assertEqual(origin['metadata']['sha256'], w.sha_file(metadata / 'METADATA'))
+        self.assertEqual(origin['record']['sha256'], w.sha_file(metadata / 'RECORD'))
+        self.assertEqual(w.require_runtime_environment(self.state, 'derived'), proof)
+
+    def test_declared_missing_payload_is_not_metadata_only(self):
+        self.matching()
+        package = next((self.runtime_environment / 'lib').glob('python*/site-packages'))
+        (package / 'demo.py').unlink()
+        self.error('cache_link_required', lambda:self.register_runtime())
+
     def test_runtime_can_live_in_experiment_outputs(self):
         self.matching()
         target = self.repo / '.experiments' / 'experiment' / 'runs' / 'run' / 'runtime'

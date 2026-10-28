@@ -2935,14 +2935,26 @@ def bind_environment(args, state, store):
 
 
 def distribution_records(path):
-    script = """import importlib.metadata,json
+    script = """import hashlib,importlib.metadata,json
 result=[]
 for dist in importlib.metadata.distributions():
-    files=[item for item in (dist.files or []) if '.dist-info/' not in str(item) and '.egg-info/' not in str(item) and '..' not in item.parts and not str(item).endswith('.pth')]
+    declared=dist.files
+    payload=[item for item in (declared or []) if not any(part.endswith(('.dist-info','.egg-info')) for part in item.parts)]
+    files=[item for item in payload if '..' not in item.parts and not str(item).endswith('.pth')]
+    metadata_only=None
+    if declared and not payload:
+        metadata_only={}
+        for kind,filename in [('metadata','METADATA'),('record','RECORD')]:
+            entry=next((item for item in declared if item.name==filename and any(part.endswith('.dist-info') for part in item.parts)),None)
+            if entry is None:
+                metadata_only=None
+                break
+            path=dist.locate_file(entry)
+            metadata_only[kind]={'path':str(path.absolute()),'sha256':hashlib.sha256(path.read_bytes()).hexdigest()}
     imports=[item for item in files if str(item).endswith(('.py','.pyd','.dylib','.dll')) or '.so' in item.name]
     selected=next(iter(sorted(imports or files,key=str)),None)
     direct=dist.read_text('direct_url.json')
-    result.append({'name':dist.metadata.get('Name',''),'version':dist.version,'direct_url':json.loads(direct) if direct else None,'representative':str(dist.locate_file(selected).absolute()) if selected else None})
+    result.append({'name':dist.metadata.get('Name',''),'version':dist.version,'direct_url':json.loads(direct) if direct else None,'representative':str(dist.locate_file(selected).absolute()) if selected else None,'metadata_only':metadata_only})
 print(json.dumps(result,sort_keys=True))"""
     result = run([str(Path(path) / 'bin/python'), '-I', '-c', script])
     try:
@@ -2977,7 +2989,19 @@ def runtime_cache_origins(environment, cache_root, records, state=None):
     origins = []
     for record in records:
         if not record.get('representative'):
-            fail('cache_link_required', 'Each runtime distribution needs a RECORD-backed package file in the shared cache.')
+            metadata_only = record.get('metadata_only')
+            if not metadata_only:
+                fail('cache_link_required', 'Each runtime distribution needs a RECORD-backed package file or verified metadata-only RECORD.')
+            identity = {}
+            for kind in ('metadata', 'record'):
+                item = metadata_only[kind]
+                path = Path(item['path'])
+                if not within(path, env) or not path.is_file() or sha_file(path) != item['sha256']:
+                    fail('cache_link_required', 'Metadata-only distributions require actual METADATA and payload-free RECORD files.')
+                identity[kind] = {'path': str(path.relative_to(env)), 'sha256': item['sha256']}
+            origins.append({'distribution': distribution_name(record['name']), 'kind': 'metadata-only',
+                            'version': record['version'], **identity})
+            continue
         path = Path(record['representative'])
         if not within(path, env) or not path.is_file() or not within(path.resolve(), cache):
             fail('cache_link_required', 'Runtime package files must resolve into the declared shared uv cache.')
