@@ -87,10 +87,13 @@ Summarize decisions from other conversation languages in English and reference
 the original source. Preserve externally supplied raw data and behavior-critical
 literal values.
 
-## Mandatory conversation sequence
+## Evidence-based conversation and approval boundaries
 
-This ordered process is required for an enrolled task. It is not optional
-speaking advice. Use natural Chinese or English with the user. Write persisted
+Use the applicable contracts below for an enrolled task. Advance from actual
+facts, satisfied prerequisites, and existing authorization rather than replaying
+a fixed dialogue script. Preserve prior answers and approvals that still apply;
+ask only a real unresolved question. Record actual sources without inventing
+historical questions or confirmations. Use natural Chinese or English with the user. Write persisted
 summaries and deliverables in English and reference the original messages.
 Use concise bold labels with grouped bullets or tables, following the stage
 layouts in [templates/conversation.md](templates/conversation.md). Keep one
@@ -136,12 +139,20 @@ for mutations. Refresh context after a conflict or interruption. Preserve exact
 digests in program records and approval bindings. Show readable revision titles
 to the user; long digests are not required in conversation.
 
-### 1. Inspect context, then open discussion
+### 1. Inspect context, investigate feasibility, then open discussion
 
 Read the supplied context and relevant actual project sources before the first
 substantive discussion reply. Establish current behavior, affected components,
 and evidence gaps. Record intent with `process-intent` and findings with
-`process-exploration`. Record the first important unresolved question with
+`process-exploration`. Delegate bounded exploration to suitable available workers.
+Before Spec, resolve consequential feasibility questions with small experiments
+against the actual relevant code, tools, data, and environment. Each probe states
+its question, exact inputs, real dependency/runtime versions, procedure,
+pass/refute criterion, observed result, and retained evidence. A source inspection
+may settle a question without execution; explain that evidence rather than
+inventing a probe. Record inconclusive or refuted results and their consequences.
+Do not defer basic feasibility discovery until implementation or create a formal
+Run solely to record a design probe. Record the first important unresolved question with
 `process-question` before sending it.
 
 The first discussion reply must contain, in this order:
@@ -201,6 +212,10 @@ section. Write the complete Spec with `process-design` using
 [templates/spec.md](templates/spec.md). Cover intent, success, scope, observed
 current behavior and impact, required behavior, decisions and authority,
 constraints, delegated choices, acceptance, failure conditions, and open questions.
+Source consequential design choices from actual investigations and feasibility
+evidence. When relevant, explain performance and monetary/resource cost, expected
+scale, what is reused, what must be recomputed, and the evidence behind the model.
+An estimate remains an estimate; a tool being available does not prove behavior.
 Use authoritative intent, requirements, exploration, decisions, components, and
 verification records rather than duplicating their authority in prose. Obtain an
 independent gap review against those sources and record `process-design-review` for that exact design digest.
@@ -224,7 +239,11 @@ its responsibility, consumed and produced interfaces, ordered action steps,
 named checks and their assertions, verification commands or inspection targets,
 and expected outcomes. Map tasks to Spec components and acceptance requirements.
 Include ownership, dependencies, independent review, applicable integration and
-recovery. Prepare/Implement/Verify/Review/Integrate is a lifecycle overview;
+recovery. Declare exact nonoverlapping file ownership and consumed/produced
+interface contracts. Distinguish contract dependencies (an accepted interface),
+implementation dependencies (accepted producer behavior), and integration
+dependencies (accepted producer and current composition/integration-test evidence). A contract dependency can
+permit concurrent disjoint work; it does not require finished producer code. Prepare/Implement/Verify/Review/Integrate is a lifecycle overview;
 it does not replace concrete implementation tasks. An implementer must be able
 to act without inventing consequential behavior or test expectations. In the
 approval reply, use meaningful component names and readable executable command
@@ -247,15 +266,22 @@ Prepare the registered worktree and execute approved plan items. Report a new
 result, actual verification evidence, current review state, and the next allowed
 action when relevant. A worker report is evidence to inspect. It does not itself
 prove acceptance. Record item transitions and separate requirements and quality
-verdicts; complete independent overall review before delivery. Report integration,
+verdicts. For newly approved semantic plan contract version 2, follow implementation plus self-test,
+independent requirements review, independent quality review, then main-agent
+acceptance. The three worker roles have distinct actors and review the current
+revision. Main acceptance inspects actual results against the complete objective;
+it is not a mandatory additional independent verifier stage. Report integration,
 execution, artifact acceptance, and closure from observed state and their separate
 authority sources. Wait only for a real missing user decision or authorization;
 continue routine work within approved scope.
 
 At every stage, a new important unknown outside confirmed design or delegated
 scope requires `process-reenter`, a recorded question, and user discussion before
-the dependent action. Preserve unaffected facts and evidence. Update affected
-design/plan revisions and obtain their approvals again; stale approvals cannot
+the dependent action. Preserve unaffected facts and evidence. In semantic plan contract version 2,
+record actual affected requirement IDs in `question.scope`; source-equal
+unaffected items may retain applicable approval while affected items and their
+dependency closure wait. Global or unscoped changes do not imply independence.
+Update affected design/plan revisions and obtain their approvals again; stale approvals cannot
 approve a changed revision. Record worker discoveries before asking the resulting
 question. Follow [templates/phases.md](templates/phases.md) and
 [templates/conversation.md](templates/conversation.md) as required phase contracts.
@@ -304,7 +330,11 @@ See [references/deepseek.md](references/deepseek.md) for native answer details.
 
 ## Roles and review
 
-The primary agent coordinates and reviews the task.
+The primary agent coordinates and accepts the task. After dispatching workers,
+wait for their actual results and cleanup. Inspect evidence, answer status, and
+coordinate within authority; do not implement in parallel with delegated work.
+The program's pending-worker guard governs workflow mutations; instructions do
+not imply interception of arbitrary host file writes.
 
 Choose each delegation through capabilities actually exposed by the current
 host. Preserve explicit user model and execution preferences. On Codex, use
@@ -345,14 +375,38 @@ delegation mechanism; verify what the child receives and keep the explicit brief
 It inspects that context before action and does not acquire the parent's binding
 from the brief. Binding changes require actual authority; a coordinator brief
 is not new human approval.
-Have a task reviewer return separate requirements and quality verdicts against the
-actual diff and evidence.
-Keep blocked reasons and next actions separate. Complete an independent overall
-review after implementation items pass. Approved design, item state, and worker
-claims do not prove success. Use
+For semantic plan contract version 2 under workflow control version 2, assign an implementer, an independent
+requirements reviewer, and a different independent quality reviewer. The
+implementer returns its self-test evidence first. Requirements review must pass
+before quality review; both inspect the same current change and actual evidence.
+The main agent then performs final acceptance, including cross-item behavior and
+complete objective coverage. A failed review returns affected work for repair;
+stale revision evidence cannot accept a fix. No separate mandatory verifier
+activation is added. New tasks default to workflow control version 2 and reject
+new Plan version 1 submissions. A guarded control upgrade preserves an existing
+authoritative Plan version 1, its digest, accepted evidence, and item protocol;
+it does not invent revised user approval. Its historical continuation stays
+compatible until actual approval of a new Plan version 2. Every new or changed
+Plan submitted under control version 2 must explicitly use `contract_version: 2`.
+Keep blocked reasons and next actions separate. Approved design, item state, and
+worker claims do not prove success. Use
 [templates/worker-briefs.md](templates/worker-briefs.md) and
 [templates/worker-reports.md](templates/worker-reports.md) for delegation and
 return formats. Store their references and verdicts in the one task record.
+
+At implementation start, use the host's actually exposed goal capability when
+available and record its exact receipt. Preserve the full objective. The native
+goal covers the implementation generation: request completion after validated
+generation cleanup, without waiting for an independently open long-running Task
+or Run. Pause only with explicit actual user authority, recorded through
+`goal_pause_authorization` on `process-reenter` or an actual goal request.
+An agent-discovered unknown alone does not authorize pausing a native goal. Discover actual capability and schema before invoking it. If
+no native goal capability is exposed, record the request and unavailable status;
+do not invent a goal ID, successful invocation, timer, or automatic continuation.
+Goal, task, item, integration, experiment, Run, and resource lifecycles remain
+independent. A source revision can support multiple immutable Runs without
+repeating accepted implementation or integration; each Run retains its own
+inputs, output, provenance, acceptance, and closure.
 
 Discuss unresolved design effects, file scope, verification, and recovery before
 approval. After approval, continue routine implementation. Revisit material
@@ -459,7 +513,7 @@ controller receipt path and SHA-256. `settlement_path` and `receipt_path` are
 mutually exclusive. A settlement records non-success; it cannot create a
 successful receipt, startup success, or acceptance.
 
-Each formal Run needs accepted item and overall reviews, a verified integrated
+Each formal Run needs accepted item reviews and main acceptance (or legacy overall review), a verified integrated
 source, frozen inputs, its own successful startup validation, reference checks,
 and a valid cleanup proof for that source before guarded dispatch. A later Run
 can reuse the already cleaned integrated source and its accepted review and
@@ -467,7 +521,7 @@ integration evidence. It still gets its own frozen Run and successful startup
 validation. Recreate a worktree only for an authorized source-changing fix.
 After cleanup, use `worktree-prepare` with `reuse_approved_plan:true` for an
 in-scope fix when the approved Spec and Plan remain unchanged. The existing Plan
-approval applies. Complete implementation, item review, and overall review.
+approval applies. Complete implementation, sequential independent reviews, and main acceptance.
 Changes to confirmed scope, acceptance, or Plan require normal reentry and
 revised approvals. Worktree cleanup removes only the owned checkout after
 checking source and references. It preserves earlier Runs, frozen inputs,

@@ -14,6 +14,7 @@ import {
   WORKFLOW_SCOPE,
 } from '../adapters/deepseek/index.js';
 import { ownedDelegations, collectionTools, delegationFacades, DELEGATE_TOOL } from '../adapters/deepseek/delegation.js';
+import { workflowLedger } from '../adapters/deepseek/workflow-ledger.js';
 import { taskScopedRecovery, INVALID_TOOL_JSON, CONTEXT_PREFIX } from '../adapters/deepseek/recovery.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -210,6 +211,18 @@ test('dialogue: each capability snapshot uses the actual current native catalog'
   assert.ok(current.includes('"owned_delegation_available":true'));
 });
 
+test('dialogue: goal capability contains only actually exposed native tool schemas', () => {
+  let schemas = [];
+  const ctx = { tools: { schemas: () => schemas } };
+  const read = () => JSON.parse(capabilityContext(ctx, {}).slice('Current native Task Workflow capabilities: '.length));
+  assert.deepEqual(read().native_goal.available_tools, []);
+  schemas = [{ name: 'create_goal', parameters: { type: 'object', properties: { objective: { type: 'string' } } } },
+    { name: 'unrelated_goal_story', parameters: {} }];
+  assert.deepEqual(read().native_goal.available_tools, [{ tool_name: 'create_goal', parameters: schemas[0].parameters }]);
+  assert.ok(read().native_goal.instruction.includes('never invent a native goal ID'));
+  assert.ok(read().coordinator_wait.includes('do not implement in parallel'));
+});
+
 test('dialogue: native question guidance follows current schema and runtime root ownership', () => {
   const agent = { id: 'resumed-child', session: { header: { parentSessionId: 'historical-parent' } } };
   const schema = { name: 'ask_user_question', parameters: { type: 'object', properties: { questions: { type: 'array' } } } };
@@ -357,6 +370,134 @@ test('recovery: post-backoff task/catalog guards affect only added retries and d
     if (stop === 'caller') fixture.signal.abort(); else fixture.recovery.close();
     assert.equal(await pending, undefined); fixture.recovery.close();
   }
+});
+
+test('delegation: actual v2 Python ledger binds native receipt and settles current task', async () => {
+  const directory = fs.realpathSync(temporary());
+  const script = path.join(ROOT, 'skills/task-workflow/scripts/workflow.py');
+  const invoke = (operation, args) => {
+    const result = runProcessSync('python3', [script, operation, '--root', directory, '--json-args', '-'], { input: JSON.stringify(args) });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return JSON.parse(result.stdout);
+  };
+  try {
+    for (const args of [['init', '-q', directory], ['-C', directory, '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid', 'commit', '--allow-empty', '-qm', 'Fixture']]) {
+      assert.equal(spawnSync('git', args).status, 0);
+    }
+    let state = invoke('init', { project: directory, task_id: 'native-ledger', title: 'Actual Python native ledger',
+      actor: 'pm', authorization_source: 'Explicit isolated test fixture', session_id: 'actual-parent', integration_required: false }).state;
+    assert.equal(state.workflow_control_version, 2);
+    state = invoke('worker-assign', { task_id: state.task_id, actor: 'pm', expected_version: state.version,
+      assignment_id: 'inspect', item_id: 'exploration', role: 'explorer', worker_id: 'explorer', owned_paths: ['code.py'], authorization_source: 'Explicit isolated test fixture' }).state;
+    const parent = nativeParent('actual-parent');
+    const ledger = workflowLedger({ readCurrent: agent => readContextSync({ cwd: directory, session_id: agent.session.header.id },
+      { python: 'python3', helper: path.join(ROOT, 'skills/task-workflow/scripts/deepseek_context.py'), environment: () => process.env }), call: invoke });
+    const result = deferred();
+    const registry = ownedDelegations({ async startActivation(spec) {
+      return { childId: spec.childId, messageId: 'observed-message', result: result.promise, async dispose() {} };
+    } }, ledger);
+    try {
+      const assignment = ledger.prepare(parent, 'inspect');
+      const handle = await registry.start({ request: { parent } });
+      await registry.bind(handle.childId, parent, assignment);
+      state = invoke('status', { task_id: state.task_id }).state;
+      assert.equal(state.workers.inspect.status, 'active');
+      assert.equal(state.workers.inspect.activation.child_session_id, handle.childId);
+      result.resolve({ stopReason: 'completed', output: [{ type: 'text', text: 'Observed explorer report' }] });
+      await registry.wait(registry.descriptor(handle.childId, parent).handleId, parent);
+      state = invoke('status', { task_id: state.task_id }).state;
+      assert.equal(state.workers.inspect.status, 'settled');
+      assert.equal(state.workers.inspect.settlement.outcome, 'succeeded');
+      assert.equal(state.workers.inspect.settlement.result.native_result.output[0].text, 'Observed explorer report');
+    } finally { await registry.close(); }
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('delegation: ledger uses current task/version and exact terminal evidence without inventing success', () => {
+  const calls = [];
+  const state = { coordinator: 'pm', version: 4, workflow_control_version: 2,
+    workers: { build: { status: 'assigned' } } };
+  const ledger = workflowLedger({
+    readCurrent: () => 'Registered Task Workflow context: ' + JSON.stringify({ root: '/project', task: { task_id: 'task' } }),
+    call(operation, args) {
+      calls.push({ operation, args });
+      if (operation === 'status') { assert.deepEqual(args, { root: '/project', task_id: 'task' }); return { ok: true, state }; }
+      assert.equal(args.expected_version, state.version); state.version++;
+      return { ok: true };
+    },
+  });
+  assert.throws(() => ledger.prepare({}, undefined), /assignment_id/);
+  assert.throws(() => ledger.prepare({}, 'missing'), /existing assigned/);
+  const target = ledger.prepare({}, 'build');
+  const activation = { provider: 'deepseek-native', parent_session_id: 'parent', child_session_id: 'child', handle_id: 'opaque', message_id: 'initial' };
+  ledger.activate(target, activation);
+  ledger.settle(target, { handleId: 'opaque', subagentId: 'child', result: { stopReason: 'completed', output: [] }, cleanup: { status: 'complete' } });
+  const mutations = calls.filter(call => call.operation !== 'status');
+  assert.deepEqual(mutations[0].args.activation, activation);
+  assert.equal(mutations[1].args.outcome, 'succeeded');
+  assert.equal(mutations[1].args.cleanup, true);
+  assert.deepEqual(mutations[1].args.result.native_result, { stopReason: 'completed', output: [] });
+  ledger.settle(target, { handleId: 'opaque', subagentId: 'child', error: { code: 'result_unavailable' }, cleanup: { status: 'complete' } });
+  assert.equal(calls.at(-1).args.outcome, 'failed');
+  const absent = workflowLedger({ readCurrent: () => '', call: () => assert.fail('Unbound delegation must not mutate') });
+  assert.equal(absent.prepare({}, undefined), null);
+  assert.throws(() => absent.prepare({}, 'build'), /current bound/);
+});
+
+test('delegation: ledger binding captures observed identities, waits for cleanup, and records once', async () => {
+  const result = deferred(), cleanup = deferred(), disposing = deferred(), receipts = [];
+  const ledger = { prepare: (_parent, id) => ({ assignment_id: id }),
+    activate: (assignment, activation) => receipts.push({ assignment, activation }),
+    settle: (assignment, outcome) => receipts.push({ assignment, outcome }) };
+  const registry = ownedDelegations({ async startActivation(spec) {
+    return { childId: spec.childId, messageId: 'observed-initial', result: result.promise,
+      async dispose() { disposing.resolve(); await cleanup.promise; } };
+  } }, ledger);
+  const parent = nativeParent('parent');
+  const handle = await registry.start({ request: { parent } });
+  await registry.bind(handle.childId, parent, registry.prepare(parent, 'build'));
+  const owned = registry.descriptor(handle.childId, parent);
+  assert.deepEqual(receipts[0].activation, { provider: 'deepseek-native', parent_session_id: parent.session.header.id,
+    child_session_id: handle.childId, handle_id: owned.handleId, message_id: 'observed-initial' });
+  result.resolve({ stopReason: 'completed', output: [] }); await disposing.promise;
+  let observed = false;
+  const wait = registry.wait(owned.handleId, parent).then(value => { observed = true; return value; });
+  await Promise.resolve(); assert.equal(observed, false); assert.equal(receipts.length, 1);
+  cleanup.resolve(); await wait; await registry.wait(owned.handleId, parent);
+  assert.equal(receipts.length, 2); assert.equal(receipts[1].outcome.cleanup.status, 'complete');
+  await registry.close();
+});
+
+test('delegation: failed ledger activation cancels and joins only the observed owned worker', async () => {
+  const result = deferred(); let disposed = 0;
+  const registry = ownedDelegations({ async startActivation(spec) {
+    return { childId: spec.childId, messageId: 'initial', result: result.promise,
+      async dispose() { disposed++; result.resolve({ stopReason: 'aborted', output: [] }); } };
+  } }, { activate() { throw new Error('Synthetic version conflict'); } });
+  const parent = nativeParent('parent');
+  const handle = await registry.start({ request: { parent } });
+  await assert.rejects(registry.bind(handle.childId, parent, { assignment_id: 'build' }), /version conflict/);
+  assert.equal(disposed, 1);
+  const failure = registry.context(parent)[0].binding_failure;
+  assert.equal(failure.assignment_id, 'build');
+  assert.equal(failure.activation.child_session_id, handle.childId);
+  assert.equal(failure.outcome.result.stopReason, 'aborted');
+  await registry.close();
+});
+
+test('delegation: wrapper strips assignment metadata before preserving native policy', async () => {
+  let wrapped, nativeArgs, bound;
+  const definition = { name: DELEGATE_TOOL, parameters: { type: 'object', properties: { prompt: { type: 'string' } }, required: ['prompt'], additionalProperties: false },
+    output: { schema: { type: 'object' } }, async execute(args) { nativeArgs = args; return { subagentId: 'actual-child' }; } };
+  const ctx = { tools: { register(tool) { wrapped = tool; }, get: () => wrapped }, subagents: {} };
+  const registry = { prepare: (_agent, id) => ({ assignment_id: id }),
+    bind: (...args) => { bound = args; }, descriptor: () => ({ handleId: 'actual-handle' }) };
+  const facades = delegationFacades(ctx, registry); facades.tools.register(definition);
+  const parent = nativeParent('parent');
+  assert.deepEqual(await wrapped.execute({ prompt: 'bounded work', assignment_id: 'build' }, { agent: parent }), { handleId: 'actual-handle' });
+  assert.deepEqual(nativeArgs, { prompt: 'bounded work' });
+  assert.deepEqual(bound, ['actual-child', parent, { assignment_id: 'build' }]);
+  assert.equal(facades.tools.get(DELEGATE_TOOL), definition);
 });
 
 test('delegation: initial handoff publication is excluded without excluding a later real human', async () => {
@@ -576,7 +717,7 @@ export async function apply(ctx) {
     if(stage==='BOOTSTRAP') return [
       ...(${questions}?[action('@skill',{name:'task-workflow'},false)]:[]),
       action('schema',{root:workspace},false),
-      action('init',{root:workspace,project:workspace,task_id:task,title:'Synthetic JSON report task',actor:'native-test',authorization_source:'synthetic-bootstrap-request',session_id:'native-session',integration_required:false},false),
+      action('init',{root:workspace,project:workspace,task_id:task,title:'Synthetic JSON report task',actor:'native-test',authorization_source:'synthetic-bootstrap-request',session_id:'native-session',integration_required:false,workflow_control_version:1},false),
       action('process-intent',{intent:{goal:'Add JSON output while preserving CSV.',why:'Synthetic script compatibility fixture.',success_criteria:['JSON is readable and CSV behavior remains.'],source:source('synthetic-bootstrap-request')}}),
       action('process-exploration',{exploration:{current_behavior:'The fixture README records an existing CSV command.',evidence:['README.md'],unknowns:[]}}),
       action('process-question',{question:{id:'output-choice',text:'Where should NONPROMPTED_FIRST_CANARY JSON output go?',rationale:'The destination defines the output interface.',scope:[],important:true,source:{kind:'agent',reference:'synthetic-question-1'},...(${questions}?{choices:[{id:'stdout',text:'Write to stdout',consequence:'The receiver reads stdout',source:{kind:'agent',reference:'Synthetic candidate'}},{id:'file',text:'Write a file',consequence:'The receiver reads the file',source:{kind:'agent',reference:'Synthetic candidate'}}]}:{})}}),
@@ -889,7 +1030,7 @@ export async function apply(ctx) {
    let name,args;
    if(state.step===0){
     if(id==='foreign-parent'){name='task_workflow_wait';args={handle_id:JSON.parse(fs.readFileSync(path.join(root,'first-handle'),'utf8')).handleId};}
-    else{name=id==='unowned-parent'?'subagent':'task_workflow_delegate';args={description:'Synthetic owned check',prompt:'Return the synthetic final report using the inherited route.'};}
+    else{name=id==='unowned-parent'?'subagent':'task_workflow_delegate';args={description:'Synthetic owned check',prompt:'Return the synthetic final report using the inherited route.'};if(id==='owned-parent')args.assignment_id='native-inspect';}
    }else if(state.step===1&&id!=='foreign-parent'&&id!=='startup-parent'&&id!=='unowned-parent'){
     name=id==='cancel-parent'?'task_workflow_cancel':'task_workflow_wait';args={handle_id:state.handle};
    }
@@ -956,7 +1097,7 @@ import workflow
 root=sys.argv[2]
 for mode in ('valid','always','cancel','unload'):
  task='recovery-'+mode
- state=workflow.dispatch('init',dict(root=root,project=root,task_id=task,title='Synthetic SSE recovery',actor='native-test',authorization_source='Explicit isolated fixture',session_id=task,integration_required=False))['state']
+ state=workflow.dispatch('init',dict(root=root,project=root,task_id=task,title='Synthetic SSE recovery',actor='native-test',authorization_source='Explicit isolated fixture',session_id=task,integration_required=False,workflow_control_version=1))['state']
  for operation,fields in [('process-intent',dict(intent=dict(goal='Verify native recovery',why='Synthetic transport fixture',success_criteria=['No rejected input executes'],source=dict(kind='user',reference='Synthetic fixture authorization')))),('process-exploration',dict(exploration=dict(current_behavior='Fixture inspected',evidence=['Synthetic fixture'],unknowns=[])))]:
   state=workflow.dispatch(operation,dict(root=root,task_id=task,actor='native-test',expected_version=state['version'],**fields))['state']
 `, path.join(fixture.installed, 'skills/task-workflow/scripts'), fixture.workspace]);
@@ -1003,6 +1144,14 @@ if (CLI) test('installed owned protocol: native handles cleanup source and final
   const receipts = path.join(fixture.run, 'owned-runtime'); fs.mkdirSync(receipts);
   const sdk = new Sdk(CLI, fixture.workspace, fixture.env, receipts);
   try {
+    await execute('python3', ['-c', `import json,sys
+sys.path.insert(0,sys.argv[1])
+import workflow
+root=sys.argv[2]
+s=workflow.dispatch('init',dict(root=root,project=root,task_id='native-ledger',title='Actual installed native ledger',actor='native-test',authorization_source='Explicit isolated native test',session_id='owned-parent',integration_required=False))['state']
+s=workflow.dispatch('worker-assign',dict(root=root,task_id=s['task_id'],actor='native-test',expected_version=s['version'],assignment_id='native-inspect',item_id='exploration',role='explorer',worker_id='native-explorer',owned_paths=['code.py'],authorization_source='Explicit isolated native test'))['state']
+print(json.dumps(s))`, path.join(fixture.installed, 'skills/task-workflow/scripts'), fixture.workspace], { receipt: path.join(fixture.run, 'v2-ledger-init.json') });
+    const ledgerPath = path.join(fixture.workspace, '.task-workflow/tasks/native-ledger/state.json');
     await sdk.call('initialize', { cwd: fixture.workspace, provider: 'workflow-test-stub', model: 'stub' });
     await sdk.call('session/prompt', { sessionId: 'owned-parent', contentBlocks: [{ type: 'text', text: 'Synthetic owned completion check.' }] });
     await waitFile(path.join(fixture.run, 'cleanup-started'), sdk);
@@ -1018,15 +1167,26 @@ if (CLI) test('installed owned protocol: native handles cleanup source and final
     assert.ok(capability(parentRequests[0]).includes('wait_agent'));
     assert.ok(!capability(parentRequests[1]).includes('wait_agent'));
     const workflowTools = parentRequests[1].tools.filter(tool => tool.name.startsWith('mcp__task-workflow__'));
-    assert.equal(workflowTools.length, 62);
+    const expectedTools = JSON.parse((await execute('python3', ['-c',
+      'import json,sys;sys.path.insert(0,sys.argv[1]);import workflow;print(json.dumps(["mcp__task-workflow__"+entry["name"] for entry in workflow.command_schemas()]))',
+      path.join(fixture.installed, 'skills/task-workflow/scripts')])).stdout);
+    assert.deepEqual(workflowTools.map(tool => tool.name).sort(), expectedTools.sort());
+    assert.equal(json(ledgerPath).workers['native-inspect'].status, 'active');
+    assert.equal(json(ledgerPath).workers['native-inspect'].activation.handle_id, handle.handleId);
     assert.ok(workflowTools.some(tool => tool.name === 'mcp__task-workflow__environment-bind'));
     assert.equal(new Set(workflowTools.map(tool => tool.name)).size, workflowTools.length);
     const ownedSchema = parentRequests[1].tools.find(tool => tool.name === 'task_workflow_delegate');
     const nativeSchema = parentRequests[1].tools.find(tool => tool.name === 'subagent');
-    assert.deepEqual(ownedSchema.parameters, nativeSchema.parameters, 'Native parameter policy is retained');
+    const { assignment_id, ...ownedProperties } = ownedSchema.parameters.properties;
+    assert.equal(assignment_id.type, 'string');
+    assert.deepEqual({ ...ownedSchema.parameters, properties: ownedProperties }, nativeSchema.parameters, 'Native provider parameter policy is retained alongside the workflow assignment');
     fs.writeFileSync(path.join(fixture.run, 'release-cleanup'), 'release owned cleanup');
     await sdk.call('session/wait', { sessionId: 'owned-parent' });
     observed = lines(path.join(fixture.run, 'owned.jsonl'));
+    const settledAssignment = json(ledgerPath).workers['native-inspect'];
+    assert.equal(settledAssignment.status, 'settled');
+    assert.equal(settledAssignment.settlement.cleanup, true);
+    assert.equal(settledAssignment.settlement.outcome, 'succeeded');
     const cleanup = observed.findIndex(item => item.kind === 'owned-cleanup-end');
     const collected = observed.findIndex(item => item.kind === 'collected' && item.session === 'owned-parent');
     const final = observed.findIndex(item => item.kind === 'final-answer' && item.session === 'owned-parent');
@@ -1064,7 +1224,7 @@ if (CLI) test('installed owned protocol: native handles cleanup source and final
     await sdk.close();
     observed = lines(path.join(fixture.run, 'owned.jsonl'));
     assert.ok(observed.some(item => item.kind === 'activation-end' && item.id === unrelated && item.stopReason === 'completed'));
-    writeJson(path.join(fixture.run, 'owned-result.json'), { passed: true, coreOperations: 62, cleanupBeforeCollectionBeforeFinal: true, automaticOwnedSettlementMessages: 0, nativePoliciesPreserved: true, foreignHandleRejected: true, startupAborted: true, unownedActivationPreserved: true });
+    writeJson(path.join(fixture.run, 'owned-result.json'), { passed: true, coreOperations: workflowTools.length, nativeV2Ledger: true, cleanupBeforeCollectionBeforeFinal: true, automaticOwnedSettlementMessages: 0, nativePoliciesPreserved: true, foreignHandleRejected: true, startupAborted: true, unownedActivationPreserved: true });
   } finally {
     for (const marker of ['release-cleanup', 'release-unowned']) fs.writeFileSync(path.join(fixture.run, marker), 'owned test cleanup');
     if (sdk.child.exitCode === null) await sdk.close();

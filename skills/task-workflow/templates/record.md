@@ -27,7 +27,9 @@ requirements; implementation cost or complexity alone is not a scope change.
 ## Exploration
 
 Observed facts, source locations, checks performed, unresolved unknowns, and
-evidence gaps. Each fact has a source reference and observation date or revision
+evidence gaps. Include feasibility question, exact inputs, actual versions,
+procedure, pass/refute criterion, observed result, and retained output. Record
+relevant performance/cost/reuse assumptions and evidence. Each fact has a source reference and observation date or revision
 when it can change.
 
 ## Confirmed requirements
@@ -82,7 +84,11 @@ the dependent plan.
 
 For each item, record the implementation state, worker brief reference, change
 revision, tests and evidence, separate requirements and quality verdicts,
-remediation, and final overall-review verdict. For every worktree generation,
+remediation, ordered independent requirements/quality verdicts and main acceptance
+(or the retained historical overall-review verdict). Record worker assignments,
+actual native activation identity, terminal outcome and cleanup, and pending
+waits. Record native goal capability/request and exact observed receipt; absence
+is explicit, never an invented invocation. For every worktree generation,
 record its base revision, worktree identity, accepted evidence, integration and
 verification binding, cleanup intent and receipt, and links to dependent Runs.
 Preserve old generation and run evidence when a later approved revision creates

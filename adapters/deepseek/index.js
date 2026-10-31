@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { ownedDelegations, collectionTools, delegationFacades, DELEGATE_TOOL, WAIT_TOOL, CANCEL_TOOL, OWNED_PROVIDER } from './delegation.js';
 import { taskScopedRecovery } from './recovery.js';
+import { workflowLedger } from './workflow-ledger.js';
 
 export const name = 'task-workflow';
 export const inject = ['shell', 'sessionProjections', 'workingDirectory', 'systemPrompt', 'tools', 'skills'];
@@ -240,6 +241,12 @@ export function capabilityContext(ctx, agent, registry) {
       owned_delegation_available: owned,
       ...(owned ? { workflow_delegation: 'For authorized related workflow delegation, use task_workflow_delegate and collect its exact handleId with task_workflow_wait before reporting the final child outcome. task_workflow_cancel disposes only that owned activation. A canceled wait leaves the worker running. Native interrupt acknowledgment is not settlement. Native and unowned worker messages remain independent.' } : {}),
       owned_activations: registry?.context(agent) ?? [],
+      coordinator_wait: 'After dispatch, collect actual terminal result and cleanup before dependent work. Coordinate and inspect evidence while waiting; do not implement in parallel. Runtime guards enforce declared workflow mutations, not arbitrary host file writes.',
+      native_goal: {
+        available_tools: schemas.filter(tool => /(?:^|__)(?:create_goal|update_goal|get_goal)$/.test(tool.name))
+          .map(tool => ({ tool_name: tool.name, parameters: tool.parameters })),
+        instruction: 'At implementation start, record goal-request. Invoke only an actually exposed native goal tool using its current schema, then record its exact receipt with goal-observe. If unavailable, retain request-only evidence; never invent a native goal ID. Pause only with explicit actual user goal authority; complete the implementation generation after validated cleanup, independently of long-running Task/Run closure.',
+      },
       user_question: {
         available: Boolean(questionTool), current_root: currentRoot,
         ...(questionTool ? { tool_name: questionTool.name, parameters: questionTool.parameters } : {}),
@@ -305,7 +312,15 @@ export async function apply(ctx) {
     await mountChild(ctx, lifetime, ownedRetry, {});
     fs.writeFileSync(configPath, JSON.stringify(resolvedHookConfig(releaseRoot, python)), { mode: 0o600 });
     const nativeSubagents = ctx.get('subagents');
-    const registry = nativeSubagents ? ownedDelegations(nativeSubagents) : undefined;
+    const ledger = workflowLedger({ readCurrent: readAgent, call(operation, args) {
+      const result = runProcessSync(python, [path.join(releaseRoot, 'skills/task-workflow/scripts/workflow.py'),
+        operation, '--root', args.root, '--json-args', '-'], {
+        input: JSON.stringify(args), env: environment(),
+      });
+      if (result.error || result.signal || result.status !== 0) throw new Error('Task Workflow worker ledger operation failed; inspect current state before retrying.');
+      return JSON.parse(result.stdout);
+    } });
+    const registry = nativeSubagents ? ownedDelegations(nativeSubagents, ledger) : undefined;
     if (registry) lifetime.drain(() => registry.close());
     const hooks = hookOwnership(registry ? { humanMessages: (...args) => registry.humanMessages(...args) } : {});
     lifetime.drain(() => hooks.close());

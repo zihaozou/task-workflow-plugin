@@ -40,7 +40,7 @@ the validation command, expected import and asset checks, required code origins,
 and evidence returned by the startup report. Plan immutable code/scope reuse with
 separate run outputs and provenance. Name ownership and reference checks before
 cleanup. For the full formal lifecycle, require accepted implementation and
-overall review, one ordinary squash integration, integrated revision verification,
+main acceptance (or the retained legacy overall-review contract), one ordinary squash integration, integrated revision verification,
 independent scoped freeze, successful Run startup validation, and reference-safe
 owned worktree cleanup before formal dispatch. Development checks may use
 authorized managed resources, including GPUs, before merge. Integration
@@ -78,6 +78,45 @@ and per-action authority. Include recovery for uncertain checks, cleanup,
 dispatch, legacy runtime quiescence, and worktree recreation without replaying
 completed work or deleting retained inputs. Replace vague
 steps such as "handle errors" or "add tests" with actual behavior and checks.
+
+## Dependency and ownership contract
+
+For new semantic plan contract version 2, use `contract_version: 2`, an explicit
+`owner` per item, and top-level `interface_contracts` entries with `id`,
+`producer`, `consumers`, and exact `contract`. Item `interfaces` name the consumed
+or produced interface IDs. Declare typed item dependencies:
+
+| `kind` | Required evidence before dependent work | Scheduling consequence |
+| --- | --- | --- |
+| `contract` | Accepted interface contract bound to the approved Spec; `interface_id` is required | Disjoint workers can proceed concurrently from that contract. |
+| `implementation` | Accepted current producer implementation evidence | Dependent implementation waits for producer acceptance. |
+| `integration` | Accepted current producer evidence and current source-bound durable composition/integration-test proof | Disjoint implementation may proceed; submission/acceptance waits for composition evidence. |
+
+Each dependency names `item_id`; `interface_id` identifies the relevant contract.
+Concurrent file writers must have disjoint exact ownership. Contract edges alone
+do not serialize overlapping writers. Use implementation ordering
+or reassign ownership instead. Integration dependencies concern composing task
+outputs and testing them together; they do not require Git publication. Git
+integration retains its independent lifecycle and authority. Keep historical plans and their digests unchanged;
+plan contract version and workflow control version are separate compatibility
+fields. New tasks default to control version 2, which requires every new or
+changed Plan submission to explicitly declare `contract_version: 2`. A guarded
+control upgrade preserves an authoritative historical Plan version 1, its exact
+digest, accepted evidence, and item protocol. That continuation remains compatible
+until a new Plan version 2 receives actual approval; upgrade does not manufacture
+revised user approval.
+
+For an integration-test edge, a source-bound `verify` or `check-dispatch` uses
+`composition_for: [producer_item_id]`. It must name declared composition
+producers and retain their accepted current evidence; a generic passed check
+cannot satisfy that dependency. This field applies to verification checks,
+not formal Run dispatch.
+
+The execution chain is implementer plus self-tests, distinct independent
+requirements reviewer, distinct independent quality reviewer, and main-agent
+acceptance. The coordinator waits after dispatch rather than coding in parallel.
+No mandatory separate postimplementation verifier stage is introduced. Include
+specific checks where the actual behavior or integration requires them.
 
 ## Human-facing approval presentation
 

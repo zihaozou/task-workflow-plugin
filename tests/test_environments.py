@@ -134,7 +134,8 @@ class EnvironmentTests(Fixture):
 
     def test_schema_cli_and_mcp_use_the_actual_append_operation(self):
         schemas = {entry['name']: entry['inputSchema'] for entry in w.command_schemas()}
-        self.assertEqual(len(schemas), 62)
+        self.assertEqual(set(schemas), set(w.COMMANDS))
+        self.assertEqual(len(schemas), len(w.COMMANDS))
         self.assertEqual(set(schemas['environment-register']['required']),
             {'root', 'task_id', 'actor', 'expected_version', 'environment_id', 'path', 'authorization_source'})
         arguments = {'task_id': 'task', 'actor': 'owner', 'expected_version': self.state['version'],
@@ -147,6 +148,9 @@ class EnvironmentTests(Fixture):
         sys.path.insert(0, str(scripts))
         import mcp_server
         server = mcp_server.Server(); server.initialized = True
+        listed = server.handle({'jsonrpc': '2.0', 'id': 0, 'method': 'tools/list'})
+        transport_schemas = {entry['name']: entry['inputSchema'] for entry in listed['result']['tools']}
+        self.assertEqual(transport_schemas, schemas)
         arguments.update(root=str(self.root), expected_version=self.state['version'])
         reply = server.handle({'jsonrpc': '2.0', 'id': 1, 'method': 'tools/call',
                                'params': {'name': 'environment-register', 'arguments': arguments}})

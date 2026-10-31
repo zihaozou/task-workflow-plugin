@@ -28,7 +28,8 @@ class SessionBindingTests(unittest.TestCase):
 
     def enroll(self, task_id, session_id=None):
         arguments = {'root': str(self.root), 'project': str(self.root), 'task_id': task_id, 'actor': 'owner',
-                     'title': 'Fixture task', 'authorization_source': 'Explicit fixture enrollment'}
+                     'title': 'Fixture task', 'authorization_source': 'Explicit fixture enrollment',
+                     'workflow_control_version': 1}  # Preserve this historical session-binding fixture.
         if session_id is not None:
             arguments['session_id'] = session_id
         return self.core.dispatch('init', arguments)['state']

@@ -57,6 +57,7 @@ class Fixture(unittest.TestCase):
         return receipt
 
     def enroll(self, arguments):
+        arguments.setdefault("workflow_control_version", 1)
         if getattr(self, 'structured', False):
             return w.dispatch('init', arguments)
         # Represent existing event streams without exposing a legacy-init bypass.

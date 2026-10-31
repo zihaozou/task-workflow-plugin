@@ -830,7 +830,398 @@ def validate(operation, args):
         if args["timeout"] < 1:
             fail("invalid_arguments", "Timeout must be positive seconds.")
 
-def require_approved(state):
+def validate_feasibility_dependencies(state, design, require_current=False, requirement_ids=None):
+    if not isinstance(design.get('feasibility_checks', []), list):
+        fail('invalid_process', 'Declared feasibility prerequisites must be an array.')
+    for dependency in design.get('feasibility_checks', []):
+        process_object(dependency, ('check_id', 'requirement_ids'))
+        identifier(dependency['check_id'])
+        if requirement_ids is not None and not set(dependency['requirement_ids']).intersection(requirement_ids):
+            continue
+        process_refs(dependency['requirement_ids'], {entry['id'] for entry in state['process']['requirements']}, True)
+        check = state.get('checks', {}).get(dependency['check_id'], {})
+        receipt = check.get('receipt', {})
+        if (check.get('kind') != 'feasibility' or check.get('status') != 'passed'
+                or not receipt
+                or digest(receipt) != check.get('receipt_digest')
+                or not check.get('source_binding', {}).get('feasibility', {}).get('probe', {}).get('criterion')):
+            fail('feasibility_required', 'The declared Spec prerequisite needs an actual successful matching feasibility receipt.')
+        receipt_path = Path(check['directory']) / 'check-receipt.json'
+        if not receipt_path.is_file() or read_json(receipt_path) != receipt:
+            fail('feasibility_evidence_changed', 'Preserve and resolve changed feasibility receipt evidence.')
+        for path_key, hash_key in (('log','log_sha256'),('stderr_log','stderr_sha256'),('output','output_sha256')):
+            target=Path(receipt[path_key])
+            if not target.is_file() or sha_file(target) != receipt[hash_key]:
+                fail('feasibility_evidence_changed', 'The declared actual feasibility output changed.')
+        if require_current and not check_current(state, check):
+            fail('feasibility_required', 'The declared feasibility result does not match the current source.')
+
+
+def item_revision(state, item, starting=False):
+    if not modern_plan(state) or item.get('overall'):
+        return revision(state)
+    rev = revision(state, clean=False)
+    if not starting:
+        changed = git(state['worktree']['path'], 'status', '--porcelain=v1', '--untracked-files=all', '--', *item['owned_paths'])
+        if changed:
+            fail('dirty_revision', 'Commit or resolve this item owned paths before collecting evidence.')
+    # Cleanliness outside this scope is intentionally not part of its evidence.
+    return {**rev, 'clean': True}
+
+
+def require_item_dependencies(state, item_id, phase='start'):
+    process = state['process']; plan = copy.deepcopy(process['plan']['content'])
+    rev = revision(state, clean=False)
+    accepted = []
+    for key,item in state['items'].items():
+        if not item['overall'] and item['status'] == 'complete' and evidence_matches(item.get('acceptance'), binding(state, rev, item)):
+            try:
+                require_approved(state,item)
+            except WorkflowError:
+                continue
+            accepted.append(key)
+    contracts = []
+    for key,value in state.get('interface_acceptances', {}).items():
+        if (value['design_digest'] == state['design']['digest'] and value['contract'] in process['design']['content'].get('interface_contracts', [])
+                and value['contract'] in plan.get('interface_contracts', [])):
+            contracts.append(key)
+    if phase == 'start':
+        for item in plan['items']:
+            item['dependencies'] = [edge for edge in item['dependencies'] if edge['kind'] != 'integration']
+    selected = get_item(state, item_id)
+    composition = [value for value in selected.get('verifications', []) if value.get('passed') and value.get('check_id')
+                   and evidence_matches(value, binding(state, rev, selected))
+                   and state.get('checks', {}).get(value['check_id'], {}).get('status') == 'passed']
+    missing = contract_call('dependency_prerequisites', plan, item_id, accepted_items=accepted,
+        accepted_contracts=contracts, integration_accepted={producer for value in composition for producer in state['checks'][value['check_id']]['source_binding'].get('composition_for', {}) if evidence_matches(state['checks'][value['check_id']]['source_binding']['composition_for'][producer], binding(state, rev, get_item(state,producer)))}, phase=phase)
+    if missing:
+        fail('dependency_incomplete', 'Settle the actual prerequisites for this item action.', {'missing': missing, 'phase': phase})
+
+
+def control_version(state):
+    return state.get('workflow_control_version', 1)
+
+
+def contract_call(name, *args, **kwargs):
+    # Resolve sibling modules without depending on the caller's import path.
+    import importlib.util
+    source = Path(__file__).with_name('process_contracts.py')
+    import types
+    module = types.ModuleType('task_workflow_process_contracts')
+    content = source.read_text() if source.is_file() else globals().get('PROCESS_CONTRACT_SOURCE')
+    if content is None:
+        fail('contract_runtime_missing', 'The pinned semantic contract helper is unavailable.')
+    if not source.is_file() and hashlib.sha256(content.encode()).hexdigest() != globals().get('PROCESS_CONTRACT_SHA256'):
+        fail('contract_runtime_changed', 'The pinned semantic contract helper changed.')
+    exec(compile(content, str(source), 'exec'), module.__dict__)
+    try:
+        return getattr(module, name)(*args, **kwargs)
+    except module.ContractError as error:
+        fail(error.code, str(error), getattr(error, 'details', None))
+
+
+def modern_plan(state):
+    return ((state.get('process') or {}).get('plan') or {}).get('content', {}).get('contract_version') == 2
+
+
+def controlled_plan(state):
+    return control_version(state) == 2 and modern_plan(state)
+
+
+def pending_workers(state):
+    return {key: value for key, value in state.get('workers', {}).items() if value.get('status') in ('assigned', 'active')}
+
+
+def coordinator_execution_guard(state, args, operation):
+    execution = {'worktree-prepare', 'item-start', 'item-submit', 'item-reopen', 'verify', 'feas-check', 'check-dispatch',
+                 'integrate', 'integration-verify', 'cleanup', 'run-prepare', 'run-dispatch', 'run-execute'}
+    if control_version(state) == 2 and args.get('actor') == state['coordinator'] and operation in execution and pending_workers(state):
+        fail('workers_pending', 'Settle owned worker activations before coordinator execution.', {'assignment_ids': sorted(pending_workers(state))})
+
+
+def scoped_execution_ready(state, item):
+    process = state.get('process') or {}
+    reentry = process.get('scoped_reentry')
+    if not item or item.get('overall') or not reentry or not controlled_plan(state):
+        return False
+    if digest(process.get('intent')) != reentry.get('intent_digest') or any(question['id'] != reentry.get('question_id') for question in process_pending(process)):
+        return False
+    plan = process['plan']['content']
+    affected = contract_call('affected_item_ids', plan, reentry['requirement_ids'])
+    item_id = next((key for key,value in state['items'].items() if value is item), None)
+    if item_id in affected or item_id is None:
+        return False
+    # Current unaffected semantic facts must still equal the exact approved snapshot.
+    return digest(contract_call('semantic_scope', process, item['plan_item'])) == reentry['scope_digests'].get(item_id)
+
+
+def worker_binding(state, item_id, role):
+    if role == 'explorer':
+        return {'generation': generation(state), 'role': role, 'source_commit':git(state['worktree']['path'],'rev-parse','HEAD')}
+    item = get_item(state, item_id)
+    require_approved(state, item)
+    return binding(state, item_revision(state, item), item)
+
+
+def settled_assignment(state, args, item, role, current):
+    assignment = state.get('workers', {}).get(args.get('assignment_id'))
+    item_id = next(key for key,value in state['items'].items() if value is item)
+    if (not assignment or assignment['item_id'] != item_id or assignment['role'] != role
+            or assignment['worker_id'] != args['actor'] or assignment['status'] != 'settled'
+            or assignment.get('settlement', {}).get('outcome') != 'succeeded'
+            or not assignment['settlement'].get('cleanup')
+            or assignment['settlement'].get('source_current') is not True
+            or not evidence_matches(assignment['binding'], current)):
+        fail('worker_evidence_required', 'Use the matching successfully settled worker assignment for this exact source.')
+    return assignment
+
+
+def phased_review(operation, args, state, item, current):
+    role = 'requirements_reviewer' if operation == 'item-requirements-review' else 'quality_reviewer'
+    settled_assignment(state, args, item, role, current)
+    if item['status'] != 'reviewing' or not evidence_matches(item.get('submitted'), current):
+        fail('stale_evidence', 'Review the current submitted source.')
+    if args['actor'] == item['implementer'] or args['actor'] == state['coordinator']:
+        fail('independent_review_required', 'Reviewers must differ from the implementer and coordinator.')
+    if args['verdict'] not in ('accept', 'changes'):
+        fail('invalid_verdict', 'Use accept or changes.')
+    process_strings(args.get('findings', [])); process_strings(args.get('unverified', []))
+    if args['verdict'] == 'accept' and (args.get('findings') or args.get('unverified')):
+        fail('review_gaps', 'Resolve findings and unverified requirements before accepting review.')
+    if role == 'quality_reviewer':
+        prior = item.get('requirements_review') or {}
+        if prior.get('verdict') != 'accept' or not evidence_matches(prior, current):
+            fail('requirements_review_required', 'Accept current requirements review before quality review.')
+        if prior['actor'] == args['actor']:
+            fail('independent_review_required', 'Requirements and quality reviewers must differ.')
+    key = 'requirements_review' if role == 'requirements_reviewer' else 'quality_review'
+    item[key] = {**current, 'actor': args['actor'], 'verdict': args['verdict'], 'notes': args['notes'],
+                 'assignment_id': args['assignment_id'], 'time': now()}
+    if args['verdict'] == 'changes':
+        item.update(status='implementing', submitted=None, review=None, acceptance=None)
+        item.pop('quality_review', None)
+    elif role == 'quality_reviewer':
+        item['review'] = {**current, 'actor': args['actor'], 'verdict': 'accept', 'requirements_verdict': 'accept',
+                          'quality_verdict': 'accept', 'notes': args['notes'], 'time': now()}
+
+
+def apply_control(operation, args, state):
+    require_coordinator(args, state)
+    if operation == 'workflow-control-upgrade':
+        if control_version(state) == 2:
+            return {'already_upgraded': True}
+        if pending_workers(state) or any(c['status'] not in TERMINAL_CHECKS for c in state.get('checks', {}).values()):
+            fail('active_check', 'Settle actual owned activity before upgrading workflow controls.')
+        state['workflow_control_version'] = 2
+        state.setdefault('control_history', []).append({'actor': args['actor'], 'authorization_source': args['authorization_source'], 'time': now()})
+        return {'workflow_control_version': 2}
+    if control_version(state) != 2:
+        fail('workflow_control_upgrade_required', 'Explicitly upgrade workflow controls first.')
+    if operation == 'interface-accept':
+        require_approved(state)
+        process = state['process']; identifier(args['interface_id']); process_strings(args['evidence'], True)
+        declared = [entry for entry in process['plan']['content'].get('interface_contracts', []) if entry['id'] == args['interface_id']]
+        approved = process['design']['content'].get('interface_contracts', [])
+        if len(declared) != 1 or declared[0] not in approved:
+            fail('interface_contract_required', 'Accept only exact interface semantics in both the approved Spec and Plan.')
+        value = {'contract': copy.deepcopy(declared[0]), 'design_digest': state['design']['digest'],
+                 'actor': args['actor'], 'notes': args['notes'], 'evidence': args['evidence'], 'time': now()}
+        state.setdefault('interface_acceptances', {})[args['interface_id']] = value
+        return {'interface_acceptance': value}
+    if operation == 'goal-request':
+        process_strings(args['evidence'], True)
+        goal_action(state, args['request'], {'authorization_source':args['authorization_source'],'evidence':args['evidence']})
+        state['native_goal'].update(request=args['request'],authorization_source=args['authorization_source'],evidence=args['evidence'],actor=args['actor'])
+        return {'goal': state['native_goal']}
+    if operation == 'goal-observe':
+        goal = state.get('native_goal')
+        if not goal or goal['status'] != 'requested':
+            fail('goal_request_required', 'Record the explicit goal request before its actual native receipt.')
+        process_object(args['receipt'], ('capability', 'native_goal_id', 'result'))
+        text_value(args['receipt']['capability']); text_value(args['receipt']['native_goal_id']); process_strings(args['evidence'], True)
+        goal.update(status='observed', receipt=args['receipt'], evidence=args['evidence'], observed_at=now(), observed_request_id=goal.get('request_id'))
+        return {'goal': goal}
+    workers = state.setdefault('workers', {})
+    name = identifier(args['assignment_id'])
+    if operation == 'worker-assign':
+        if args['role'] not in ('explorer', 'implementer', 'requirements_reviewer', 'quality_reviewer'):
+            fail('invalid_role', 'Use a declared worker role.')
+        text_value(args['worker_id'])
+        if args['worker_id'] == state['coordinator']:
+            fail('independent_worker_required', 'Assign an actual child actor, distinct from the coordinator.')
+        if name in workers:
+            fail('already_exists', 'Worker assignment identifiers cannot be reused.')
+        if any(value['item_id']==args['item_id'] and value['role']==args['role'] and value['status'] in ('assigned','active') for value in workers.values()):
+            fail('worker_assignment_active', 'Settle the existing assignment before dispatching another worker for this item and role.')
+        if args['role'] != 'explorer':
+            item = get_item(state, args['item_id'])
+            if args['role'] in ('requirements_reviewer','quality_reviewer') and (item['status'] != 'reviewing' or not evidence_matches(item.get('submitted'), worker_binding(state,args['item_id'],args['role']))):
+                fail('submission_required', 'Submit the self-tested current implementation before assigning reviewers.')
+            if args['role'] == 'quality_reviewer' and (item.get('requirements_review') or {}).get('verdict') != 'accept':
+                fail('requirements_review_required', 'Complete requirements review before assigning quality review.')
+            actors = {item.get('implementer')}
+            if args['role'] == 'quality_reviewer': actors.add((item.get('requirements_review') or {}).get('actor'))
+            if args['role'] != 'implementer' and args['worker_id'] in actors:
+                fail('independent_review_required', 'Assign distinct implementation and review actors.')
+        value = {key: copy.deepcopy(args[key]) for key in ('assignment_id', 'item_id', 'role', 'worker_id', 'authorization_source')}
+        if args['role'] == 'explorer':
+            process_strings(args.get('owned_paths', []), True)
+            for owned_path in args['owned_paths']: safe_relative(owned_path)
+            value['owned_paths'] = list(args['owned_paths'])
+        value.update(status='assigned', binding=worker_binding(state, args['item_id'], args['role']), actor=args['actor'], time=now())
+        workers[name] = value
+    else:
+        if name not in workers: fail('not_found', 'Worker assignment does not exist.')
+        value = workers[name]; process_strings(args['evidence'], True)
+        if operation == 'worker-activate':
+            process_object(args['activation'], ('provider', 'parent_session_id', 'child_session_id', 'handle_id', 'message_id'), ('model', 'receipt'))
+            for key in ('provider', 'parent_session_id', 'child_session_id', 'handle_id', 'message_id'):
+                text_value(args['activation'][key])
+            if value['status'] == 'active' and value['activation'] == args['activation']:
+                return {'worker': value, 'already_recorded': True}
+            if value['status'] != 'assigned': fail('invalid_transition', 'Activate an assigned worker only once.')
+            if any(other.get('activation') and all(other['activation'].get(key)==args['activation'][key] for key in ('provider','parent_session_id','handle_id')) for other in workers.values()):
+                fail('activation_conflict', 'A native activation can bind only one assignment.')
+            value.update(status='active', activation=copy.deepcopy(args['activation']), activation_evidence=args['evidence'])
+        else:
+            if args['outcome'] not in ('succeeded', 'failed', 'cancelled'):
+                fail('invalid_outcome', 'Use the actual terminal worker outcome.')
+            settlement = {key: copy.deepcopy(args[key]) for key in ('outcome', 'result', 'cleanup', 'evidence')}
+            if value['status'] == 'settled' and all(value['settlement'].get(k) == v for k,v in settlement.items()):
+                return {'worker': value, 'already_recorded': True}
+            if value['status'] != 'active' and not (value['status'] == 'assigned' and args['outcome'] == 'cancelled'):
+                fail('invalid_transition', 'Settle an actual activation or cancel a never-dispatched assignment.')
+            if not args['cleanup']: fail('worker_cleanup_required', 'Record actual activation cleanup before settlement.')
+            observation = {}
+            try:
+                actual = worker_binding(state, value['item_id'], value['role'])
+                source_current = actual == value['binding'] if value['role'] == 'explorer' else evidence_matches(value['binding'], actual)
+                if value['role'] == 'implementer' and args['outcome'] == 'succeeded':
+                    value['binding'] = actual
+                    source_current = True
+            except (WorkflowError, OSError) as error:
+                source_current = False
+                observation = {'source_observation': {'status':'unavailable','reason':getattr(error,'code','source_unavailable')}}
+            value.update(status='settled', settlement={**settlement, **observation, 'source_current': source_current, 'actor': args['actor'], 'time': now()})
+    return {'worker': value}
+
+
+def goal_action(state, action, source):
+    if control_version(state) != 2:
+        return
+    goal = state.setdefault('native_goal', {})
+    request = {'action': action, 'generation': generation(state), 'source': copy.deepcopy(source)}
+    if goal.get('requested_action') == request:
+        return
+    goal.setdefault('history', []).append(copy.deepcopy({key:value for key,value in goal.items() if key != 'history'}))
+    goal.update(status='requested', requested_action=request, request=action,
+                request_id=uuid.uuid4().hex, time=now())
+
+
+def workflow_controls(state, evaluate=True):
+    if control_version(state) != 2 or not evaluate:
+        return {'version':control_version(state),'workers':copy.deepcopy(state.get('workers',{})),
+                'pending_workers':sorted(pending_workers(state)),'next_actions':[], 'goal':copy.deepcopy(state.get('native_goal'))}
+    actions = []
+    def action(operation, reason, probe=None, **selectors):
+        blockers=[]
+        if probe:
+            try: probe()
+            except (WorkflowError, OSError) as error:
+                blockers.append({'code':getattr(error,'code','source_unavailable'),'message':str(error)})
+        actions.append({'operation':operation,'reason':reason,'eligible':not blockers,'missing_prerequisites':blockers,**selectors})
+    active=pending_workers(state)
+    if active:
+        action('worker-settle','Wait for actual terminal result and cleanup; never infer them from a worker report.',assignment_ids=sorted(active))
+        actions[-1].update(eligible=False,readiness='requires_external_evidence',missing_prerequisites=[{'code':'actual_worker_terminal_evidence_required','message':'Observe actual terminal native result and activation cleanup before settlement.'}])
+    closed=state.get('task_lifecycle',{}).get('status')=='complete'
+    if closed:
+        action('task-reopen','Further work requires actual reopening authority.')
+    else:
+        process=state.get('process') or {}
+        if state['worktree']['path']==state['project']['path'] or state.get('cleaned'):
+            cleaned=bool(state.get('cleaned'))
+            association=state.get('worktree_preparation') or {}
+            candidate={'path':str(Path(state['project']['path'])/'.worktrees'/state['task_id']),
+                       'expected_base':association.get('base') if not cleaned and association.get('status')=='reserved' else observed_base(state['project']['path']).get('current_base'),
+                       'purpose':'implementation'}
+            if cleaned:
+                receipts=[receipt for receipt in state.get('generation_history',[]) if receipt.get('generation')==generation(state)]
+                approved_plan=process.get('plan') or {}
+                unchanged=bool(approved_plan and len(receipts)==1 and receipts[0].get('plan_digest')==approved_plan.get('digest') and receipts[0].get('design',{}).get('digest')==(state.get('design') or {}).get('digest'))
+                candidate.update(expected_generation=generation(state),reuse_approved_plan=unchanged)
+            action('worktree-prepare','Optional only for an authorized source-changing fix; valid cleaned source remains reusable for Runs and closure.' if cleaned else 'Prepare the registered dedicated checkout before implementation; exploration preparation requires its separate actual authority.',
+                   lambda:require_approved(state),candidate=candidate,optional=cleaned)
+            if not (not cleaned and association.get('status')=='reserved' and association.get('authorization_source')):
+                actions[-1]['eligible']=False
+                actions[-1]['readiness']='requires_authority'
+                actions[-1]['missing_prerequisites'].append({'code':'actual_worktree_authority_required','message':'Supply applicable actual source-changing authorization; unchanged approved-plan continuation must explicitly use reuse_approved_plan.' if cleaned else 'Supply actual applicable worktree preparation authority, or explicit exploration authority with purpose exploration.'})
+        for key,item in state['items'].items():
+            if state.get('cleaned'):
+                continue
+            if item['status']=='complete':
+                try:
+                    if evidence_matches(item.get('acceptance'),binding(state,item_revision(state,item),item)):
+                        continue
+                    operation='item-start'
+                except WorkflowError as error:
+                    operation='item-reopen' if error.code=='dirty_revision' else 'item-start'
+            elif item['status']=='pending': operation='item-start'
+            elif item['status']=='implementing': operation='item-submit'
+            elif item['status']=='reviewing':
+                if controlled_plan(state) and not item['overall']:
+                    current=None
+                    try: current=binding(state,item_revision(state,item),item)
+                    except WorkflowError: pass
+                    req=item.get('requirements_review') or {}; quality=item.get('quality_review') or {}
+                    operation='item-requirements-review' if not current or req.get('verdict')!='accept' or not evidence_matches(req,current) else 'item-quality-review' if quality.get('verdict')!='accept' or not evidence_matches(quality,current) else 'item-accept'
+                else: operation='item-accept'
+            else: continue
+            role={'item-submit':'implementer','item-requirements-review':'requirements_reviewer','item-quality-review':'quality_reviewer'}.get(operation)
+            matching=[value for value in state.get('workers',{}).values() if value['item_id']==key and value['role']==role and value['status']=='settled']
+            actor=(item.get('plan_item') or {}).get('owner') or item.get('implementer') or state['coordinator']
+            if operation in ('item-accept','item-reopen'): actor=state['coordinator']
+            elif role and matching: actor=matching[-1]['worker_id']
+            arguments={'actor':actor,'item_id':key,'notes':'Read-only readiness inspection','verdict':'accept'}
+            if matching: arguments['assignment_id']=matching[-1]['assignment_id']
+            def probe(operation=operation,arguments=arguments):
+                candidate=copy.deepcopy(state)
+                coordinator_execution_guard(candidate,arguments,operation)
+                if operation=='item-reopen': require_approved(candidate)
+                else: apply_item(operation,arguments,candidate,Path(state['root'])/'.task-workflow/tasks'/state['task_id'])
+            action(operation,'Prerequisites are checked against actual current source, approval, scope and role evidence.',probe,item_id=key)
+            if operation=='item-reopen':
+                actions[-1]['eligible']=False
+                actions[-1]['missing_prerequisites'].append({'code':'actual_reopen_reason_required','message':'Record the actual reason for reopening while preserving unfinished source.'})
+        if state.get('integration',{}).get('status')=='complete':
+            def integrated_source():
+                integration=state['integration'];cleanup_integration_proof(state,integration['head'])
+                rev={'commit':integration['head'],'tree':integration.get('source_tree') or git(state['project']['path'],'rev-parse',integration['head']+'^{tree}'),'clean':True}
+                all_current(state,rev)
+            action('run-prepare','Reusable integrated source; each new Run still needs its own frozen intent, startup and resource admission.',integrated_source)
+        def closure():
+            candidate=copy.deepcopy(state)
+            close_scope({'actor':state['coordinator'],'outcome':'completed','notes':'Read-only readiness inspection','evidence':['Read-only readiness inspection']},candidate)
+        action('task-complete','Actual current closure prerequisites; this does not supply user authority or evidence.',closure)
+        for key,current in state.get('checks',{}).items():
+            if current['status'] not in TERMINAL_CHECKS:
+                action('check-reconcile','Reconcile the existing intent; never relaunch it.',check_id=key)
+        for key,current in state.get('runs',{}).items():
+            if current['status'] in ('queued','starting','running','unknown'):
+                action('run-reconcile','Later authorized observation of existing execution; no automatic watching.',run_id=key)
+    return {'version':control_version(state),'workers':copy.deepcopy(state.get('workers',{})),
+            'pending_workers':sorted(active),'next_actions':actions,'goal':copy.deepcopy(state.get('native_goal')),
+            'native_goal_policy':'Requested goal actions require a capability actually exposed by the host and its actual receipt. Long Run handoff does not authorize watching.'}
+
+
+def require_approved(state, item=None):
+    if control_version(state) == 2 and state.get("process", {}).get("design"):
+        refs=None
+        if item is not None and not item['overall'] and item.get('plan_item'):
+            refs=set(item['plan_item']['requirement_ids']) | set((state['process'].get('plan') or {}).get('content',{}).get('shared_requirements',[]))
+        validate_feasibility_dependencies(state, state["process"]["design"]["content"], requirement_ids=refs)
+    if scoped_execution_ready(state, item):
+        return
     if state.get("process", {}).get("design") and state["process"]["stage"] not in ("implementation", "delivery"):
         fail("discussion_required", "Complete the current discussion and exact design and plan approvals before execution.")
     if not summary(state)["approved"]:
@@ -903,6 +1294,15 @@ def prepare_worktree(args, state, path, store, previous):
     project = Path(state["project"]["path"])
     if git_identity(str(project)) != state["project"]:
         fail("git_identity_changed", "The registered base checkout changed.")
+    purpose = args.get('purpose', 'implementation')
+    if purpose not in ('implementation', 'exploration'):
+        fail('invalid_purpose', 'Use implementation or exploration worktree purpose.')
+    if purpose == 'exploration':
+        require_coordinator(args, state)
+        if control_version(state) != 2 or state.get('process', {}).get('stage') not in ('exploration', 'discussion') or state.get('integration') or state.get('cleaned'):
+            fail('exploration_required', 'Exploration preparation requires current discussion and explicit exploration authority.')
+    elif control_version(state) == 2 and state.get('process'):
+        require_approved(state)
     prepare_generation(args, state)
     common = Path(state["project"]["common_dir"])
     association = state.get("worktree_preparation")
@@ -1002,18 +1402,25 @@ def invalidate_integration(state):
 def apply_item(operation, args, state, task_path):
     item = get_item(state, args["item_id"])
     actor = args["actor"]
-    require_approved(state)
+    require_approved(state, item)
     if item["overall"] and operation in ("item-start", "item-accept"):
         require_implementation_complete(state)
     if operation == "item-start":
-        revision(state)
+        revision(state, clean=not controlled_plan(state))
         if state.get("process") and not item["overall"]:
-            for dependency_id in item["plan_item"]["dependencies"]:
-                dependency = get_item(state, dependency_id)
-                if dependency["status"] != "complete" or not evidence_matches(dependency["acceptance"], binding(state, revision(state), dependency)):
-                    fail("dependency_incomplete", "Accept the current evidence for each planned dependency before starting this item.")
+            if modern_plan(state):
+                require_item_dependencies(state, args['item_id'])
+                if item['plan_item']['owner'] != actor:
+                    fail('item_owner_required', 'Only the approved item owner can begin implementation.')
+                if controlled_plan(state) and not any(value['item_id'] == args['item_id'] and value['role'] == 'implementer' and value['worker_id'] == actor and value['status'] == 'active' for value in state.get('workers', {}).values()):
+                    fail('worker_assignment_required', 'Record the actual bounded implementer assignment before work.')
+            else:
+                for dependency_id in item["plan_item"]["dependencies"]:
+                    dependency = get_item(state, dependency_id)
+                    if dependency["status"] != "complete" or not evidence_matches(dependency["acceptance"], binding(state, revision(state), dependency)):
+                        fail("dependency_incomplete", "Accept the current evidence for each planned dependency before starting this item.")
         if item["status"] == "complete":
-            if evidence_matches(item["acceptance"], binding(state, revision(state), item)):
+            if evidence_matches(item["acceptance"], binding(state, item_revision(state, item), item)):
                 fail("invalid_transition", "This completed item still has current evidence.")
         elif item["status"] != "pending":
             fail("invalid_transition", "Only a pending or stale completed item can be started.")
@@ -1021,7 +1428,25 @@ def apply_item(operation, args, state, task_path):
         return
     if not item["implementer"]:
         fail("invalid_transition", "Start the item before submitting or collecting evidence.")
-    current = binding(state, revision(state), item)
+    current = binding(state, item_revision(state, item), item)
+    if modern_plan(state) and not item['overall'] and operation in ('item-submit','item-accept'):
+        require_item_dependencies(state,args['item_id'],phase='submission')
+    if controlled_plan(state) and not item['overall']:
+        if operation in ('item-requirements-review', 'item-quality-review'):
+            phased_review(operation, args, state, item, current)
+            return
+        if operation == 'item-review':
+            fail('ordered_review_required', 'Record requirements review, then independent quality review.')
+        if operation == 'item-submit':
+            settled_assignment(state, args, item, 'implementer', current)
+            checks=[value for value in item['verifications'] if evidence_matches(value,current)]
+            if not checks or not checks[-1].get('passed') or checks[-1].get('actor') != actor:
+                fail('self_test_required', 'The implementer must pass an actual current self-test before submission.')
+        if operation == 'item-accept':
+            for field in ('requirements_review', 'quality_review'):
+                review = item.get(field) or {}
+                if review.get('verdict') != 'accept' or not evidence_matches(review, current):
+                    fail('ordered_review_required', 'Accept current requirements and quality reviews before main acceptance.')
     if operation == "item-submit":
         if actor != item["implementer"] or item["status"] not in ("implementing", "reviewing"):
             fail("invalid_transition", "Only the implementer can submit an active item.")
@@ -1073,10 +1498,12 @@ def apply_item(operation, args, state, task_path):
     elif operation == "item-accept":
         if actor != state["coordinator"]:
             fail("coordinator_required", "Only the registered coordinator may accept an item.")
+        if controlled_plan(state) and item['overall']:
+            item['review'] = {**current, 'actor': actor, 'verdict': 'accept', 'requirements_verdict': 'accept', 'quality_verdict': 'accept', 'notes': args['notes'], 'time': now()}
         review = item["review"] or {}
         if state.get("process") and any(review.get(key) != "accept" for key in ("requirements_verdict", "quality_verdict")):
             fail("review_dimensions_required", "Both current requirements and quality review must accept this item.")
-        if item["status"] != "reviewing" or not evidence_matches(item["submitted"], current) or review.get("verdict") != "accept" or not evidence_matches(review, current) or review.get("actor") == item["implementer"]:
+        if item["status"] != "reviewing" or not evidence_matches(item["submitted"], current) or review.get("verdict") != "accept" or not evidence_matches(review, current) or (review.get("actor") == item["implementer"] and not (controlled_plan(state) and item["overall"])):
             fail("stale_evidence", "A current independent accepting review is required.")
         checks = [v for v in item["verifications"] if evidence_matches(v, current)]
         if not checks or not checks[-1]["passed"]:
@@ -2223,15 +2650,23 @@ def successful_scope_proof(state):
 
 def close_scope(args, state, experiment_id=None):
     require_coordinator(args, state)
-    require_approved(state)
+    if args["outcome"] == "completed":
+        require_approved(state)
     scope = get_experiment(state, experiment_id) if experiment_id else task_lifecycle(state)
-    if scope["status"] != "open":
-        fail("scope_closed", "This aggregate scope already has a recorded closure.")
+    already_closed = scope['status'] != 'open'
+    if already_closed:
+        closure = scope.get('closure') or {}
+        if any(closure.get(key) != args[key] for key in ('outcome', 'evidence', 'notes')):
+            fail('scope_closed', 'The existing closure differs from this request; preserve it or explicitly reopen.')
+    else:
+        require_task_open(state)
     if args["outcome"] not in ("completed", "stopped", "abandoned") or not args["evidence"]:
         fail("acceptance_required", "Closure needs an explicit completed, stopped or abandoned outcome and evidence references.")
     runs = [r for r in state["runs"].values() if not experiment_id or r.get("experiment_id") == experiment_id]
     active_checks = [check['id'] for check in state.get('checks', {}).values() if check['status'] not in TERMINAL_CHECKS
                      and (not experiment_id or state['runs'].get(check.get('selectors', {}).get('run_id'), {}).get('experiment_id') == experiment_id)]
+    if pending_workers(state):
+        fail('workers_pending', 'Settle owned worker assignments before closing their scope.')
     if active_checks:
         fail('checks_incomplete', 'Settle reserved, active and uncertain checks before closing their scope.', {'check_ids': active_checks})
     if any(r["status"] not in TERMINAL_RUNS for r in runs):
@@ -2248,7 +2683,7 @@ def close_scope(args, state, experiment_id=None):
             fail("experiments_incomplete", "Accept the outcome and analysis of every experiment before closing the task.")
         if args["outcome"] == "completed":
             integration = state["integration"]
-            if state.get("integration_required", True):
+            if integration.get("status") == "complete" or state.get("integration_required", True):
                 if integration.get("status") != "complete":
                     fail("integration_required", "Task success requires the integration included at enrollment.")
                 rev = {"commit": integration["head"], "tree": integration.get("source_tree") or git(state["project"]["path"], "rev-parse", integration["head"] + "^{tree}"), "clean": True}
@@ -2261,10 +2696,14 @@ def close_scope(args, state, experiment_id=None):
                 all_current(state, current_revision)
                 if current_revision["tree"] != git(state["project"]["path"], "rev-parse", "HEAD^{tree}"):
                     fail("unpublished_changes", "A task that excludes integration cannot close successfully with unpublished code changes.")
+    if already_closed:
+        return {'experiment' if experiment_id else 'task_lifecycle': scope, 'already_closed': True}
     for hold in state.get('resource_holds', {}).values():
         ref = {'kind': 'experiment' if experiment_id else 'task', 'id': experiment_id or state['task_id']}
         if hold.get('program_owned') and hold['status'] == 'retained' and hold['work_refs'] == [ref]:
             hold.update(status='resolved', resolved_at=now(), resolution={'outcome': args['outcome'], 'evidence': args['evidence'], 'actor': args['actor']})
+    if not experiment_id and args['outcome'] == 'completed':
+        goal_action(state, 'complete', {'operation':'task-complete','evidence':args['evidence']})
     scope.update(status="complete", closure={"id": uuid.uuid4().hex, "outcome": args["outcome"], "notes": args["notes"],
                  "evidence": args["evidence"], "actor": args["actor"], "time": now(), "generation": scope["generation"]})
     return {"experiment" if experiment_id else "task_lifecycle": scope}
@@ -2311,6 +2750,7 @@ def prepare_run_staged(args, root, store):
         if state["version"] != args["expected_version"]:
             fail("revision_conflict", "The task changed; reread status before preparation.")
         require_task_open(state)
+        coordinator_execution_guard(state, args, "run-prepare")
         require_approved(state)
         require_coordinator(args, state)
         current = state['runs'].get(args['run_id'])
@@ -2658,6 +3098,11 @@ def require_execution_protocol(state, current):
 def pin_runtime(state):
     source = Path(__file__).resolve().parent
     files = {name: (source / name).read_bytes() for name in ("workflow.py", "runner.py")}
+    helper = source / 'process_contracts.py'
+    if helper.is_file():
+        content = helper.read_text()
+        files['workflow.py'] += ('\nPROCESS_CONTRACT_SOURCE = ' + repr(content) + '\nPROCESS_CONTRACT_SHA256 = ' + repr(hashlib.sha256(content.encode()).hexdigest()) + '\n').encode()
+
     hashes = {name: hashlib.sha256(content).hexdigest() for name, content in files.items()}
     runtime_digest = digest(hashes)
     store = Path(state["root"]) / ".task-workflow"
@@ -3172,7 +3617,7 @@ def session_dialogue_context(cwd, session_id):
         return None
     contract = dialogue_contract(state)
     return {"root": str(root), "session_id": session_id, "status_tool": "context",
-            "task": summary(state), "dialogue_contract": contract, "templates": contract["templates"],
+            "task": summary(state), "dialogue_contract": contract, "workflow_controls": workflow_controls(state), "templates": contract["templates"],
             "recovery_guidance": "Use this current state version and stage for the related request. Read-only progress questions authorize inspection only. Record actual incoming answers before dependent work; hook delivery grants no authorization."}
 
 
@@ -3555,6 +4000,8 @@ def register_environment(args, state):
 
 
 def init(args, root, store):
+    if args.get('workflow_control_version', 2) not in (1, 2):
+        fail('invalid_contract_version', 'Use workflow control version 1 or 2.')
     project = init_checkout_identity(args['project'], 'project')
     worktree = init_checkout_identity(args.get('worktree', args['project']), 'worktree')
     if worktree['common_dir'] != project['common_dir']:
@@ -3585,6 +4032,7 @@ def init(args, root, store):
             'session_id': args.get('session_id'), 'enrollment': {'actor': args['actor'], 'authorization_source': args['authorization_source']},
             'project': project, 'worktree': worktree, 'owned_worktree': args.get('owned_worktree', False),
             'environment_registry': environments, 'managed_paths': args['_managed_paths'], 'design': None, 'approval': None,
+            'workflow_control_version': args.get('workflow_control_version', 2), 'workers': {},
             'integration_required': args.get('integration_required', True), 'items': {'overall': make_item('Overall verification', True)},
             'decisions': [], 'runs': {}, 'checks': {}, 'resource_holds': {}, 'generation': 1, 'generation_history': [], 'experiments': {}, 'integration': {}, 'task_lifecycle': {'status': 'open', 'generation': 1, 'history': []}}
         process = new_process()
@@ -4095,6 +4543,7 @@ def prepare_generation(args, state):
             'design_digest':state['design']['digest'],'plan_digest':state['process']['plan']['digest'],
             'actor':args['actor'],'authorization_source':args['authorization_source'],'time':now()})
     state['generation'] = current + 1
+    goal_action(state, 'start', {'operation':'worktree-prepare','authorization_source':args['authorization_source']})
     state.update(worktree=copy.deepcopy(state['project']), owned_worktree=False, integration={})
     for key in ('cleaned', 'cleanup_intent', 'worktree_preparation'):
         state.pop(key, None)
@@ -4122,6 +4571,7 @@ def finish_cleanup(args, state):
     target = Path(state['worktree']['path'])
     if not intent or intent.get('generation') != generation(state) or target.exists() or target.is_symlink() or cleanup_registration(state):
         fail('cleanup_unknown', 'Worktree removal needs matching intent and actual Git removal evidence.')
+    goal_action(state, 'complete', {'operation':'cleanup','integration_commit':state['integration']['commit']})
     state['cleaned'] = {'time': now(), 'actor': args['actor'], 'token': intent['token'], 'generation': generation(state)}
     receipt = {'generation': generation(state), 'worktree': copy.deepcopy(state['worktree']), 'owned_worktree': state['owned_worktree'],
                'source_commit': intent['head'], 'source_tree': state['integration']['source_tree'], 'items': copy.deepcopy(state['items']),
@@ -4252,7 +4702,7 @@ def apply_resource_hold(operation, args, state, store):
 
 
 def check_source(state, kind, args):
-    selectors = {'verification': 'item_id', 'integration': None, 'startup': 'run_id', 'baseline': 'baseline_path'}
+    selectors = {'verification': 'item_id', 'integration': None, 'startup': 'run_id', 'baseline': 'baseline_path', 'feasibility': None}
     if kind not in selectors:
         fail('invalid_check_kind', 'Use verification, integration, startup or baseline.')
     selected = selectors[kind]
@@ -4260,13 +4710,31 @@ def check_source(state, kind, args):
         fail('check_source_required', 'Supply the exact source selector required by this check kind.')
     if kind != 'integration' and any(key in args for key in ('source_mode', 'expected_integration_commit')):
         fail('check_source_required', 'Integration source options require an integration check.')
+    if args.get('composition_for') and kind != 'verification':
+        fail('check_source_required', 'Composition selectors apply only to item verification.')
     base = {'generation': generation(state), 'kind': kind}
+    if kind == 'feasibility':
+        if control_version(state) != 2:
+            fail('workflow_control_upgrade_required', 'Feasibility checks require workflow control version 2.')
+        proof = args.get('feasibility')
+        if not isinstance(proof, dict):
+            fail('exploration_required', 'Use feas-check with an actual sourced probe.')
+        return {**base, 'revision': revision(state), 'feasibility': copy.deepcopy(proof)}, state['worktree']['path'], None
     if kind == 'verification':
-        require_approved(state)
+        require_approved(state, get_item(state, args['item_id']))
         item = get_item(state, args['item_id'])
         if item['status'] not in ('implementing', 'reviewing') or not item.get('implementer'):
             fail('invalid_transition', 'Verification requires an active item.')
-        return {**base, 'item_id': args['item_id'], 'binding': binding(state, revision(state), item)}, state['worktree']['path'], None
+        composition = args.get('composition_for', [])
+        if composition:
+            process_strings(composition, True)
+            if not modern_plan(state): fail('plan_contract_required', 'Composition selectors require a version-2 plan.')
+            allowed = {edge['item_id'] for edge in contract_call('dependency_edges', item['plan_item'], 2) if edge['kind'] == 'integration'}
+            if set(composition) - allowed: fail('unknown_reference', 'Composition producers must be declared integration-test dependencies.')
+        result = {**base, 'item_id': args['item_id'], 'binding': binding(state, item_revision(state, item), item)}
+        if composition:
+            result['composition_for'] = {key: binding(state, item_revision(state, get_item(state,key)), get_item(state,key)) for key in composition}
+        return result, state['worktree']['path'], None
     if kind == 'integration':
         check_base_identity(state)
         integration = state['integration']
@@ -4405,6 +4873,11 @@ def check_contract(current):
 def check_current(state, current):
     try:
         actual, _, _ = check_source(state, current['kind'], {**current['selectors'], 'argv': current['argv']})
+        if current['kind'] == 'verification' and modern_plan(state):
+            return (actual['generation'] == current['source_binding']['generation']
+                    and evidence_matches(current['source_binding']['binding'], actual['binding'])
+                    and set(actual.get('composition_for', {})) == set(current['source_binding'].get('composition_for', {}))
+                    and all(evidence_matches(value, actual['composition_for'][key]) for key,value in current['source_binding'].get('composition_for', {}).items()))
         return actual == current['source_binding']
     except (WorkflowError, OSError):
         return False
@@ -4639,11 +5112,20 @@ def reconcile_check(args, state):
 
 def dispatch_check(operation, args, root, store):
     path = task_dir(store, args['task_id'])
-    direct = operation in ('verify', 'integration-verify')
+    direct = operation in ('verify', 'integration-verify', 'feas-check')
     arguments = copy.deepcopy(args)
     if operation in ('verify', 'integration-verify'):
         arguments['kind'] = 'verification' if operation == 'verify' else 'integration'
         arguments.setdefault('check_id', 'check-' + uuid.uuid4().hex)
+    if operation == 'feas-check':
+        arguments['kind'] = 'feasibility'
+        process_object(args['probe'], ('question', 'inputs', 'versions', 'criterion', 'evidence'))
+        for key in ('question', 'criterion'):
+            text_value(args['probe'][key])
+        process_strings(args['probe']['inputs'], True); process_strings(args['probe']['evidence'], True)
+        if not isinstance(args['probe']['versions'],dict) or not args['probe']['versions'] or any(not isinstance(k, str) or not isinstance(v, str) or not v for k,v in args['probe']['versions'].items()):
+            fail('invalid_probe', 'Record actual package or framework versions.')
+        arguments['feasibility'] = {'probe': copy.deepcopy(args['probe']), 'authorization_source': text_value(args['authorization_source'])}
     with mutation_locks(store, arguments, operation):
         state, previous = load_events(path)
         if state['version'] != args['expected_version']:
@@ -4675,6 +5157,18 @@ def dispatch_check(operation, args, root, store):
             commit_event(path, state, previous, operation, args['actor'])
             return check_response(state, current, **result)
         require_task_open(state)
+        coordinator_execution_guard(state, args, operation)
+        if operation == 'feas-check':
+            explorer=state.get('workers',{}).get(args.get('assignment_id'))
+            if (not explorer or explorer['role'] != 'explorer' or explorer['status'] != 'active'
+                    or explorer['worker_id'] != args['actor'] or explorer['binding']['generation'] != generation(state)):
+                fail('explorer_assignment_required', 'An actual active assigned explorer executes feasibility while the coordinator waits.')
+            changed=git(state['worktree']['path'],'diff','--name-only',explorer['binding']['source_commit'],'HEAD').splitlines()
+            if any(not any(name==owned or name.startswith(owned.rstrip('/')+'/') for owned in explorer['owned_paths']) for name in changed):
+                fail('exploration_scope_changed', 'Preserve exploratory source changes outside the explicitly assigned scope.')
+            arguments['feasibility'].update(assignment_id=args['assignment_id'], owned_paths=explorer['owned_paths'])
+            if state.get('process', {}).get('stage') not in ('exploration', 'discussion'):
+                fail('exploration_required', 'Feasibility checks are authorized exploration, not implementation verification.')
         if state.get('workflow_format') != 3:
             fail('lifecycle_upgrade_required', 'Settle legacy execution and explicitly upgrade before creating current checks.')
         if operation == 'run-validate':
@@ -4685,7 +5179,7 @@ def dispatch_check(operation, args, root, store):
         if existing:
             if (existing['resource_id'] != arguments.get('resource_id') or existing['requirements'] != arguments.get('requirements', {}) or existing['timeout'] != arguments.get('timeout')):
                 fail('check_intent_changed', 'Preserve the existing immutable check resource and timeout intent.')
-            if existing.get('submitted_argv', existing['argv']) != arguments['argv'] or existing['kind'] != kind or existing['selectors'] != {k: arguments[k] for k in ('item_id', 'run_id', 'baseline_path', 'source_mode', 'expected_integration_commit') if k in arguments}:
+            if existing.get('submitted_argv', existing['argv']) != arguments['argv'] or existing['kind'] != kind or existing['selectors'] != {k: arguments[k] for k in ('item_id', 'run_id', 'baseline_path', 'source_mode', 'expected_integration_commit', 'feasibility', 'composition_for') if k in arguments}:
                 fail('check_intent_changed', 'Preserve the existing immutable check intent.')
             return check_response(state, existing, already_dispatched=True)
         source, cwd, frozen = check_source(state, kind, arguments)
@@ -4698,14 +5192,14 @@ def dispatch_check(operation, args, root, store):
         no_symlinks(directory, path)
         token = uuid.uuid4().hex
         current = {'id': name, 'kind': kind, 'token': token, 'generation': generation(state), 'source_binding': source,
-                   'selectors': {k: arguments[k] for k in ('item_id', 'run_id', 'baseline_path', 'source_mode', 'expected_integration_commit') if k in arguments},
+                   'selectors': {k: arguments[k] for k in ('item_id', 'run_id', 'baseline_path', 'source_mode', 'expected_integration_commit', 'feasibility', 'composition_for') if k in arguments},
                    'argv': list(arguments['argv']), 'cwd': cwd, **association, 'timeout': arguments.get('timeout'),
                    'directory': str(directory), 'runtime': pin_runtime(state), 'status': 'reserved', 'actor': args['actor'],
                    'execution_host': {'hostname': socket.gethostname(), 'uid': lock_uid(), 'release_supported': False}, 'created': now()}
         if kind == 'integration' and source.get('source_mode') == 'fixed_commit':
             current['cwd'] = str(directory / 'source')
             current['source_checkout'] = {'path': current['cwd'], 'token': token, 'commit': source['commit'], 'tree': source['tree'], 'common_dir': state['project']['common_dir']}
-        if kind in ('verification', 'integration'):
+        if kind in ('verification', 'integration', 'feasibility'):
             main_environment = project_environment(state)
             if main_environment:
                 current['main_environment_binding'] = copy.deepcopy(main_environment)
@@ -4765,7 +5259,7 @@ def _dispatch(operation, arguments):
         return execute_run(args, root, store, external=operation == "run-dispatch")
     if operation == "resource-release":
         return release_resource(args, root, store)
-    if operation in ("verify", "integration-verify", "check-dispatch", "check-reconcile", "check-cancel", "run-validate"):
+    if operation in ("verify", "integration-verify", "check-dispatch", "check-reconcile", "check-cancel", "run-validate", "feas-check"):
         return dispatch_check(operation, args, root, store)
     if operation == "run-prepare":
         return prepare_run_staged(args, root, store)
@@ -4795,13 +5289,16 @@ def _dispatch(operation, arguments):
             fail("root_changed", "This task belongs to a different storage root.")
         require_portable_state(state)
         result = {}
-        if operation not in ("resource-hold-resolve", "lifecycle-upgrade", "recover", "bind-session", "task-reopen", "cleanup", "resource-observe", "resource-release-reconcile", "run-reconcile"):
+        coordinator_execution_guard(state, args, operation)
+        if operation not in ("resource-hold-resolve", "lifecycle-upgrade", "recover", "bind-session", "task-reopen", "cleanup", "resource-observe", "resource-release-reconcile", "run-reconcile", "task-complete", "experiment-complete"):
             require_task_open(state)
-        if operation == "recover":
+        if operation in CONTROL_COMMANDS:
+            result = apply_control(operation, args, state)
+        elif operation == "recover":
             project_state(path, state)
             register_root(root, state)
             return {"ok": True, "state": state, "summary": summary(state), "recovered": True}
-        if operation == "bind-session":
+        elif operation == "bind-session":
             require_coordinator(args, state)
             text_value(args['session_id'])
             if state.get('session_id') not in (None, args['session_id']):
@@ -4913,7 +5410,7 @@ def _dispatch(operation, arguments):
             atomic_json(log_path, {"stdout_tail": result.pop("stdout"), "stderr_tail": result.pop("stderr")})
             integration["verification"] = {"commit": integration["commit"], "design_digest": state["design"]["digest"], "argv": args["argv"], "actor": args["actor"], "passed": result["returncode"] == 0 and unchanged, "result": result, "log": str(log_path), "log_sha256": sha_file(log_path), "time": now()}
             result = {"verification": integration["verification"]}
-        elif operation in ("item-start", "item-submit", "verify", "item-review", "item-accept"):
+        elif operation in ("item-start", "item-submit", "verify", "item-review", "item-requirements-review", "item-quality-review", "item-accept"):
             apply_item(operation, args, state, path)
         elif operation == "decision":
             require_legacy_process(state)
@@ -4935,6 +5432,8 @@ def _dispatch(operation, arguments):
             result = prepare_run(args, state, root)
         else:
             fail("unsupported", "The operation is not implemented.")
+        if result.get('already_closed') or result.get('already_recorded') or result.get('already_upgraded'):
+            return {'ok': True, 'state': state, 'summary': summary(state), **result}
         if operation == "cleanup":
             _, previous = load_events(path)
         commit_event(path, state, previous, operation, args["actor"])
@@ -4968,6 +5467,7 @@ def dispatch(operation, arguments):
         state, _ = load_events(task_dir(store, task_id))
     if isinstance(state, dict):
         result["dialogue_contract"] = dialogue_contract(state)
+        result["workflow_controls"] = workflow_controls(state, evaluate=operation in ("status", "context"))
     if operation == "context":
         return {key: value for key, value in result.items() if key != "state" and key != "resources"}
     return result
@@ -4975,7 +5475,7 @@ def dispatch(operation, arguments):
 
 COMMANDS = {
     "schema": spec("Discover operation schemas."),
-    "init": spec("Explicitly enroll an existing task worktree or a base placeholder awaiting worktree-prepare.", {"task_id": "string", "title": "string", "actor": "string", "authorization_source": "string", "project": "string"}, {"worktree": "string", "coordinator": "string", "environment_registry": "object", "owned_worktree": "boolean", "integration_required": "boolean", "session_id": "string"}),
+    "init": spec("Explicitly enroll an existing task worktree or a base placeholder awaiting worktree-prepare.", {"task_id": "string", "title": "string", "actor": "string", "authorization_source": "string", "project": "string"}, {"worktree": "string", "coordinator": "string", "environment_registry": "object", "owned_worktree": "boolean", "integration_required": "boolean", "session_id": "string", "workflow_control_version": "integer"}),
     "worktree-prepare": mutation("Explicitly create or reuse this task's reserved development worktree; path is project/.worktrees/task-id.", {"expected_base": "string", "authorization_source": "string"}, {"branch": "string"}),
     "environment-bind": mutation("Bind the existing main development environment once for this project.", {"path": "string", "authorization_source": "string"}, {"kind": "string", "tools": "array"}),
     "environment-register": mutation("Register the development main or a fixed runtime with matching dependency and cache provenance.", {"environment_id": "string", "path": "string", "authorization_source": "string"}, {"purpose": "string", "project_distributions": "array", "cache_root": "string", "install_receipt": "string", "kind": "string", "tools": "array"}),
@@ -5035,7 +5535,27 @@ COMMANDS.update({
         {'resource_id': 'string', 'hold_id': 'string', 'outcome': 'string', 'evidence': 'array', 'authorization_source': 'string'}),
     'lifecycle-upgrade': mutation('Explicitly upgrade quiescent legacy lifecycle metadata without replacing old Run or runtime bytes.', {'authorization_source': 'string'}),
 })
-COMMANDS['worktree-prepare']['optional'].update(expected_generation='integer', reuse_approved_plan='boolean')
+CONTROL_COMMANDS = {
+    'workflow-control-upgrade': mutation('Enable current controls without rewriting historical evidence.', {'authorization_source': 'string'}),
+    'worker-assign': mutation('Record an authorized bounded worker role before actual dispatch.', {'assignment_id':'string','item_id':'string','role':'string','worker_id':'string','authorization_source':'string'}),
+    'worker-activate': mutation('Bind an assignment to an actual native activation.', {'assignment_id':'string','activation':'object','evidence':'array'}),
+    'worker-settle': mutation('Record the actual terminal native result and activation cleanup.', {'assignment_id':'string','outcome':'string','result':'object','cleanup':'boolean','evidence':'array'}),
+    'interface-accept': mutation('Accept exact approved interface semantics with actual evidence.', {'interface_id':'string','notes':'string','evidence':'array'}),
+    'goal-request': mutation('Record a requested native goal action without claiming capability or creation.', {'request':'string','authorization_source':'string','evidence':'array'}),
+    'goal-observe': mutation('Record an actual exposed native goal capability receipt.', {'receipt':'object','evidence':'array'}),
+}
+CONTROL_COMMANDS['worker-assign']['optional']['owned_paths']='array'
+COMMANDS.update(CONTROL_COMMANDS)
+COMMANDS['feas-check'] = mutation('Execute an authorized source-bound feasibility probe using durable check receipts.',
+    {'check_id':'string','argv':'array','probe':'object','authorization_source':'string'},
+    {'resource_id':'string','requirements':'object','timeout':'integer','detached':'boolean','assignment_id':'string'})
+for _name in ('item-requirements-review', 'item-quality-review'):
+    COMMANDS[_name] = mutation('Record the ordered current-source review from its settled independent assignment.',
+        {'item_id':'string','assignment_id':'string','verdict':'string','notes':'string'}, {'findings':'array','unverified':'array'})
+COMMANDS['item-submit']['optional']['assignment_id'] = 'string'
+for _name in ('verify', 'check-dispatch'):
+    COMMANDS[_name]['optional']['composition_for'] = 'array'
+COMMANDS['worktree-prepare']['optional'].update(expected_generation='integer', reuse_approved_plan='boolean', purpose='string')
 COMMANDS['run-reconcile']['optional']['settlement_path'] = 'string'
 COMMANDS['run-reconcile']['description'] = 'Reconcile a matching execution receipt or current non-success controller settlement without repeating execution.'
 COMMANDS['integrate']['optional'].update(preserve_unrelated_dirty='boolean', expected_preservation_digest='string')
@@ -5420,12 +5940,47 @@ def process_envelope(content, previous, actor, **bindings):
             "digest": digest({"version": version, "content": content, **bindings}), "actor": actor, "time": now(), **bindings}
 
 
+def approved_item_semantics(state):
+    """Keep executable plan scopes and their dependency semantics separate from labels."""
+    process=state['process'];plan=process['plan']['content']
+    entries={entry['id']:entry for entry in plan['items']};result={}
+    def scope(item_id):
+        if item_id in result: return result[item_id]
+        entry=entries[item_id];dependencies={}
+        for edge in contract_call('dependency_edges',entry,2):
+            if edge['kind'] != 'contract': dependencies[edge['item_id']]=scope(edge['item_id'])
+        refs=set(entry['requirement_ids']) | set(plan.get('shared_requirements',[]))
+        for prerequisite in process['design']['content'].get('feasibility_checks',[]):
+            if refs.intersection(prerequisite['requirement_ids']):
+                check=state.get('checks',{}).get(prerequisite['check_id'],{})
+                dependencies['feasibility:'+prerequisite['check_id']]={key:check.get(key) for key in ('source_binding','contract_digest','receipt_digest')}
+        result[item_id]=digest(contract_call('semantic_scope',process,entry,dependencies))
+        return result[item_id]
+    for item_id in entries: scope(item_id)
+    return result
+
+
 def process_scope_digest(state, item, rev):
     """Unchanged requirement/component/plan scopes keep their accepted evidence."""
     process = state["process"]
     plan_item = item.get("plan_item")
     if not plan_item or not process["design"]:
         return "unplanned"
+    if process.get('plan') and process['plan']['content'].get('contract_version', 1) == 2:
+        dependencies = {}
+        for edge in contract_call('dependency_edges', plan_item, 2):
+            key = edge.get('interface_id', edge['item_id'])
+            if edge['kind'] == 'contract':
+                dependencies[key] = state.get('interface_acceptances', {}).get(key, {}).get('contract')
+            else:
+                dependency = binding(state, rev, get_item(state, edge['item_id']))
+                dependencies[key] = {field: dependency[field] for field in ('design_digest', 'scope')}
+        refs=set(plan_item['requirement_ids']) | set(process['plan']['content'].get('shared_requirements',[]))
+        for prerequisite in process['design']['content'].get('feasibility_checks',[]):
+            if refs.intersection(prerequisite['requirement_ids']):
+                check=state.get('checks',{}).get(prerequisite['check_id'],{})
+                dependencies['feasibility:'+prerequisite['check_id']]={key:check.get(key) for key in ('source_binding','contract_digest','receipt_digest')}
+        return digest(contract_call('semantic_scope', process, plan_item, dependencies))
     refs = set(plan_item["requirement_ids"])
     if process["plan"]:
         refs.update(process["plan"]["content"]["shared_requirements"])
@@ -5514,7 +6069,7 @@ def validate_delegated_choice(entry, decisions):
 
 
 def validate_process_design(process, design):
-    process_object(design, ("behavior", "components", "decisions", "rationale", "impact", "current_impact", "out_of_scope", "failure_conditions", "assumptions", "verification", "unresolved", "delegated_scope"))
+    process_object(design, ("behavior", "components", "decisions", "rationale", "impact", "current_impact", "out_of_scope", "failure_conditions", "assumptions", "verification", "unresolved", "delegated_scope"), ("interface_contracts", "feasibility_checks"))
     requirements = process_requirements(process)
     decisions = {entry["id"]: entry for entry in process["decisions"]}
     for entry in decisions.values():
@@ -5559,7 +6114,7 @@ def validate_process_design(process, design):
 
 
 def validate_process_plan(process, plan):
-    process_object(plan, ("shared_requirements", "dependencies", "review_focus", "items"))
+    process_object(plan, ("shared_requirements", "dependencies", "review_focus", "items"), ("contract_version", "interface_contracts"))
     requirements = process_requirements(process)
     process_refs(plan["shared_requirements"], requirements, path="arguments.plan.shared_requirements")
     process_strings(plan["dependencies"], path="arguments.plan.dependencies"); text_value(plan["review_focus"])
@@ -5569,7 +6124,7 @@ def validate_process_plan(process, plan):
     covered, ids, covered_components = set(), set(), set()
     for item_index, item in enumerate(plan["items"]):
         item_path = "arguments.plan.items[" + str(item_index) + "]"
-        process_object(item, ("id", "title", "requirement_ids", "component_ids", "deliverables", "files", "file_changes", "interfaces", "dependencies", "steps", "verification", "acceptance"))
+        process_object(item, ("id", "title", "requirement_ids", "component_ids", "deliverables", "files", "file_changes", "interfaces", "dependencies", "steps", "verification", "acceptance"), ("owner",))
         identifier(item["id"]); text_value(item["title"])
         if item["id"] == "overall" or item["id"] in ids:
             fail("invalid_process", "Plan item identifiers must be unique and cannot use overall.")
@@ -5581,7 +6136,7 @@ def validate_process_plan(process, plan):
         component_requirements = {ref for component_id in item["component_ids"] for ref in components[component_id]["requirement_ids"]}
         if set(item["requirement_ids"]) - component_requirements:
             fail("requirement_coverage", "Each work item must map its requirements to the selected Spec components.", coverage_diagnostic(item_path + ".component_ids", item["component_ids"], set(item["requirement_ids"]) - component_requirements, allowed_reference_ids=sorted(components)))
-        for key in ("deliverables", "files", "interfaces", "dependencies", "acceptance"):
+        for key in ("deliverables", "files", "interfaces", "acceptance") + (("dependencies",) if plan.get("contract_version", 1) == 1 else ()):
             process_strings(item[key], key in ("deliverables", "files", "acceptance"), item_path + "." + key)
         for filename in item["files"]:
             safe_relative(filename)
@@ -5646,7 +6201,11 @@ def validate_process_plan(process, plan):
         fail("requirement_coverage", "The implementation plan must cover every confirmed requirement.", coverage_diagnostic("arguments.plan.items", sorted(covered), set(requirements) - covered, allowed_reference_ids=sorted(requirements)))
     if set(components) - covered_components:
         fail("component_coverage", "The implementation plan must cover every approved Spec component.", coverage_diagnostic("arguments.plan.items", sorted(covered_components), set(components) - covered_components, allowed_reference_ids=sorted(components)))
-    graph = {item["id"]: item["dependencies"] for item in plan["items"]}
+    if plan.get("contract_version", 1) != 1:
+        contract_call("validate_plan_contract", plan)
+        if plan.get("interface_contracts", []) != process["design"]["content"].get("interface_contracts", []):
+            fail("interface_contract_mismatch", "Plan interfaces must exactly match the approved Spec contracts.")
+    graph = {item["id"]: item["dependencies"] if plan.get("contract_version", 1) == 1 else [edge["item_id"] for edge in contract_call("dependency_edges", item, 2)] for item in plan["items"]}
     def visit(item_id, ancestors):
         if item_id in ancestors:
             fail("dependency_cycle", "Implementation dependencies must not form a cycle.")
@@ -5674,6 +6233,8 @@ def apply_process(operation, args, state):
         fail("process_upgrade_required", "Existing tasks retain the legacy contract until an explicitly authorized process-upgrade.")
     before_stage = process["stage"]
     stage = process["stage"]
+    if operation in ("process-intent", "process-exploration"):
+        process.pop("scoped_reentry", None)
     if operation == "process-intent":
         if stage not in ("exploration", "discussion"):
             fail("discussion_required", "Return to discussion before revising intent.")
@@ -5696,7 +6257,17 @@ def apply_process(operation, args, state):
     elif operation in ("process-question", "process-reenter"):
         if operation == "process-question" and stage not in ("exploration", "discussion"):
             fail("discussion_required", "Use process-reenter when the approved design and delegation cannot settle the next action.")
+        if operation == 'process-reenter' and args.get('goal_pause_authorization'):
+            goal_action(state, 'pause', {'operation':operation,'authorization_source':text_value(args['goal_pause_authorization']),'reason':args['reason'],'question_id':args['question']['id']})
+        scoped = operation == 'process-reenter' and controlled_plan(state) and bool(args['question']['scope']) and plan_is_approved(state)
+        if scoped:
+            snapshot = {key: copy.deepcopy(process[key]) for key in ('design_approval', 'plan_approval')}
+            snapshot.update(question_id=args['question']['id'], intent_digest=digest(process['intent']), requirement_ids=list(args['question']['scope']), scope_digests={key: digest(contract_call('semantic_scope', process, item['plan_item'])) for key,item in state['items'].items() if not item['overall']})
+        process.pop('scoped_reentry', None)
         process_question(process, args["question"], args["actor"])
+        if scoped:
+            process['scoped_reentry'] = snapshot
+            process['design_approval'] = snapshot['design_approval']; process['plan_approval'] = snapshot['plan_approval']
     elif operation == "process-answer":
         questions = [q for q in process_pending(process) if q["id"] == args["question_id"]]
         if not questions:
@@ -5793,6 +6364,7 @@ def apply_process(operation, args, state):
         if stage not in ("discussion", "design", "design_review", "design_confirmation"):
             fail("discussion_required", "Return to discussion before changing an approved design.")
         validate_process_design(process, args["design"])
+        validate_feasibility_dependencies(state, args["design"], require_current=True)
         process["design"] = process_envelope(args["design"], process["design"], args["actor"],
             **discussion_bindings(process))
         process.update(stage="design_review", design_review=None, design_approval=None, plan_approval=None)
@@ -5826,6 +6398,8 @@ def apply_process(operation, args, state):
     elif operation == "process-plan":
         if not design_is_approved(state) or stage not in ("plan", "plan_confirmation"):
             fail("approval_required", "Confirm the current design before preparing its implementation plan.")
+        if control_version(state) == 2 and args['plan'].get('contract_version') != 2:
+            fail('plan_contract_required', 'Current workflow controls require explicit plan contract_version 2.')
         validate_process_plan(process, args["plan"])
         process["plan"] = process_envelope(args["plan"], process["plan"], args["actor"], design_digest=process["design"]["digest"])
         process.update(stage="plan_confirmation", plan_approval=None)
@@ -5837,18 +6411,29 @@ def apply_process(operation, args, state):
             fail("plan_approval_required", "Complete the current discussion and prepare the implementation plan first.")
         process["plan_approval"] = {"digest": plan["digest"], "version": plan["version"], "actor": args["actor"], "authorization_source": args["authorization_source"], "time": now()}
         planned = {item["id"]: item for item in plan["content"]["items"]}
+        semantic_scopes=approved_item_semantics(state) if modern_plan(state) else {}
         for item_id in list(state["items"]):
             if not state["items"][item_id]["overall"] and item_id not in planned:
                 state.setdefault("item_history", []).append({"id": item_id, "item": state["items"].pop(item_id), "time": now()})
         for item_id, entry in planned.items():
             item = state["items"].get(item_id)
-            if not item or item.get("plan_item") != entry:
+            changed = not item or item.get("plan_item") != entry
+            if item and semantic_scopes:
+                changed = item.get('approved_semantics') != semantic_scopes[item_id]
+                if item.get('approved_semantics') is None:
+                    # Earlier v2 records have source-bound evidence but no projection index.
+                    changed = item.get('plan_item') != entry
+            if changed:
                 if item:
                     state.setdefault("item_history", []).append({"id": item_id, "item": copy.deepcopy(item), "time": now()})
                 item = make_item(entry["title"], owned_paths=entry["files"])
                 state["items"][item_id] = item
             item["plan_item"] = copy.deepcopy(entry)
+            item["title"] = entry["title"]
+            if semantic_scopes: item["approved_semantics"] = semantic_scopes[item_id]
         process["stage"] = "implementation"
+        goal_action(state, 'start', {'operation':operation,'authorization_source':args['authorization_source']})
+        process.pop('scoped_reentry', None)
         invalidate_overall(state); invalidate_integration(state)
     else:
         fail("unsupported", "Unknown structured process operation.")
@@ -5883,6 +6468,7 @@ PROCESS_COMMANDS = {
 COMMANDS.update({name: mutation(description, fields) for name, (fields, description) in PROCESS_COMMANDS.items()})
 COMMANDS["process-answer"]["optional"].update({"choice_id": "string", "question_digest": "string"})
 COMMANDS['process-requirements']['optional']['scope_changes'] = 'array'
+COMMANDS['process-reenter']['optional']['goal_pause_authorization'] = 'string'
 
 
 def process_schema(fields, optional=()):
@@ -5948,6 +6534,13 @@ for _key in SCOPED_INPUTS:
     PROCESS_SCHEMAS['run-prepare'][_key]['description'] = ('Required for new preparations; only preexisting legacy preparing records may omit this field. '
         + PROCESS_SCHEMAS['run-prepare'][_key].get('description', ''))
 
+_INTERFACE = process_schema({'id':_TEXT,'producer':_TEXT,'consumers':_STRINGS,'contract':_TEXT})
+PROCESS_SCHEMAS['process-design']['design']['properties']['interface_contracts'] = {'type':'array','items':_INTERFACE}
+PROCESS_SCHEMAS['process-design']['design']['properties']['feasibility_checks'] = {'type':'array','items':process_schema({'check_id':_TEXT,'requirement_ids':_STRINGS})}
+PROCESS_SCHEMAS['process-plan']['plan']['properties'].update(contract_version={'type':'integer','enum':[1,2]}, interface_contracts={'type':'array','items':_INTERFACE})
+_PLAN_ITEM['properties']['owner'] = _TEXT
+_PLAN_ITEM['properties']['dependencies'] = {'type':'array','items':{'anyOf':[_TEXT, process_schema({'item_id':_TEXT,'kind':{'type':'string','enum':['contract','implementation','integration']},'interface_id':_TEXT}, ('interface_id',))]}}
+PROCESS_SCHEMAS['feas-check'] = {'probe':process_schema({'question':_TEXT,'inputs':_STRINGS,'versions':{'type':'object','additionalProperties':{'type':'string'}},'criterion':_TEXT,'evidence':_STRINGS})}
 PROCESS_SCHEMAS['check-dispatch'] = {'kind': {'type': 'string', 'enum': ['verification', 'integration', 'startup', 'baseline']}}
 PROCESS_SCHEMAS['resource-hold'] = {
     'retention': {'type': 'string', 'enum': ['until_work_resolved', 'persistent']},
@@ -6270,6 +6863,7 @@ def execute_run(args, root, store, external=False):
     with mutation_locks(store, args, 'run-dispatch' if 'external' in locals() else 'resource-release'):
         state, previous = load_events(path)
         require_task_open(state)
+        coordinator_execution_guard(state, args, 'run-dispatch' if external else 'run-execute')
         require_coordinator(args, state)
         if state['version'] != args['expected_version']:
             fail('revision_conflict', 'The task changed before execution.')

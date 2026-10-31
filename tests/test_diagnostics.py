@@ -62,7 +62,7 @@ class DiagnosticTests(Fixture):
         bad = self.plan_content(); bad.update(id='invented',acceptance=['wrong level'])
         error = self.reject('process-plan','invalid_process','arguments.plan.acceptance',plan=bad)
         self.assertEqual(error.details['unknown_fields'],['acceptance','id'])
-        self.assertEqual(error.details['allowed_fields'],['dependencies','items','review_focus','shared_requirements'])
+        self.assertEqual(error.details['allowed_fields'],['contract_version','dependencies','interface_contracts','items','review_focus','shared_requirements'])
         bad = self.plan_content(); bad['items'][0]['steps'] = ['Generic phase']
         error = self.reject('process-plan','invalid_process','arguments.plan.items[0].steps[0]',plan=bad)
         self.assertEqual(error.details['expected_type'],'object')

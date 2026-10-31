@@ -171,13 +171,13 @@ Use **Result**, **Checks**, relevant **Needs attention**, then **Next**.
 > | Default CSV content unchanged | Passed |
 >
 > **Next**
-> - Independent item review is pending.
+> - Independent requirements review is pending.
 
 Record evidence and actual transitions before reporting them. A worker claim
 alone does not establish acceptance. Compare results with the complete confirmed
 requirement ledger and completion contract. Reviewers must identify omitted
 confirmed behavior even when it is difficult or expensive. Distinguish
-requirements, quality, and overall verdicts where relevant. Continue routine
+requirements, quality, and main acceptance verdicts where relevant. Continue routine
 authorized work.
 
 For long local work, use `run-execute` with `detached: true`. `run-dispatch`

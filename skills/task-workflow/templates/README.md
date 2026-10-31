@@ -13,7 +13,7 @@ these templates do not create parallel task records.
 | [spec.md](spec.md) | Complete Spec (Design) sections and independent builder gap review. |
 | [plan.md](plan.md) | Concrete file responsibilities, interfaces, actions, checks, and expected outcomes. |
 | [record.md](record.md) | Fixed section contract for the generated task record. |
-| [worker-briefs.md](worker-briefs.md) | Coordinator, explorer, design reviewer, implementer, task reviewers, and overall reviewer briefs. |
+| [worker-briefs.md](worker-briefs.md) | Coordinator, explorer, design reviewer, implementer, independent requirements/quality reviewers, and main acceptance briefs. |
 | [worker-reports.md](worker-reports.md) | Evidence-based return formats for each worker role. |
 
 Use actual message, file revision, program event, and artifact references. A

@@ -143,9 +143,30 @@ operations. It leaves the host's original subagent tools unchanged.
 
 | Tool | Arguments and result |
 | --- | --- |
-| `task_workflow_delegate` | Native `prompt` and `description` are required; `cwd` is optional. Returns the native activation identity with an opaque `handleId`. |
+| `task_workflow_delegate` | Native `prompt` and `description` are required; `cwd` is optional. The workflow wrapper additionally accepts `assignment_id` for an existing task worker assignment; control version 2 requires it. Returns the native activation identity with an opaque `handleId`. |
 | `task_workflow_wait` | Takes `{ "handle_id": "<returned handleId>" }`. Returns `handleId`, `subagentId`, `status: "settled"`, the unaltered public native `result` when available, and `cleanup.status` (`complete` or `failed`). A failed result capture returns an explicit `error.code: "result_unavailable"`. |
 | `task_workflow_cancel` | Takes `{ "handle_id": "<returned handleId>" }`. Disposes that owned activation and waits for its actual result. It does not interrupt an unrelated native worker. |
+
+For control-version-2 bound tasks, register `worker-assign` before delegation.
+The wrapper verifies that assignment against current state, strips `assignment_id`
+before invoking the native provider, and binds the observed parent session,
+child session, initial message, and opaque handle through `worker-activate`.
+A failed binding cancels and joins exactly the just-started owned activation,
+returning its actual activation and terminal receipt for reconciliation. It does
+not relaunch the child or pretend the ledger write succeeded.
+`task_workflow_wait` and `task_workflow_cancel` record actual result and cleanup
+through `worker-settle`; capture or cleanup failure cannot become successful
+acceptance. A state-version conflict requires fresh inspection and reconciliation;
+it does not authorize another worker launch. Historical tasks without control
+version 2 retain their prior delegation contract.
+
+The coordinator waits after dispatch. Shared program guards reject coordinator
+execution mutations while assigned/active workers remain pending. This does not
+claim interception of arbitrary native shell or file-writing tools. Current
+capability context describes the wait and discovers exposed native goal tools.
+`goal-request` records intent; only an actual available host invocation and exact
+`goal-observe` receipt establishes a native goal. Absence remains request-only.
+Native goal, item, task, integration, resource, and Run lifecycles are independent.
 
 The tools reuse the official configured spawn provider with native preset,
 depth, working-directory, and authorized provider/model checks. Handles belong
@@ -314,8 +335,8 @@ of an active profile.
    Check exact project/session context, harmless tool execution, progress reads,
    resume, same-turn compaction, and child cleanup. Record actual results and
    material failures; do not infer them from package presence or stub tests.
-4. Complete independent overall review of the implementation and installed-host
-   evidence. Obtain applicable Git integration authorization.
+4. Complete sequential independent requirements and quality review, then main
+   acceptance of the implementation and installed-host evidence. Obtain applicable Git integration authorization.
 5. Integrate through the guarded workflow operation, then verify the integrated
    revision. Compare the reviewed candidate's packaged files with a package from
    that revision. Include path sets and file bytes; account for archive metadata

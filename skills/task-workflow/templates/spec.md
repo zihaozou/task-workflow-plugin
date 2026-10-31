@@ -24,7 +24,8 @@ approval. The template is a content structure, not a parallel source of authorit
 | Scope | Included behavior and relevant exclusions | Confirmed scope requirements; design `out_of_scope` |
 | Current behavior and impact | Observed baseline, affected users/components, compatibility effect | Exploration; design `current_impact` |
 | Required behavior | Flows, inputs/outputs, interfaces, relevant failure behavior | Design behavior and components with mapped requirement IDs |
-| Decisions and authority | Choice, rationale, confirmed/proposed/delegated status, scope | Sourced decisions referenced by design |
+| Decisions and authority | Choice, rationale, confirmed/proposed/delegated status, scope, actual investigation and probe findings | Sourced decisions and retained exploration evidence referenced by design |
+| Performance, cost, and reuse (when relevant) | Expected scale, measured/estimated cost, reused inputs/results, recomputation boundary | Actual probe evidence and explicit assumptions |
 | Constraints and delegation | Exact constraints, implementation freedom and boundaries | Confirmed constraints; design assumptions and delegated decision references |
 | Acceptance | Requirement, check method, observable expected result | Confirmed acceptance requirements and design verification |
 | Failure conditions | Conditions that make the result unacceptable | Design `failure_conditions`, tied to confirmed scope and acceptance |
@@ -42,6 +43,27 @@ material. Do not fill missing authority with an agent assumption. Label an agent
 proposal and discuss it before treating it as settled. Preserve source data and
 exact approved values. `current_impact` describes the observed baseline and effect;
 `out_of_scope` and `failure_conditions` are explicit lists in new design content.
+
+When the plan will use typed interface dependencies, declare exact
+`interface_contracts` in Spec using `id`, `producer`, `consumers`, and `contract`.
+Carry the same accepted semantics into the Plan; changing an interface requires
+revising its affected sources and approval rather than assuming compatibility.
+
+Before submitting Spec, resolve consequential feasibility gaps against actual
+inputs and real versions. Record each probe's question, inputs, versions,
+procedure, pass/refute criterion, observed result, and evidence in Exploration.
+A refuted or inconclusive result informs the design; it is not acceptance.
+Do not substitute a hypothetical API, planned check, or invented host capability
+for an observed fact. Cite inspected source when execution is unnecessary.
+
+Declare required feasibility prerequisites in optional
+`design.feasibility_checks: [{"check_id": "actual-check-id", "requirement_ids": ["actual-requirement-id"]}]`.
+Each declared check must have actual passed source-bound proof and its recorded
+criterion before Spec admission. Missing, failed, or uncertain declared proof
+blocks that Spec. Unlisted refuting probes for abandoned alternatives remain
+findings; they do not globally block the design. The gate preserves the durable
+checked revision rather than requiring implementation to retain the pre-Spec
+source unchanged.
 
 ## Presentation outline
 

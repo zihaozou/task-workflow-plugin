@@ -25,7 +25,9 @@ State root (actual absolute root argument):
 Project checkout (actual absolute base path):
 Task worktree (actual absolute path or recorded base placeholder):
 Canonical record (actual absolute record.md path):
-Protocol and current state version:
+Protocol, workflow control version, and current state version:
+Existing worker assignment_id and role-specific actor:
+Actual native activation identity when started:
 Role, actor, and exact plan item or review target:
 Complete user objective and completion contract:
 Exact Spec revision, digest, status, and source, if applicable:
@@ -91,7 +93,10 @@ Own task identity, authorization checks, conversation, record, work division,
 review evidence, integration, and delivery. At each transition, check source
 and version prerequisites. Present agent proposals as proposals. Ask one
 meaningful question when the design is unsettled. Preserve exact approvals.
-Inspect the actual diff and evidence before accepting worker claims.
+Inspect the actual diff and evidence before accepting worker claims. Once workers
+are dispatched, wait for actual terminal returns and cleanup; do not code in
+parallel. Record assignments, native activations, and settlement in the one task
+record. Preserve independent item, task, integration, Run, and resource lifecycles.
 
 ## Explorer
 
@@ -99,6 +104,10 @@ Inspect the actual diff and evidence before accepting worker claims.
 Question to investigate:
 Source and environment scope:
 Current evidence references:
+Feasibility question and why it affects Spec:
+Exact input data/code and real runtime/dependency versions:
+Procedure and explicit pass/refute criterion:
+Evidence output location and expected result shape:
 Checks to perform:
 Return facts, unknowns, and source locations:
 Stop when evidence is unavailable or a product choice is required:
@@ -106,7 +115,19 @@ Stop when evidence is unavailable or a product choice is required:
 
 Investigate named unknowns in a bounded source and environment scope. Return
 observed facts with locations, checks, uncertainty, and consequences for
-requirements or design. Do not select product behavior on the user's behalf.
+requirements or design. Register an explorer assignment with explicit nonempty `owned_paths`; use its
+logical actor and actual active assignment identity for the probe. `feas-check`
+requires matching `assignment_id`, and the coordinator waits while the explorer
+works. Use `worktree-prepare` with `purpose: exploration` and explicit authorization
+when a registered exploration checkout is needed. `feas-check` requires
+`check_id`, exact `argv`, `authorization_source`, and `probe` with `question`,
+`inputs` (strings), `versions` (actual name/version map), `criterion`, and retained
+`evidence` references. Keep result evidence bound to the checked source. Do not
+select product behavior on the user's behalf. Resolve feasibility before
+Spec using small representative probes when needed. Return actual results,
+refutations, uncertainty, and retained evidence. Explain relevant performance,
+resource/monetary cost, and reuse/recompute behavior with measured or clearly
+estimated assumptions. Never claim a probe was run from a proposed command.
 
 ## Design reviewer
 
@@ -148,7 +169,7 @@ Fixed external references and immutable identities:
 Startup validation command and required origin checks:
 Shared snapshot identity, run provenance, and mutable output location:
 Snapshot ownership, live references, and cleanup boundary:
-Verification to run and evidence to return:
+Self-tests to run and actual evidence to return:
 Stop at a choice beyond approved design or delegation:
 ```
 
@@ -176,7 +197,7 @@ change revision, verification, and any deviation. Stop when a new important
 choice exceeds the approved design or delegation. Do not edit another worker's
 paths without coordinator reassignment.
 
-## Task reviewer
+## Independent item reviewers
 
 ```text
 Plan item and current change revision:
@@ -184,12 +205,20 @@ Complete confirmed requirement ledger and acceptance sources:
 Recorded scope changes and user authority, if any:
 Approved design/plan digests:
 Changed paths and verification evidence:
-Return separate requirements and quality verdicts:
+Assigned review role: requirements_reviewer or quality_reviewer:
+Preceding accepted evidence and current revision:
+Return only the assigned review verdict:
 Stop at missing evidence or out-of-scope choice:
 ```
 
-One task reviewer can return both independent verdicts. The two rubrics below
-keep their findings distinct; they do not require two reviewer agents.
+For newly approved semantic Plan version 2, use distinct actors for implementation,
+requirements review, and quality review. Requirements review follows settled
+implementation/self-test; quality review follows accepted requirements review.
+Each reviewer independently inspects the current revision. Historical control
+version 1 retains its recorded review contract. A control upgrade preserves an
+authoritative Plan version 1 and its item protocol until actual Plan version 2
+approval; all new or changed Plan submissions under control version 2 require
+explicit semantic contract version 2.
 
 ### Requirements rubric
 
@@ -207,7 +236,7 @@ and verification depth relevant to this change. Return findings with file
 locations, severity, evidence, and remediation. Do not infer requirements
 approval from quality approval.
 
-## Overall reviewer
+## Main-agent acceptance
 
 ```text
 Complete change revision and integrated item list:
@@ -215,13 +244,15 @@ Approved design/plan digests:
 Item requirements and quality verdict references:
 Cross-item behavior and verification to inspect:
 Integration or delivery contract:
-Return overall verdict, evidence, and remaining work:
+Return main acceptance, evidence, and remaining work:
 ```
 
-After item reviews pass, inspect the integrated deliverable across items.
+After sequential independent item reviews pass, the main agent inspects the complete deliverable across items.
 Check interactions, complete verification, approved design and plan alignment,
 remaining risks, and readiness for authorized integration or delivery. Return
-one overall verdict with evidence. This review is separate from item reviews.
+one acceptance verdict with evidence. This is main acceptance, not an additional
+mandatory independent verifier activation. Required concrete checks remain part
+of implementation, reviews, integration, and applicable Run admission.
 
 ## Discussion synchronization
 

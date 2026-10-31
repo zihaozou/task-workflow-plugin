@@ -128,7 +128,10 @@ class TransportTests(unittest.TestCase):
 
     def test_real_wire_parse_errors_and_ping(self):
         with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
+            release = Path(temporary)
+            folder = release / "skills/task-workflow/scripts"
+            folder.mkdir(parents=True)
+            (release / "package.json").write_bytes((SCRIPTS.parents[2] / "package.json").read_bytes())
             (folder / "mcp_server.py").write_bytes((SCRIPTS / "mcp_server.py").read_bytes())
             (folder / "workflow.py").write_text("def command_schemas(): return []\nclass WorkflowError(Exception): pass\ndef dispatch(*args): raise AssertionError('must not execute')\n")
             requests = 'not-json\n{"jsonrpc":"2.0","id":1,"id":2,"method":"ping"}\n' + json.dumps({"jsonrpc": "2.0", "id": 3, "method": "ping"}) + '\n'
@@ -140,7 +143,10 @@ class TransportTests(unittest.TestCase):
 
     def test_real_wire_accepts_message_larger_than_one_mib(self):
         with tempfile.TemporaryDirectory() as temporary:
-            folder = Path(temporary)
+            release = Path(temporary)
+            folder = release / "skills/task-workflow/scripts"
+            folder.mkdir(parents=True)
+            (release / "package.json").write_bytes((SCRIPTS.parents[2] / "package.json").read_bytes())
             (folder / "mcp_server.py").write_bytes((SCRIPTS / "mcp_server.py").read_bytes())
             (folder / "workflow.py").write_text("def command_schemas(): return []\nclass WorkflowError(Exception): pass\n")
             request = {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {"payload": "x" * (1024 * 1024 + 1)}}

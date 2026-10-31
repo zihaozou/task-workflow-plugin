@@ -6,7 +6,7 @@ approvals, delegated work, evidence review, and optional frozen runs.
 It combines a skill, recovery and communication hooks, and a Python workflow
 program exposed through command-line and MCP tools. Codex and DeepSeek Harness
 use that same program and skill through their native registrations.
-This checkout packages release 0.1.21.
+This checkout packages release 0.1.22.
 
 ## Codex installation and enrollment
 
@@ -64,8 +64,9 @@ choice wins. Unclear intent or task identity requires clarification before
 enrollment or mutation.
 
 A clear substantive action request authorizes enrollment for exploration and
-discussion. New tasks use process protocol 2. The main skill defines a mandatory
-conversation sequence: inspect actual context; restate intent and why, findings
+discussion. New tasks use process protocol 2 and workflow control version 2. Historical
+records without a control version retain version 1 until explicitly upgraded.
+The main skill defines source-backed conversation and approval boundaries: inspect actual context; restate intent and why, findings
 and impact, then ask one important question; acknowledge each answer and record
 it before the dependent next question; alternate exploration, questions, and
 playback. Playback separates user requirements, agent proposals, and explicitly
@@ -204,7 +205,7 @@ exact package dependencies, readiness, context errors, cleanup, verification,
 rollback, and long operations. It also describes native host call defaults, which
 are separate from Task Workflow's unchanged workload timeout behavior. The
 supported sequence is candidate installation and actual provider/delegation
-checks, independent overall review, guarded integration, packaged-payload
+checks, sequential independent reviews and main acceptance, guarded integration, packaged-payload
 comparison, then final installed verification. A stub test proves its observed
 transport behavior, not real-provider obedience.
 
@@ -264,12 +265,64 @@ change its session. Selecting a closed task preserves its closure. Recovery
 preserves the existing selection. Use `status` to inspect the persisted task
 record with the known project and task context.
 
+## Investigate feasibility and plan concrete work
+
+Before Spec, delegate bounded exploration and resolve consequential feasibility
+questions with actual inspected sources or small representative experiments.
+`worktree-prepare` accepts `purpose: exploration`; `feas-check` records the
+question, exact inputs, real versions, pass/refute criterion, retained evidence,
+and actual source-bound result. A failed probe remains useful evidence. It does
+not create a formal Run, grant implementation approval, or bypass Run admission.
+Spec decisions cite these findings. Relevant performance, resource/monetary cost,
+and reuse/recomputation models state their measurements or assumptions.
+
+Spec can declare required probes through
+`feasibility_checks: [{check_id, requirement_ids}]`; every declared probe needs
+actual passed source-bound proof and its criterion. Refuted probes for abandoned
+alternatives remain evidence without becoming global prerequisites.
+
+Semantic plan `contract_version: 2` is separate from workflow control version.
+New control-version-2 tasks reject Plan version 1 submissions. A guarded upgrade
+preserves an authoritative historical Plan version 1, its digest, evidence, and
+item protocol until actual approval of a new Plan version 2. Every new or changed
+Plan under control version 2 must explicitly declare semantic version 2; upgrade
+itself does not create revised user approval.
+Plans declare exact file ownership, item owners, interface contracts, actions,
+and observable checks. A `contract` dependency waits for accepted interface
+semantics and can permit disjoint concurrent implementation. An `implementation`
+dependency waits for accepted producer behavior. An `integration` dependency
+concerns composition/integration testing: disjoint implementation can proceed,
+but submission/acceptance needs accepted producer evidence and a current durable
+composition check. Git publication remains a separate lifecycle boundary.
+
+`worker-assign`, `worker-activate`, and `worker-settle` retain the authorized role,
+actual native activation identity, and observed terminal result/cleanup. The
+DeepSeek workflow wrapper accepts the existing `assignment_id` and strips it
+before native delegation. Its original native provider policy stays in effect.
+
+At implementation start, `goal-request` records the goal request; discover the
+host's actual native capability and record its exact receipt with `goal-observe`.
+Unavailable support stays request-only. The native goal covers the implementation
+generation and requests completion after validated generation cleanup; an open
+long-running Task or Run has its own lifecycle. Pause requires explicit actual
+user `goal_pause_authorization` on reentry or an actual goal request. An unknown
+found by the agent does not itself authorize a pause. Native goal, task, item, integration,
+Run, and resource lifecycles are independent; one accepted source can support
+multiple separately frozen Runs. Ordinary in-scope repairs reuse valid approval.
+
 ## Review, integrate, and freeze
 
 The coordinator explores and records an approved design and plan, delegates
 implementation, reviews actual changes and evidence, and accepts the complete
-deliverable. A task reviewer returns separate requirements and quality verdicts
-for each item; an overall reviewer checks the complete result.
+deliverable. Each implementer returns self-test evidence, then a distinct independent
+requirements reviewer checks the complete requirement ledger, then a distinct
+independent quality reviewer checks the same current change. The main agent
+performs final acceptance across the deliverable. Historical control-version-1
+records retain their existing review contract until an authorized
+`workflow-control-upgrade`. No separate mandatory verifier activation is added.
+After dispatch, the coordinator waits for actual terminal results and cleanup;
+program guards reject coordinator execution mutations while assigned or active
+workers remain pending. This does not intercept arbitrary host file writes.
 Each item follows `pending -> implementing -> reviewing -> complete`. Failed
 review returns the item to `implementing`.
 
@@ -277,7 +330,7 @@ review returns the item to `implementing`.
 flowchart LR
   A[Current main] --> B[Owned worktree generation]
   B --> C[Implement and developmental verification]
-  C --> D[Independent item and overall reviews]
+  C --> D[Requirements review then quality review then main acceptance]
   D --> E[One authorized squash commit]
   E --> F[Verify integrated revision]
   F --> G[Freeze Run inputs and validate startup]
@@ -296,7 +349,7 @@ runs. Integration requires a clean base by default. An authorized integration
 can preserve unrelated dirty tracked work through a preview-bound preservation
 digest, then verify the exact integrated commit in a detached checkout and
 freeze Run inputs from that commit's Git objects. A formal Run needs accepted
-implementation and overall review, a verified integrated source, frozen inputs,
+implementation, sequential independent reviews and main acceptance, a verified integrated source, frozen inputs,
 its own successful startup validation, reference checks, and a valid cleanup
 proof for that source before guarded dispatch. A later Run can reuse the already
 cleaned integrated source and its accepted review and integration evidence; it
@@ -304,7 +357,7 @@ still gets its own frozen Run and startup validation. Recreate a worktree only
 for an authorized source-changing fix. After cleanup, explicitly pass
 `reuse_approved_plan:true` to `worktree-prepare` while the approved Spec and
 Plan remain unchanged; the existing Plan approval applies. The fix still needs
-normal implementation, item review, and overall review. Changes to confirmed
+normal implementation, independent requirements and quality review, and main acceptance. Changes to confirmed
 scope, acceptance, or Plan require normal reentry and revised approvals.
 Cleanup removes only the owned checkout after checking source and references;
 it preserves earlier Runs, frozen inputs, artifacts, and evidence. Recognized

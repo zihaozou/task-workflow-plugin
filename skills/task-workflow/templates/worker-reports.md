@@ -10,6 +10,8 @@ authorized. A blocked report includes the exact missing fact and next action.
 ```text
 Scope and source revisions:
 Observed facts: [fact | source | observation]
+Feasibility probes: [question | exact inputs | actual versions | procedure | pass/refute criterion | observed result | evidence]
+Performance/cost/reuse model when relevant: [measurement or estimate | assumptions | reuse/recompute boundary | evidence]
 Unknowns: [question | why it matters | next check]
 Consequences for requirements or design:
 Suggested next action:
@@ -48,19 +50,21 @@ Deviations or open choices:
 Handoff state: ready for review | blocked
 ```
 
-## Task review report
+## Independent item review report
 
 ```text
 Plan item and change revision reviewed:
-Requirements verdict: pass | fail | blocked
+Assigned role and actor:
+Current revision and preceding accepted evidence:
+Requirements verdict: pass | fail | blocked (requirements reviewer only)
 Requirements evidence: [ID | verdict | change evidence | verification evidence]
-Quality verdict: pass | fail | blocked
+Quality verdict: pass | fail | blocked (quality reviewer only)
 Quality findings: [severity | file location | observed consequence | evidence | fix]
 Missing behavior or verification, including any confirmed requirement omitted from coverage:
 Required remediation to restore complete goal coverage:
 ```
 
-## Overall review report
+## Main acceptance report
 
 ```text
 Complete change revision and plan reviewed:
@@ -69,7 +73,7 @@ Item quality verdict references:
 Cross-item checks and evidence:
 Complete confirmed-goal and requirement coverage:
 Design and plan alignment:
-Verdict: pass | fail | blocked
+Main acceptance: pass | fail | blocked
 Remaining work or material limitation:
 ```
 

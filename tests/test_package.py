@@ -19,7 +19,7 @@ SCRIPTS = ROOT / 'skills/task-workflow/scripts'
 NATIVE_RELEASE_FILES = {
     'README.md', 'package.json', 'adapters/deepseek/index.js',
     'adapters/deepseek/cordis.patch.yml', 'adapters/deepseek/delegation.js',
-    'adapters/deepseek/recovery.js', 'hooks/hooks.json',
+    'adapters/deepseek/recovery.js', 'adapters/deepseek/workflow-ledger.js', 'hooks/hooks.json',
     'skills/task-workflow/SKILL.md', 'skills/task-workflow/agents/openai.yaml',
     'skills/task-workflow/references/workflow.md',
     'assets/icon.svg', 'assets/icon.png',
@@ -27,7 +27,7 @@ NATIVE_RELEASE_FILES = {
     'skills/task-workflow/references/communication_policy.md',
 } | {'skills/task-workflow/scripts/' + name for name in (
     'bootstrap.py', 'workflow.py', 'runner.py', 'mcp_server.py', 'session_hook.py',
-    'communication_prompt_hook.py', 'communication_policy.py', 'deepseek_context.py',
+    'communication_prompt_hook.py', 'communication_policy.py', 'deepseek_context.py', 'process_contracts.py',
 )} | {'skills/task-workflow/templates/' + name for name in (
     'README.md', 'phases.md', 'conversation.md', 'record.md',
     'worker-briefs.md', 'worker-reports.md', 'spec.md', 'plan.md',
@@ -42,7 +42,7 @@ class PackageTests(unittest.TestCase):
         self.assertFalse((ROOT / 'plugin.json').exists())
         manifest = json.loads((ROOT / '.codex-plugin/plugin.json').read_text())
         self.assertEqual(manifest['name'], 'task-workflow')
-        self.assertEqual(manifest['version'], '0.1.21')
+        self.assertEqual(manifest['version'], '0.1.22')
         self.assertNotIn('license', manifest)
         self.assertEqual(manifest['hooks'], './hooks/hooks.json')
         interface = manifest['interface']
@@ -86,7 +86,7 @@ class PackageTests(unittest.TestCase):
         self.assertEqual(len(packages), 1)
         package = packages[0]
         self.assertEqual(package['name'], '@local/task-workflow')
-        self.assertEqual(package['version'], '0.1.21')
+        self.assertEqual(package['version'], '0.1.22')
         paths = [entry['path'] for entry in package['files']]
         self.assertEqual(len(paths), len(set(paths)))
         self.assertEqual(set(paths), NATIVE_RELEASE_FILES)
@@ -263,7 +263,7 @@ class PackageTests(unittest.TestCase):
                      'Design draft and independent gap review', 'User design approval',
                      'Implementation plan and user plan approval',
                      'Delegated implementation and item review',
-                     'Overall review and integration', 'Optional experiments and delivery'):
+                     'Main acceptance and integration', 'Optional experiments and delivery'):
             section = phases.split('## ' + name + '\n', 1)[1].split('\n## ', 1)[0]
             for field in ('INPUT:', 'CONVERSATION:', 'WRITE:', 'EXIT:', 'RETURN:'):
                 self.assertIn(field, section, f'{name}: {field}')
@@ -276,7 +276,7 @@ class PackageTests(unittest.TestCase):
                                     'Delivery', 'Decision history'])
         brief = (base / 'worker-briefs.md').read_text()
         for role in ('Coordinator', 'Explorer', 'Design reviewer', 'Implementer',
-                     'Task reviewer', 'Overall reviewer'):
+                     'Independent item reviewers', 'Main-agent acceptance'):
             self.assertIn('## ' + role + '\n\n```text', brief)
         reports = (base / 'worker-reports.md').read_text()
         self.assertIn('Requirements verdict:', reports)

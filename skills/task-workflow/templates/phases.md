@@ -2,7 +2,7 @@
 
 For each applicable phase, check INPUT before action, follow CONVERSATION in
 order, use the program operation in WRITE, honor WAIT, meet EXIT before advancing,
-and pass RETURN to the next phase. The main skill contains the mandatory sequence.
+and pass RETURN to the next phase. The main skill defines source-backed approval boundaries; apply only the phases required by current facts.
 Use the bold stage labels, grouped bullets/tables, and separate final question
 in [conversation.md](conversation.md). Omit empty optional presentation groups.
 A direct status or ordinary reply does not advance a phase. The live operation
@@ -35,6 +35,10 @@ approval, implementation, and final review.
 - INPUT: Recorded intent and project access.
 - CONVERSATION: Report observed behavior, evidence, and meaningful unknowns.
 - WRITE: `process-exploration` with current behavior, evidence, and unknowns.
+  Delegate bounded exploration and resolve consequential feasibility before Spec.
+  Use an exploration worktree and `feas-check` when execution is needed; record
+  question, exact inputs, actual versions, criterion, result, and retained evidence.
+  A failed/refuted probe remains evidence; it is not a formal Run or acceptance.
 - WAIT: Record the next question before sending it; wait for its answer.
 - EXIT: Enough facts to ask the next useful design question or explain which
   evidence is still needed.
@@ -125,17 +129,17 @@ approval, implementation, and final review.
 - WRITE: Record item state, brief reference, change revision, test evidence,
   separate requirements verdict, separate quality verdict, and remediation in
   `Execution and review` through current program operations.
-- WAIT: Await worker evidence and independent verdicts. A new important unknown
+- WAIT: Await actual worker settlement/cleanup, then requirements review, then distinct quality review. The coordinator does not code in parallel. A new important unknown
   outside approved scope requires recorded reentry and a user answer.
 - EXIT: Every item passes both reviews on its current change revision, and the
-  overall review confirms complete source-backed requirement coverage.
-- RETURN: Complete item evidence and diff references for overall review.
+  main acceptance confirms complete source-backed requirement coverage.
+- RETURN: Complete item evidence and diff references for main acceptance.
 
-## Overall review and integration
+## Main acceptance and integration
 
 - INPUT: Passing item verdicts, complete diff, approved design and plan.
 - CONVERSATION: Report cross-item findings and the integration action's scope.
-- WRITE: Record the independent overall verdict. Use guarded integration only
+- WRITE: Record the main acceptance verdict. Use guarded integration only
   with its separate authorization source. Create one ordinary squash commit and
   verify the integrated revision. Clean-base integration is the default. When
   preserving unrelated dirty tracked work is authorized, review the preview
@@ -153,8 +157,8 @@ approval, implementation, and final review.
   also use authorized resources. External `check-dispatch` returns exact runner
   arguments to the private controller; direct verify wrappers execute the local
   runner.
-- WAIT: Await the overall verdict and any missing integration authorization.
-- EXIT: Overall review passes and required integration is accepted and proven.
+- WAIT: Await main acceptance and any missing integration authorization.
+- EXIT: Main acceptance passes and required integration is accepted and proven.
 - RETURN: Integrated revision and verification for any dependent runs.
 
 ## Optional experiments and delivery
@@ -189,7 +193,11 @@ the design and plan versions when affected, and obtain new approvals for the
 changed versions. Existing legacy tasks keep their recorded state. Use guarded
 `process-upgrade` only with actual authorization; do not synthesize historical
 questions, playback, or approvals. Existing resource and run evidence stays
-unchanged. Preserve unaffected facts and evidence. Mark affected approvals stale
+unchanged. Preserve unaffected facts and evidence. For semantic plan contract version 2,
+`question.scope` contains the actual affected requirement IDs. The program
+computes affected items and their dependency closure; unchanged semantic scopes
+can retain their approved authority while affected work waits. An empty/global
+scope does not invent independence. Mark affected approvals stale
 when their revision changes; do not reconstruct source history.
 Do not reopen confirmed scope for engineering effort. Preserve confirmed
 requirements across revised lists and worktree generations. Change them only

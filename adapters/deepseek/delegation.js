@@ -29,7 +29,7 @@ function deferred() {
   return { promise, resolve };
 }
 
-export function ownedDelegations(service) {
+export function ownedDelegations(service, ledger) {
   const ownerAbort = new AbortController();
   const records = new Map(), byChild = new Map(), starting = new Map(), handoffs = new Map(), starts = new Set();
   const parents = new Map();
@@ -109,6 +109,33 @@ export function ownedDelegations(service) {
       const record = assertOwner(byChild.get(childId), parent);
       return { kind: 'activation', subagentId: record.handle.childId, handleId: record.id };
     },
+    async bind(childId, parent, assignment) {
+      if (!assignment) return;
+      const record = assertOwner(byChild.get(childId), parent);
+      const activation = { provider: 'deepseek-native', parent_session_id: record.session,
+        child_session_id: record.handle.childId, handle_id: record.id, message_id: record.initialMessageId };
+      try { await ledger.activate(assignment, activation); record.assignment = assignment; }
+      catch (error) {
+        // A start happened. Join exactly that activation before surfacing the
+        // failed binding, rather than leaving an unrecorded worker running.
+        await dispose(record).catch(() => {});
+        const outcome = await record.settlement;
+        record.bindingFailure = { assignment_id: assignment.assignment_id, activation, outcome };
+        throw new Error(`${error.message} Actual canceled activation reconciliation receipt: ${JSON.stringify(record.bindingFailure)}`);
+      }
+    },
+    prepare(parent, assignmentId) {
+      if (assignmentId && !ledger) throw new Error('Task Workflow worker ledger is unavailable.');
+      return ledger?.prepare(parent, assignmentId);
+    },
+    async collect(record, signal) {
+      const outcome = await abortableRead(record.settlement, [signal, parents.get(record.parent)?.abort.signal, ownerAbort.signal]);
+      if (record.assignment) {
+        record.collection ??= Promise.resolve().then(() => ledger.settle(record.assignment, outcome));
+        try { await record.collection; } catch (error) { record.collection = undefined; throw error; }
+      }
+      return outcome;
+    },
     async humanMessages(agent, messages, signal) {
       const pending = starting.get(agent.id);
       if (pending) await abortableRead(pending.publication.promise, [signal, ownerAbort.signal]);
@@ -120,7 +147,7 @@ export function ownedDelegations(service) {
     async wait(handleId, parent, signal) {
       if (closed) throw new Error('Task Workflow delegation is disposing.');
       const record = assertOwner(records.get(handleId), parent);
-      return abortableRead(record.settlement, [signal, parents.get(parent)?.abort.signal, ownerAbort.signal]);
+      return registry.collect(record, signal);
     },
     async cancel(handleId, parent, signal) {
       if (closed) throw new Error('Task Workflow delegation is disposing.');
@@ -129,13 +156,14 @@ export function ownedDelegations(service) {
       // This is explicit cancellation of the exact owned activation, unlike a
       // native interrupt request that preserves queued work and descendants.
       dispose(record).catch(() => {});
-      return abortableRead(record.settlement, [signal, parents.get(parent)?.abort.signal, ownerAbort.signal]);
+      return registry.collect(record, signal);
     },
     context(parent) {
       return [...records.values()].filter(record => record.parent === parent && record.session === sessionId(parent)).map(record => ({
         handleId: record.id, subagentId: record.handle.childId,
         status: record.outcome ? 'settled' : 'pending', cancelRequested: record.cancelRequested === true,
         ...record.outcome ? { cleanup: record.outcome.cleanup } : {},
+        ...(record.bindingFailure ? { binding_failure: record.bindingFailure } : {}),
       }));
     },
     async disposeParent(parent) {
@@ -205,20 +233,30 @@ export function collectionTools(registry) {
   }));
 }
 
-/** Keep native parameter, route, preset and depth policy; change only ownership. */
+function ledgerParameters(parameters) {
+  return { ...parameters, properties: { ...parameters.properties,
+    assignment_id: { type: 'string', minLength: 1,
+      description: 'Existing worker assignment in the current bound task. Required by workflow control version 2; stripped before native delegation.' } } };
+}
+
+/** Preserve native route, preset and depth policy; bind exact observed identity. */
 export function delegationFacades(ctx, registry) {
   const originalByWrapped = new WeakMap();
   const tools = new Proxy(ctx.tools, { get(target, property) {
     if (property === 'register') return definition => {
       if (definition.name !== DELEGATE_TOOL) return target.register(definition);
       const wrapped = { ...definition,
+        parameters: ledgerParameters(definition.parameters),
         description: 'Start a Task Workflow owned native child. Use task_workflow_wait with its handleId before reporting its final result. Use task_workflow_cancel only to cancel that owned activation. Model, preset and depth checks remain native.',
         output: { ...definition.output, schema: { ...definition.output.schema,
           properties: { ...definition.output.schema.properties, handleId: { type: 'string' } },
           required: [...definition.output.schema.required ?? [], 'handleId'],
         }, render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }] },
         async execute(args, exec) {
-          const value = await definition.execute.call(definition, args, exec);
+          const { assignment_id, ...nativeArgs } = args;
+          const assignment = await registry.prepare(exec.agent, assignment_id);
+          const value = await definition.execute.call(definition, nativeArgs, exec);
+          await registry.bind(value.subagentId, exec.agent, assignment);
           return registry.descriptor(value.subagentId, exec.agent);
         },
       };
